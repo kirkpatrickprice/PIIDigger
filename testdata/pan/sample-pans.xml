@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<records>
+	<record>
+		<name>Pandora Fuller</name>
+		<currency>$15.56</currency>
+		<address>Ap #403-6540 Nunc. Avenue</address>
+		<email>donec@outlook.ca</email>
+        <cardnum>4893013335386137</cardnum>
+	</record>
+	<record>
+		<name>Magee Nichols</name>
+		<currency>$38.69</currency>
+		<address>Ap #241-7799 Ornare Avenue</address>
+		<email>cursus.luctus@google.couk</email>
+        <cardnum>5455448149609745</cardnum>
+	</record>
+	<record>
+		<name>Nash Farmer</name>
+		<currency>$94.07</currency>
+		<address>347-3061 Primis Rd.</address>
+		<email>morbi.quis@outlook.org</email>
+        <cardnum>344491743133122</cardnum>
+	</record>
+	<record>
+		<name>Rama Dorsey</name>
+		<currency>$18.57</currency>
+		<address>878-204 Arcu. Street</address>
+		<email>integer.sem.elit@outlook.net</email>
+        <cardnum>6496379518604192136</cardnum>
+	</record>
+	<record>
+		<name>Carlos Wise</name>
+		<currency>$22.99</currency>
+		<address>Ap #349-8919 Et, Rd.</address>
+		<email>semper.erat@google.com</email>
+        <cardnum>353070086880515405</cardnum>
+	</record>
+</records>
