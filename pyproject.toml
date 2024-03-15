@@ -1,0 +1,65 @@
+# [build-system]
+# requires=['hatchling']
+# build-backend = "hatchling.build"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "piidigger"
+version = "1.0.0"
+authors = [
+            {name="Randy Bartels", email="rjbartels@outlook.com"},
+    ]
+description = "Python program to identify Personally Identifiable Information in common file types"
+readme = "README.md"
+keywords = ["pii discovery", "data discovery", "credit card discovery"]
+requires-python = ">=3.9,<4"
+dependencies = ["chardet>=5.2.0",
+                "colorama>=0.4.6",
+                "docx2python>=2.8.0",
+                "openpyxl==3.0.10",
+                "puremagic>=1.20",
+                "pyyaml>=6.0",
+                "tomli>=2.0.1",
+                "wakepy>=0.7.2",
+                "xlrd>=2.0.1",
+                ]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: Utilities",
+    ]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4.4",]
+test = ["pytest>=7.4.4",]
+win = ["pywin32"]
+
+[project.scripts]
+piidigger = "piidigger.piidigger:main"
+getmime = "piidigger.getmime:main"
+getencoding = "piidigger.getencoding:main"
+
+[project.urls]
+Homepage = "https://github.com/kirkpatrickprice/PIIDigger"
+Issues = "https://github.com/kirkpatrickprice/PIIDigger/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# [tool.hatch.build.targets.wheel]
+# packages = ["src/piidigger"]
+
+[tool.pytest.ini_options]
+pythonpath = "src/"
+addopts = ["--import-mode=importlib",]

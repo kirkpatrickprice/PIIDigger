@@ -1,0 +1,4 @@
+citypay-pan-search such as 444000-0000-0000-0002
+citypay-pan-search such as 444000-0000-0000-0002
+AMEX, 372058662412012, 4/2029
+AMEX, 370603443948636, 3/2027
