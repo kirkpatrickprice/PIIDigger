@@ -4,6 +4,7 @@ $zip_file = $bin_dir + "\PIIDigger.zip"
 $build_dir = $bin_dir + "\piidigger"
 $exe_path = $build_dir+"\piidigger.exe"
 $piidigger_options="--onedir --distpath $bin_dir -i $base_dir\piidigger.ico --collect-submodules wakepy piidigger.py"
+$hashes = @("SHA256", "SHA384", "SHA512")
 
 function sign-file {
     param (
@@ -44,7 +45,7 @@ if ($pyi_cmd.Length -eq 0) {
 Write-Status "Using Pyinstaller from $pyi_cmd"
 
 Write-Status "Cleaning up old binaries in $bin_dir"
-Remove-Item $bin_dir -Recurse
+Remove-Item $bin_dir -Recurse -Exclude *.md
 
 Push-Location .\src\piidigger
 
@@ -73,6 +74,13 @@ $archive=@{
 }
 Compress-Archive @archive
 
+Write-Status "Writing hash values"
+foreach ($hash in $hashes) {
+    $hash_path = $bin_dir + "\$hash"
+    (Get-FileHash -Path $zip_file -Algorithm $hash).Hash | Out-File -FilePath $hash_path -Encoding ASCII -NoNewline
+    Write-Status "Hash $hash written to $hash_path"
+}
+
 Write-Status "Cleaning up Build directory"
 Pop-Location
 Remove-Item $build_dir -Recurse
@@ -80,10 +88,10 @@ Remove-Item $build_dir -Recurse
 Write-Status "All done.  Check the $bin_dir directory for updated binaries"
 
 # SIG # Begin signature block
-# MIIfYgYJKoZIhvcNAQcCoIIfUzCCH08CAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# MIIfYwYJKoZIhvcNAQcCoIIfVDCCH1ACAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAXZKxBIbdGgLkd
-# nr58mm91QAdsddTLj03HNYOcCuUqU6CCDOgwggZuMIIEVqADAgECAhAtYLGndXgb
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCA696Rna13vtpkn
+# sgliyAwUCSh2VARLtbrMii/GjCmFYaCCDOgwggZuMIIEVqADAgECAhAtYLGndXgb
 # zFvzMEdBS+SKMA0GCSqGSIb3DQEBCwUAMHgxCzAJBgNVBAYTAlVTMQ4wDAYDVQQI
 # DAVUZXhhczEQMA4GA1UEBwwHSG91c3RvbjERMA8GA1UECgwIU1NMIENvcnAxNDAy
 # BgNVBAMMK1NTTC5jb20gQ29kZSBTaWduaW5nIEludGVybWVkaWF0ZSBDQSBSU0Eg
@@ -152,25 +160,25 @@ Write-Status "All done.  Check the $bin_dir directory for updated binaries"
 # up516eDap8nMLDt7TAp4z5T3NmC2gzyKVMtODWgqlBF1JhTqIDfM63kXdlV4cW3i
 # STgzN9vkbFnHI2LmvM4uVEv9XgMqyN0eS3FE0HU+MWJliymm7STheh2ENH+kF3y0
 # rH0/NVjLw78a3Z9UVm1F5VPziIorMaPKPlDRADTsJwjDZ8Zc6Gi/zy4WZbg8Zv87
-# spWrmo2dzJTw7XhQf+xkR6OdMYIR0DCCEcwCAQEwgYwweDELMAkGA1UEBhMCVVMx
+# spWrmo2dzJTw7XhQf+xkR6OdMYIR0TCCEc0CAQEwgYwweDELMAkGA1UEBhMCVVMx
 # DjAMBgNVBAgMBVRleGFzMRAwDgYDVQQHDAdIb3VzdG9uMREwDwYDVQQKDAhTU0wg
 # Q29ycDE0MDIGA1UEAwwrU1NMLmNvbSBDb2RlIFNpZ25pbmcgSW50ZXJtZWRpYXRl
 # IENBIFJTQSBSMQIQLWCxp3V4G8xb8zBHQUvkijANBglghkgBZQMEAgEFAKB8MBAG
 # CisGAQQBgjcCAQwxAjAAMBkGCSqGSIb3DQEJAzEMBgorBgEEAYI3AgEEMBwGCisG
-# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqGSIb3DQEJBDEiBCCC5HL6bjUL
-# C5iH0FDZzo4yK2muJtPtwlzAP4TiWzq+XzANBgkqhkiG9w0BAQEFAASCAYBw2pNd
-# M6xRdaNW2bBdzK0VskPcW1Z15NMfA56C5Eg9cHNwg/ROq11OEJ1NF+EN6esDLLSf
-# yZmGLvZYiYVFQeF9eL4yMkQxwVCbHZz5u1wKWUQWaCr9UEsg359Nu5P+cdO95tww
-# Om2VThgbUb5ohrVyFSK1uFMqFexISjZ9UoqarEch0CL+69RFesDs41/lkQz/qLDh
-# 5Gle38xAD8A7Les3WmALoeCNdaonBEOjx8zr/Y6MuLIqxc9/shl7PKqurqyCV0Ig
-# cWHS8ZVWVAmlw/MLNh6GQYyMsfJxARiHw3ehg+g+2oCxnbKFwebz4+OYcZ+Lcti6
-# kEnI+OIq13tH3QDDxcf4vDSXxeqVILYjcJp/fHvz3QgBdkQhVIqmj+n5qFiH5h0d
-# U6GcNE3OOf3EqbCIIZq0q8U2ygCV1K4UCXDj28JmhVcmkQ2Nkw8c5DCZ4cFMIQb7
-# 4kwVWqgnZOOYbUK6rge5H/la8U7TO1qCQcQTvc5cE3QK4SiZxsYfZpTaAhGhgg8W
-# MIIPEgYKKwYBBAGCNwMDATGCDwIwgg7+BgkqhkiG9w0BBwKggg7vMIIO6wIBAzEN
+# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqGSIb3DQEJBDEiBCD6U9NM2b9d
+# RzDEWzM5tzFZlDCikXgDigdVlzS9j1glBjANBgkqhkiG9w0BAQEFAASCAYCGwmY9
+# euO227pkNrwLUBQ3ry9BRjgnZEB9uJwl1cIWCFecJqt+U6JbuVDEPrNyQ73D4CfD
+# c0nOqgdMlxCL0UNLRTdV0eHPC68JujEHr+Y5Cm0XZu2dDhZtWIBnW3kMqQZ/fzBI
+# fj04N/PWHkF4tDSKvMaA4Zh7qzsVRC2v0r/KD0uqQtxFEHGe250Xk2Apl2UaoK8n
+# AMLxdwn1cw/PxCi6+zJaxm5o+DsbZnukm8W2T0OS+Yb4Fq2OzHceTSmeZdgmccC1
+# gIi3TjwA4DBh73+j4Jjl2yZCyMv0VoRYc+Ew1xgx5rEHK0bZ3hW5nW61/JREQo39
+# f2Xd4LM0WGwmMB3KqoNtUKcjjTLNMexB8D9VCQgaYb+UiCwaauLPtveG0vpZJ7nu
+# 4K4dZl+kgeDyQS3jeMmGFMlnMXHRiZQwm9pBA79Q52oGkDGW1pVdsM5enHimXHJK
+# xBmk3BWwjWdvCx6wzTi6qFiEuLTOtgCrlPwnT4yvkCSTGQigqALzn8+mZDahgg8X
+# MIIPEwYKKwYBBAGCNwMDATGCDwMwgg7/BgkqhkiG9w0BBwKggg7wMIIO7AIBAzEN
 # MAsGCWCGSAFlAwQCATB3BgsqhkiG9w0BCRABBKBoBGYwZAIBAQYMKwYBBAGCqTAB
-# AwYBMDEwDQYJYIZIAWUDBAIBBQAEIBmPxJ97+pxsLW1Xsp9UEzAKOK051sFh42QB
-# 7y3oCXAOAggrh5egJbAZyhgPMjAyNDAzMjYxOTE3MTBaMAMCAQGgggwAMIIE/DCC
+# AwYBMDEwDQYJYIZIAWUDBAIBBQAEINosA6GpqVT8hEiY6SK6ShaQbYlWc/VMv7N6
+# oivZszsqAghYxucyhExQkhgPMjAyNDAzMjYyMDI2MDhaMAMCAQGgggwAMIIE/DCC
 # AuSgAwIBAgIQWlqs6Bo1brRiho1XfeA9xzANBgkqhkiG9w0BAQsFADBzMQswCQYD
 # VQQGEwJVUzEOMAwGA1UECAwFVGV4YXMxEDAOBgNVBAcMB0hvdXN0b24xETAPBgNV
 # BAoMCFNTTCBDb3JwMS8wLQYDVQQDDCZTU0wuY29tIFRpbWVzdGFtcGluZyBJc3N1
@@ -234,18 +242,18 @@ Write-Status "All done.  Check the $bin_dir directory for updated binaries"
 # 0BaMqTa6LWzWItgBjGcObXeMxmbQqlEz2YtAcErkZvh0WABDDE4U8GyV/32FdaAv
 # JgTfe9MiL2nSBioYe/g5mHUSWAay/Ip1RQmQCvmF9sNfqlhJwkjy/1U1ibUkTIUB
 # X3HgymyQvqQTZLLys6pL2tCdWcjI9YuLw30rgZm8+K387L7ycUvqrmQ3ZJlujHl3
-# r1hgV76s3WwMPgKk1bAEFMj+rRXimSC+Ev30hXZdqyMdl/il5Ksd0vhGMYICWDCC
-# AlQCAQEwgYcwczELMAkGA1UEBhMCVVMxDjAMBgNVBAgMBVRleGFzMRAwDgYDVQQH
+# r1hgV76s3WwMPgKk1bAEFMj+rRXimSC+Ev30hXZdqyMdl/il5Ksd0vhGMYICWTCC
+# AlUCAQEwgYcwczELMAkGA1UEBhMCVVMxDjAMBgNVBAgMBVRleGFzMRAwDgYDVQQH
 # DAdIb3VzdG9uMREwDwYDVQQKDAhTU0wgQ29ycDEvMC0GA1UEAwwmU1NMLmNvbSBU
 # aW1lc3RhbXBpbmcgSXNzdWluZyBSU0EgQ0EgUjECEFparOgaNW60YoaNV33gPccw
 # CwYJYIZIAWUDBAIBoIIBYTAaBgkqhkiG9w0BCQMxDQYLKoZIhvcNAQkQAQQwHAYJ
-# KoZIhvcNAQkFMQ8XDTI0MDMyNjE5MTcxMFowKAYJKoZIhvcNAQk0MRswGTALBglg
-# hkgBZQMEAgGhCgYIKoZIzj0EAwIwLwYJKoZIhvcNAQkEMSIEIGWkF/Yy5LcOXtQr
-# oB1MfGpFId7Jw4uUOYRdfFazE3vvMIHJBgsqhkiG9w0BCRACLzGBuTCBtjCBszCB
+# KoZIhvcNAQkFMQ8XDTI0MDMyNjIwMjYwOFowKAYJKoZIhvcNAQk0MRswGTALBglg
+# hkgBZQMEAgGhCgYIKoZIzj0EAwIwLwYJKoZIhvcNAQkEMSIEIN7EXkg8U0ljskBt
+# g/LS7zP5/kEOUZLob9fF6LhVM0uoMIHJBgsqhkiG9w0BCRACLzGBuTCBtjCBszCB
 # sAQgnXF/jcI3ZarOXkqw4fV115oX1Bzu2P2v7wP9Pb2JR+cwgYswd6R1MHMxCzAJ
 # BgNVBAYTAlVTMQ4wDAYDVQQIDAVUZXhhczEQMA4GA1UEBwwHSG91c3RvbjERMA8G
 # A1UECgwIU1NMIENvcnAxLzAtBgNVBAMMJlNTTC5jb20gVGltZXN0YW1waW5nIElz
-# c3VpbmcgUlNBIENBIFIxAhBaWqzoGjVutGKGjVd94D3HMAoGCCqGSM49BAMCBEcw
-# RQIhAJZD66VWO+R1Fh/K4Tvebu5vZrEEqctpwW+8NMWVIqyqAiA/ACo94p3yi3e5
-# JpyDnA84fgU3etpkKHnSQliEhDWP0A==
+# c3VpbmcgUlNBIENBIFIxAhBaWqzoGjVutGKGjVd94D3HMAoGCCqGSM49BAMCBEgw
+# RgIhAMCDIDOV8ysCqDRTfjfe5AghgnMwOE1Bb32CoHBSBJfMAiEA9Y81otQoAXGW
+# vRBwsrntjmEn8No45JP1HvB2mQFlDuY=
 # SIG # End signature block
