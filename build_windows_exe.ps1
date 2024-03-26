@@ -1,3 +1,38 @@
+<#
+.SYNOPSIS
+    A Windows PowerShell script that builds a standalone Windows PIIDigger executable
+.DESCRIPTION
+    This script packages a Python runtime environment and related PIIDigger application code into a standalone (doesn't need a Python installation) program for distribution.
+
+    NOTE: This script is signed by KirkpatrickPrice using an Authenticode signature.  Use "Get-AuthenticodeSignature .\kpadaudit.ps1" to confirm the validity of the signature.
+.PARAMETER NoCodeSign
+    Skip the step for signing PIIDigger.exe with the KP code signing certificate.
+
+.EXAMPLE
+    Default run without any parameters.
+    
+    .\build_windows_exe.ps1
+
+.EXAMPLE
+    Skipping the code signing step
+
+    .\build_windows_exe.ps1 -NoCodeSign
+
+    This will produce a functioning piidigger.exe, but it will not be digitally signed.
+
+.LINK
+    https://github.com/kirkpatrickprice/PIIDigger
+
+.NOTES
+    Author: Randy Bartels
+    Official location:  https://github.com/kirkpatrickprice/PIIDigger
+    Bug reports:        https://github.com/kirkpatrickprice/PIIDigger/issues 
+#>
+
+param(
+    [switch]$NoCodeSign
+)
+
 $base_dir=(Get-Location).Path
 $bin_dir = $base_dir + "\binaries\windows"
 $zip_file = $bin_dir + "\PIIDigger.zip"
@@ -57,13 +92,17 @@ Remove-Item build\, *.spec -Recurse
 
 Pop-Location
 
-Write-Status "Signing PIIDigger.exe"
-Push-Location $build_dir
-if (Test-Path $exe_path -PathType Leaf) {
-    sign-file -file "piidigger.exe"
+if ($NoCodeSign) {
+    Write-Status "Skipping Code Signing Step"
 } else {
-    Write-Status "PIIDigger.exe does not appear to have been built properly."
-    exit
+    Write-Status "Signing PIIDigger.exe"
+    Push-Location $build_dir
+    if (Test-Path $exe_path -PathType Leaf) {
+        sign-file -file "piidigger.exe"
+    } else {
+        Write-Status "PIIDigger.exe does not appear to have been built properly."
+        exit
+    }
 }
 
 Write-Status "Creating PIIDIgger.zip"
@@ -88,10 +127,10 @@ Remove-Item $build_dir -Recurse
 Write-Status "All done.  Check the $bin_dir directory for updated binaries"
 
 # SIG # Begin signature block
-# MIIfYwYJKoZIhvcNAQcCoIIfVDCCH1ACAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# MIIfYQYJKoZIhvcNAQcCoIIfUjCCH04CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCA696Rna13vtpkn
-# sgliyAwUCSh2VARLtbrMii/GjCmFYaCCDOgwggZuMIIEVqADAgECAhAtYLGndXgb
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDs5zbK7n5I3a4F
+# UY3BV7cVOLXu3wDCkCwEyvcDTmPQ/6CCDOgwggZuMIIEVqADAgECAhAtYLGndXgb
 # zFvzMEdBS+SKMA0GCSqGSIb3DQEBCwUAMHgxCzAJBgNVBAYTAlVTMQ4wDAYDVQQI
 # DAVUZXhhczEQMA4GA1UEBwwHSG91c3RvbjERMA8GA1UECgwIU1NMIENvcnAxNDAy
 # BgNVBAMMK1NTTC5jb20gQ29kZSBTaWduaW5nIEludGVybWVkaWF0ZSBDQSBSU0Eg
@@ -160,25 +199,25 @@ Write-Status "All done.  Check the $bin_dir directory for updated binaries"
 # up516eDap8nMLDt7TAp4z5T3NmC2gzyKVMtODWgqlBF1JhTqIDfM63kXdlV4cW3i
 # STgzN9vkbFnHI2LmvM4uVEv9XgMqyN0eS3FE0HU+MWJliymm7STheh2ENH+kF3y0
 # rH0/NVjLw78a3Z9UVm1F5VPziIorMaPKPlDRADTsJwjDZ8Zc6Gi/zy4WZbg8Zv87
-# spWrmo2dzJTw7XhQf+xkR6OdMYIR0TCCEc0CAQEwgYwweDELMAkGA1UEBhMCVVMx
+# spWrmo2dzJTw7XhQf+xkR6OdMYIRzzCCEcsCAQEwgYwweDELMAkGA1UEBhMCVVMx
 # DjAMBgNVBAgMBVRleGFzMRAwDgYDVQQHDAdIb3VzdG9uMREwDwYDVQQKDAhTU0wg
 # Q29ycDE0MDIGA1UEAwwrU1NMLmNvbSBDb2RlIFNpZ25pbmcgSW50ZXJtZWRpYXRl
 # IENBIFJTQSBSMQIQLWCxp3V4G8xb8zBHQUvkijANBglghkgBZQMEAgEFAKB8MBAG
 # CisGAQQBgjcCAQwxAjAAMBkGCSqGSIb3DQEJAzEMBgorBgEEAYI3AgEEMBwGCisG
-# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqGSIb3DQEJBDEiBCD6U9NM2b9d
-# RzDEWzM5tzFZlDCikXgDigdVlzS9j1glBjANBgkqhkiG9w0BAQEFAASCAYCGwmY9
-# euO227pkNrwLUBQ3ry9BRjgnZEB9uJwl1cIWCFecJqt+U6JbuVDEPrNyQ73D4CfD
-# c0nOqgdMlxCL0UNLRTdV0eHPC68JujEHr+Y5Cm0XZu2dDhZtWIBnW3kMqQZ/fzBI
-# fj04N/PWHkF4tDSKvMaA4Zh7qzsVRC2v0r/KD0uqQtxFEHGe250Xk2Apl2UaoK8n
-# AMLxdwn1cw/PxCi6+zJaxm5o+DsbZnukm8W2T0OS+Yb4Fq2OzHceTSmeZdgmccC1
-# gIi3TjwA4DBh73+j4Jjl2yZCyMv0VoRYc+Ew1xgx5rEHK0bZ3hW5nW61/JREQo39
-# f2Xd4LM0WGwmMB3KqoNtUKcjjTLNMexB8D9VCQgaYb+UiCwaauLPtveG0vpZJ7nu
-# 4K4dZl+kgeDyQS3jeMmGFMlnMXHRiZQwm9pBA79Q52oGkDGW1pVdsM5enHimXHJK
-# xBmk3BWwjWdvCx6wzTi6qFiEuLTOtgCrlPwnT4yvkCSTGQigqALzn8+mZDahgg8X
-# MIIPEwYKKwYBBAGCNwMDATGCDwMwgg7/BgkqhkiG9w0BBwKggg7wMIIO7AIBAzEN
+# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqGSIb3DQEJBDEiBCBKAaffAQyX
+# aly7e0lowTi69k3/j4YbTPD1rCz/Wt7kjzANBgkqhkiG9w0BAQEFAASCAYABoACv
+# uKLDWMkeDlHBRReGSk7PftQoxW4hvz4n441KmTv15IlAnxwlP0fEUxzia6HH+9NW
+# YhG6NmM0kV097gmlI8XTyQG/aeSwhJuvvNpxuzJlWqKRud7BC/0UDAgvY4hEnc94
+# kGtBbTQv45n2FMNi2L4bvV8q720UsvKzU6S/Ac8tgfecIbMrQsCRwiUABvRDyWEF
+# abgcm2aDIIcQFbpBo1z9bHUjBGcc3VpWG5cULvt1lzCEwxf0d68bZXBLGR3GVLYO
+# BCpq7+EDgAYbnErg8G7MW9cB6wDEsJU+s0o7rVmjivfUSHIHBch+smb+2MPCAG8p
+# 9zdB/CE+3vAsB2PcWw4Mfw41qadMMyEX9Ywfh2yK+AzTIgHs4AQovx3pvMbV0R7V
+# G8HxqBOBcXghjbt+e93SFcs5ohQXFtpfOJEksxWxxyCtUGbA26U0KdfpgP3L7lyH
+# +8TpZ0LasclpaiR7TsPYg+5fW4GF4Dpw//o0tqheiv49nmYKN4ctMeVX+56hgg8V
+# MIIPEQYKKwYBBAGCNwMDATGCDwEwgg79BgkqhkiG9w0BBwKggg7uMIIO6gIBAzEN
 # MAsGCWCGSAFlAwQCATB3BgsqhkiG9w0BCRABBKBoBGYwZAIBAQYMKwYBBAGCqTAB
-# AwYBMDEwDQYJYIZIAWUDBAIBBQAEINosA6GpqVT8hEiY6SK6ShaQbYlWc/VMv7N6
-# oivZszsqAghYxucyhExQkhgPMjAyNDAzMjYyMDI2MDhaMAMCAQGgggwAMIIE/DCC
+# AwYBMDEwDQYJYIZIAWUDBAIBBQAEILzByttEcXszKw7ViSdFi2+gqdUdjbeQZ/zv
+# nVNmd0w4AghWrkQkHnVFVhgPMjAyNDAzMjYyMTE0NTVaMAMCAQGgggwAMIIE/DCC
 # AuSgAwIBAgIQWlqs6Bo1brRiho1XfeA9xzANBgkqhkiG9w0BAQsFADBzMQswCQYD
 # VQQGEwJVUzEOMAwGA1UECAwFVGV4YXMxEDAOBgNVBAcMB0hvdXN0b24xETAPBgNV
 # BAoMCFNTTCBDb3JwMS8wLQYDVQQDDCZTU0wuY29tIFRpbWVzdGFtcGluZyBJc3N1
@@ -242,18 +281,18 @@ Write-Status "All done.  Check the $bin_dir directory for updated binaries"
 # 0BaMqTa6LWzWItgBjGcObXeMxmbQqlEz2YtAcErkZvh0WABDDE4U8GyV/32FdaAv
 # JgTfe9MiL2nSBioYe/g5mHUSWAay/Ip1RQmQCvmF9sNfqlhJwkjy/1U1ibUkTIUB
 # X3HgymyQvqQTZLLys6pL2tCdWcjI9YuLw30rgZm8+K387L7ycUvqrmQ3ZJlujHl3
-# r1hgV76s3WwMPgKk1bAEFMj+rRXimSC+Ev30hXZdqyMdl/il5Ksd0vhGMYICWTCC
-# AlUCAQEwgYcwczELMAkGA1UEBhMCVVMxDjAMBgNVBAgMBVRleGFzMRAwDgYDVQQH
+# r1hgV76s3WwMPgKk1bAEFMj+rRXimSC+Ev30hXZdqyMdl/il5Ksd0vhGMYICVzCC
+# AlMCAQEwgYcwczELMAkGA1UEBhMCVVMxDjAMBgNVBAgMBVRleGFzMRAwDgYDVQQH
 # DAdIb3VzdG9uMREwDwYDVQQKDAhTU0wgQ29ycDEvMC0GA1UEAwwmU1NMLmNvbSBU
 # aW1lc3RhbXBpbmcgSXNzdWluZyBSU0EgQ0EgUjECEFparOgaNW60YoaNV33gPccw
 # CwYJYIZIAWUDBAIBoIIBYTAaBgkqhkiG9w0BCQMxDQYLKoZIhvcNAQkQAQQwHAYJ
-# KoZIhvcNAQkFMQ8XDTI0MDMyNjIwMjYwOFowKAYJKoZIhvcNAQk0MRswGTALBglg
-# hkgBZQMEAgGhCgYIKoZIzj0EAwIwLwYJKoZIhvcNAQkEMSIEIN7EXkg8U0ljskBt
-# g/LS7zP5/kEOUZLob9fF6LhVM0uoMIHJBgsqhkiG9w0BCRACLzGBuTCBtjCBszCB
+# KoZIhvcNAQkFMQ8XDTI0MDMyNjIxMTQ1NVowKAYJKoZIhvcNAQk0MRswGTALBglg
+# hkgBZQMEAgGhCgYIKoZIzj0EAwIwLwYJKoZIhvcNAQkEMSIEIDjaaEf9kdEAzmdR
+# Kj/ZtkLhTBR0Cq5mabFfZdc377ajMIHJBgsqhkiG9w0BCRACLzGBuTCBtjCBszCB
 # sAQgnXF/jcI3ZarOXkqw4fV115oX1Bzu2P2v7wP9Pb2JR+cwgYswd6R1MHMxCzAJ
 # BgNVBAYTAlVTMQ4wDAYDVQQIDAVUZXhhczEQMA4GA1UEBwwHSG91c3RvbjERMA8G
 # A1UECgwIU1NMIENvcnAxLzAtBgNVBAMMJlNTTC5jb20gVGltZXN0YW1waW5nIElz
-# c3VpbmcgUlNBIENBIFIxAhBaWqzoGjVutGKGjVd94D3HMAoGCCqGSM49BAMCBEgw
-# RgIhAMCDIDOV8ysCqDRTfjfe5AghgnMwOE1Bb32CoHBSBJfMAiEA9Y81otQoAXGW
-# vRBwsrntjmEn8No45JP1HvB2mQFlDuY=
+# c3VpbmcgUlNBIENBIFIxAhBaWqzoGjVutGKGjVd94D3HMAoGCCqGSM49BAMCBEYw
+# RAIgNcKnLM2frkbZkn6saThuCy1cnixPZrYA71h6gHaFitsCIGmGl0iuzyy3A07X
+# XPvUUj0dso4iwhCguDVMf0LQuVf5
 # SIG # End signature block
