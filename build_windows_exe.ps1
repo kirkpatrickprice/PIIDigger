@@ -1,16 +1,36 @@
 $base_dir=(Get-Location).Path
 $bin_dir = $base_dir + "\binaries\windows"
+$zip_file = $bin_dir + "\PIIDigger.zip"
+$build_dir = $bin_dir + "\piidigger"
+$exe_path = $build_dir+"\piidigger.exe"
+$piidigger_options="--onedir --distpath $bin_dir -i $base_dir\piidigger.ico --collect-submodules wakepy piidigger.py"
 
-$base_options="-F --distpath $bin_dir -i $base_dir\piidigger.ico"
-$piidigger_options=$base_options + " --collect-submodules wakepy piidigger.py"
-$getmime_options=$base_options + " getmime.py"
-$getencoding_options=$base_options + " getencoding.py"
+function sign-file {
+    param (
+        [string]$file
+    )
 
-write-host "Testing if in a Virtual Environment"
+    $fingerprint = "BB28A0694BF3F3C294F462001D7A8C8CE62AF950"
+    $sign_command = "signtool.exe" 
+    $sign_options = "sign /fd SHA256 /tr http://ts.ssl.com /td sha256 /sha1 $fingerprint $file"
+    try {
+        Start-Process -FilePath $sign_command -ArgumentList $sign_options -NoNewWindow -Wait
+    }
+    catch {Write-Status "Error attemptint to sign $file.  Proceeding without signing."}
+}
+
+function Write-Status {
+    param ([string]$text)
+
+    $FG_COLOR = "red"
+    Write-Host $text -ForegroundColor $FG_COLOR
+}
+
+Write-Status "Testing if in a Virtual Environment"
 $pip_version = (pip -V)
 
 if ($pip_version -notlike "*PIIDigger*") {
-    write-host "Start the Virtual Environment first"
+    Write-Status "Start the Virtual Environment first"
     exit
 }
 
@@ -18,36 +38,52 @@ $gc_result = (get-command pyinstaller.exe -ErrorAction SilentlyContinue)
 
 $pyi_cmd=$gc_result.Path
 if ($pyi_cmd.Length -eq 0) {
-    write-host "Couldn't find Pyinstaller on the path.  Make sure it's installed in the Virtual Environment"
+    Write-Status "Couldn't find Pyinstaller on the path.  Make sure it's installed in the Virtual Environment"
     exit
 }    
-write-host "Using Pyinstaller from $pyi_cmd"
+Write-Status "Using Pyinstaller from $pyi_cmd"
 
-Write-Host "Cleaning up old binaries in $bin_dir"
+Write-Status "Cleaning up old binaries in $bin_dir"
 Remove-Item $bin_dir -Recurse
 
 Push-Location .\src\piidigger
 
-write-host "Building piidigger.exe"
+Write-Status "Building piidigger.exe"
 Start-Process -FilePath $pyi_cmd -ArgumentList $piidigger_options -NoNewWindow -Wait
 
-write-host "Building getmime.exe"
-Start-Process -FilePath $pyi_cmd -ArgumentList $getmime_options -NoNewWindow -Wait
-
-write-host "Building getencoding.exe"
-Start-Process -FilePath $pyi_cmd -ArgumentList $getencoding_options -NoNewWindow -Wait
-
-Write-Host "Removing build artifacts"
+Write-Status "Removing build artifacts"
 Remove-Item build\, *.spec -Recurse
 
 Pop-Location
-write-host "All done.  Check the $bin_dir directory for updated binaries"
+
+Write-Status "Signing PIIDigger.exe"
+Push-Location $build_dir
+if (Test-Path $exe_path -PathType Leaf) {
+    sign-file -file "piidigger.exe"
+} else {
+    Write-Status "PIIDigger.exe does not appear to have been built properly."
+    exit
+}
+
+Write-Status "Creating PIIDIgger.zip"
+$archive=@{
+    Path = $bin_dir+"\piidigger\*"
+    CompressionLevel = "Fastest"
+    DestinationPath = $zip_file
+}
+Compress-Archive @archive
+
+Write-Status "Cleaning up Build directory"
+Pop-Location
+Remove-Item $build_dir -Recurse
+
+Write-Status "All done.  Check the $bin_dir directory for updated binaries"
 
 # SIG # Begin signature block
-# MIIfYQYJKoZIhvcNAQcCoIIfUjCCH04CAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# MIIfYgYJKoZIhvcNAQcCoIIfUzCCH08CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDlQMNSFtGe24Hf
-# rwlP5Ze/9r9XxLIF+sE36qUhYqeMIKCCDOgwggZuMIIEVqADAgECAhAtYLGndXgb
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAXZKxBIbdGgLkd
+# nr58mm91QAdsddTLj03HNYOcCuUqU6CCDOgwggZuMIIEVqADAgECAhAtYLGndXgb
 # zFvzMEdBS+SKMA0GCSqGSIb3DQEBCwUAMHgxCzAJBgNVBAYTAlVTMQ4wDAYDVQQI
 # DAVUZXhhczEQMA4GA1UEBwwHSG91c3RvbjERMA8GA1UECgwIU1NMIENvcnAxNDAy
 # BgNVBAMMK1NTTC5jb20gQ29kZSBTaWduaW5nIEludGVybWVkaWF0ZSBDQSBSU0Eg
@@ -116,25 +152,25 @@ write-host "All done.  Check the $bin_dir directory for updated binaries"
 # up516eDap8nMLDt7TAp4z5T3NmC2gzyKVMtODWgqlBF1JhTqIDfM63kXdlV4cW3i
 # STgzN9vkbFnHI2LmvM4uVEv9XgMqyN0eS3FE0HU+MWJliymm7STheh2ENH+kF3y0
 # rH0/NVjLw78a3Z9UVm1F5VPziIorMaPKPlDRADTsJwjDZ8Zc6Gi/zy4WZbg8Zv87
-# spWrmo2dzJTw7XhQf+xkR6OdMYIRzzCCEcsCAQEwgYwweDELMAkGA1UEBhMCVVMx
+# spWrmo2dzJTw7XhQf+xkR6OdMYIR0DCCEcwCAQEwgYwweDELMAkGA1UEBhMCVVMx
 # DjAMBgNVBAgMBVRleGFzMRAwDgYDVQQHDAdIb3VzdG9uMREwDwYDVQQKDAhTU0wg
 # Q29ycDE0MDIGA1UEAwwrU1NMLmNvbSBDb2RlIFNpZ25pbmcgSW50ZXJtZWRpYXRl
 # IENBIFJTQSBSMQIQLWCxp3V4G8xb8zBHQUvkijANBglghkgBZQMEAgEFAKB8MBAG
 # CisGAQQBgjcCAQwxAjAAMBkGCSqGSIb3DQEJAzEMBgorBgEEAYI3AgEEMBwGCisG
-# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqGSIb3DQEJBDEiBCCLK4KOiwD6
-# HdReuJs+zDdlOve1Q1NtmEOtBb34QUQ17TANBgkqhkiG9w0BAQEFAASCAYAhf8CM
-# tGnI9hKeLvmKIDaP1rpx4iZfVeYAaWuKhB2gJuzHepp2//Sp1q1rua6LSVu+pymd
-# IkEYykWCUpKhsbLWjZr3aNiP4EjAcWFT3mAIYZ3DBaxlZzwgxWOh8uOwMMh0o8q5
-# 0tnlL6PdBp5AgF+qORdmRHzzfo8i+gPP6dUaG6ErRK1Iu1ccvSMDETitE7NfQX7B
-# pS6AVRtbi9reduYCrzcK/Yi6hGP/FxbrnQiorQtMFlmZ+3Kn1XjFDOzJrqMC5TOK
-# 1w9SBLpeFkZcV8GjRzkGZceRosVFEF6rXC3Uv3prgffop7DXtO94b9IYe9weOvZM
-# dJfc4zgJ2CjOhqNBexYGaQHc61lOvnXqJh5ezwRdVxYQjcLS5Z9fAw7VpUFNdJw3
-# DjDniWjz+23LZXjmZEooBRJVyQfNG16u5mQ8dc5eMCW7hCl6VO++KwuSejf3JU7L
-# O80kz5d7ud3q2annXiiPNKbmp7r2mr/AVgTJ2Cs5hBt+DikQJ+tKpRu+Jr6hgg8V
-# MIIPEQYKKwYBBAGCNwMDATGCDwEwgg79BgkqhkiG9w0BBwKggg7uMIIO6gIBAzEN
+# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqGSIb3DQEJBDEiBCCC5HL6bjUL
+# C5iH0FDZzo4yK2muJtPtwlzAP4TiWzq+XzANBgkqhkiG9w0BAQEFAASCAYBw2pNd
+# M6xRdaNW2bBdzK0VskPcW1Z15NMfA56C5Eg9cHNwg/ROq11OEJ1NF+EN6esDLLSf
+# yZmGLvZYiYVFQeF9eL4yMkQxwVCbHZz5u1wKWUQWaCr9UEsg359Nu5P+cdO95tww
+# Om2VThgbUb5ohrVyFSK1uFMqFexISjZ9UoqarEch0CL+69RFesDs41/lkQz/qLDh
+# 5Gle38xAD8A7Les3WmALoeCNdaonBEOjx8zr/Y6MuLIqxc9/shl7PKqurqyCV0Ig
+# cWHS8ZVWVAmlw/MLNh6GQYyMsfJxARiHw3ehg+g+2oCxnbKFwebz4+OYcZ+Lcti6
+# kEnI+OIq13tH3QDDxcf4vDSXxeqVILYjcJp/fHvz3QgBdkQhVIqmj+n5qFiH5h0d
+# U6GcNE3OOf3EqbCIIZq0q8U2ygCV1K4UCXDj28JmhVcmkQ2Nkw8c5DCZ4cFMIQb7
+# 4kwVWqgnZOOYbUK6rge5H/la8U7TO1qCQcQTvc5cE3QK4SiZxsYfZpTaAhGhgg8W
+# MIIPEgYKKwYBBAGCNwMDATGCDwIwgg7+BgkqhkiG9w0BBwKggg7vMIIO6wIBAzEN
 # MAsGCWCGSAFlAwQCATB3BgsqhkiG9w0BCRABBKBoBGYwZAIBAQYMKwYBBAGCqTAB
-# AwYBMDEwDQYJYIZIAWUDBAIBBQAEIBwAkQ0j0j3zIn4xbF/KbKnkJ7jmyG+UWhlA
-# Wm2eXB4eAggsNFha7qp+/RgPMjAyNDAzMTQxODQyMzZaMAMCAQGgggwAMIIE/DCC
+# AwYBMDEwDQYJYIZIAWUDBAIBBQAEIBmPxJ97+pxsLW1Xsp9UEzAKOK051sFh42QB
+# 7y3oCXAOAggrh5egJbAZyhgPMjAyNDAzMjYxOTE3MTBaMAMCAQGgggwAMIIE/DCC
 # AuSgAwIBAgIQWlqs6Bo1brRiho1XfeA9xzANBgkqhkiG9w0BAQsFADBzMQswCQYD
 # VQQGEwJVUzEOMAwGA1UECAwFVGV4YXMxEDAOBgNVBAcMB0hvdXN0b24xETAPBgNV
 # BAoMCFNTTCBDb3JwMS8wLQYDVQQDDCZTU0wuY29tIFRpbWVzdGFtcGluZyBJc3N1
@@ -198,18 +234,18 @@ write-host "All done.  Check the $bin_dir directory for updated binaries"
 # 0BaMqTa6LWzWItgBjGcObXeMxmbQqlEz2YtAcErkZvh0WABDDE4U8GyV/32FdaAv
 # JgTfe9MiL2nSBioYe/g5mHUSWAay/Ip1RQmQCvmF9sNfqlhJwkjy/1U1ibUkTIUB
 # X3HgymyQvqQTZLLys6pL2tCdWcjI9YuLw30rgZm8+K387L7ycUvqrmQ3ZJlujHl3
-# r1hgV76s3WwMPgKk1bAEFMj+rRXimSC+Ev30hXZdqyMdl/il5Ksd0vhGMYICVzCC
-# AlMCAQEwgYcwczELMAkGA1UEBhMCVVMxDjAMBgNVBAgMBVRleGFzMRAwDgYDVQQH
+# r1hgV76s3WwMPgKk1bAEFMj+rRXimSC+Ev30hXZdqyMdl/il5Ksd0vhGMYICWDCC
+# AlQCAQEwgYcwczELMAkGA1UEBhMCVVMxDjAMBgNVBAgMBVRleGFzMRAwDgYDVQQH
 # DAdIb3VzdG9uMREwDwYDVQQKDAhTU0wgQ29ycDEvMC0GA1UEAwwmU1NMLmNvbSBU
 # aW1lc3RhbXBpbmcgSXNzdWluZyBSU0EgQ0EgUjECEFparOgaNW60YoaNV33gPccw
 # CwYJYIZIAWUDBAIBoIIBYTAaBgkqhkiG9w0BCQMxDQYLKoZIhvcNAQkQAQQwHAYJ
-# KoZIhvcNAQkFMQ8XDTI0MDMxNDE4NDIzNlowKAYJKoZIhvcNAQk0MRswGTALBglg
-# hkgBZQMEAgGhCgYIKoZIzj0EAwIwLwYJKoZIhvcNAQkEMSIEIP9799KbBq1ajLSy
-# DTlnezm5bq8Lz+SiX65g52647VLbMIHJBgsqhkiG9w0BCRACLzGBuTCBtjCBszCB
+# KoZIhvcNAQkFMQ8XDTI0MDMyNjE5MTcxMFowKAYJKoZIhvcNAQk0MRswGTALBglg
+# hkgBZQMEAgGhCgYIKoZIzj0EAwIwLwYJKoZIhvcNAQkEMSIEIGWkF/Yy5LcOXtQr
+# oB1MfGpFId7Jw4uUOYRdfFazE3vvMIHJBgsqhkiG9w0BCRACLzGBuTCBtjCBszCB
 # sAQgnXF/jcI3ZarOXkqw4fV115oX1Bzu2P2v7wP9Pb2JR+cwgYswd6R1MHMxCzAJ
 # BgNVBAYTAlVTMQ4wDAYDVQQIDAVUZXhhczEQMA4GA1UEBwwHSG91c3RvbjERMA8G
 # A1UECgwIU1NMIENvcnAxLzAtBgNVBAMMJlNTTC5jb20gVGltZXN0YW1waW5nIElz
-# c3VpbmcgUlNBIENBIFIxAhBaWqzoGjVutGKGjVd94D3HMAoGCCqGSM49BAMCBEYw
-# RAIgZlc1HFZFncZ3zILk3GBHlSJr3g7sWifrKYn2A8opJnACICwllumi33d2Ex04
-# 0qvKFh4oRpd+AC/sZdZKMYAniSU+
+# c3VpbmcgUlNBIENBIFIxAhBaWqzoGjVutGKGjVd94D3HMAoGCCqGSM49BAMCBEcw
+# RQIhAJZD66VWO+R1Fh/K4Tvebu5vZrEEqctpwW+8NMWVIqyqAiA/ACo94p3yi3e5
+# JpyDnA84fgU3etpkKHnSQliEhDWP0A==
 # SIG # End signature block
