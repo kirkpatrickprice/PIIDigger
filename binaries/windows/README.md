@@ -29,27 +29,32 @@ All `typed commands` assume use of Powershell...
     * Note: If you require a 32-bit of PIIDigger, use a 32-bit version of Python.
 
 2. Clone the PIIDigger repo from GitHub (install GitHub desktop if you don't have it already installed)
-  
+    ```
     git clone https://github.com/kirkpatrickprice/PIIDigger
-    
+    ```
 3. Create a Python virtual environment and install all PIIDigger dependencies
-    
+    ```
     cd PIIDigger
     py -m venv .venv
     .\.venv\Scripts\activate
     pip install -e .[win]
-
+    ```
 4. Test that PIIDigger runs correctly from native Python before attempting to package an EXE
-
+    ```
     py .\piidigger.py --help
     py .\piidigger.py -c testfile.toml
-    
-3. Install PyInstaller to create the EXE
-    
-    pip install pyinstaller
-    
-4. Run the build script without the Code Signing option:
-    
-    .\build_windows_exe.ps1 -NoCodeSign
+    ```
 
+    The first command should display the help content. The second command should create a file called `testfile.toml` containing a default configuration.  It can be deleted.
+
+3. Install PyInstaller to create the EXE
+    ```
+    pip install pyinstaller
+    ```
+4. Run the build script without the Code Signing option:
+    ```
+    .\build_windows_exe.ps1 -NoCodeSign
+    ```
+    This process should take less than a minute and display several status messages.
+    
 5. `PIIDigger.zip` should be in the `build\windows` folder.
