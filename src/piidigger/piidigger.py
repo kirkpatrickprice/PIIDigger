@@ -165,7 +165,7 @@ def fileHandlerDispatcher(config: classes.Config,
     try:
         with activeFilesQProcesses.get_lock():
             activeFilesQProcesses.value+=1
-        dataHandlersModules=globalfuncs.getEnabledDataHandlerModules(config.getDataHandlers())
+        dataHandlerModules=globalfuncs.getEnabledDataHandlerModules(config.getDataHandlers())
 
         logger=logging.getLogger('fileHandlerDispatch')
         if not logger.handlers:
@@ -173,6 +173,7 @@ def fileHandlerDispatcher(config: classes.Config,
         logger.setLevel(config.getLogLevel())
         logger.propagate=False
         logger.debug('Process %s (%s) started (Active=%d)', mp.current_process().name, mp.current_process().pid, activeFilesQProcesses.value)
+        resultsQs = [qName for qName in queues.keys() if qName.endswith('_resultsQ')]
         
         logConfig={'q': queues['logQ'],
                 'level': config.getLogLevel(),
@@ -185,21 +186,56 @@ def fileHandlerDispatcher(config: classes.Config,
             if item == None:
                 queues['filesQ'].put(item)
                 break
+
+            # Set some variables for this item
             filename=item.getFullPath()
             fileHandlerModule=globalfuncs.getFileHandlerModule(item.getFileHandlerName())
+            results={
+                'filename': filename,
+                'matches': {}
+            }
+            
             logger.info('[%s]Processing %s with %s', mp.current_process().name, filename, fileHandlerModule.__name__)
-            result=fileHandlerModule.processFile(filename, dataHandlersModules, logConfig)
-            logger.debug('[%s]%s: Returned from %s', mp.current_process().name, filename, fileHandlerModule.__name__)
+            
+            for content in fileHandlerModule.readFile(filename, logConfig):
+                logger.debug('%s: Received %d bytes from file hander', filename, len(content))
+
+                chunks=globalfuncs.makeChunks(content)
+                logger.debug('%s: Created %d chunks', filename, len(chunks))
+
+                # We only need chunks from here out.  Conserve a little memory by deleting "content"
+                del content
+
+                for handler in dataHandlerModules:
+                    logger.debug('%s: Processing %d chunks with %s', filename, len(chunks), handler.dhName)
+                    for chunk in chunks:
+                        results=globalfuncs.processMatches(results, handler.findMatch(chunk), handler.dhName)
+                    logger.debug('%s: %d chunks processed with %s', filename, len(chunks), handler.dhName)
+
+            # Update the status counters
             with totals['totalFilesScanned'].get_lock():
                 totals['totalFilesScanned'].value+=1
             with totals['totalBytes'].get_lock():
                 totals['totalBytes'].value+=item.getFileSize()
             
-            if len(result['matches'])>0:
-                logger.debug('%s: %s matches found', filename, str(result['matches'].keys()))
-                totals['totalResults'].value+=globalfuncs.countResults(result['matches'])
-                for q in [qName for qName in queues.keys() if qName.endswith('_resultsQ')]:
-                    queues[q].put(result)
+            # Submit the results to outputhandlers
+            if len(results['matches']) > 0:
+                logger.debug('%s: %s matches found', filename, str(results['matches'].keys()))
+                
+                # Since Python sets aren't serializable as a JSON object type, we'll convert our results to Lists now.
+                logger.debug('%s: Rebuilding result sets into lists', filename)
+                for handler in results['matches']:
+                    for key in results['matches'][handler]:
+                        l=list(results['matches'][handler][key])
+                        results['matches'][handler][key]=l
+
+                # Update the results totals
+                totals['totalResults'].value += globalfuncs.countResults(results['matches'])
+                for q in resultsQs:
+                    queues[q].put(results)
+
+            logger.debug('%s: Processing complete', filename)
+
     except KeyboardInterrupt:
         for q in [qName for qName in queues.keys() if qName.endswith('_resultsQ')]:
             globalfuncs.clearQ(queues[q])

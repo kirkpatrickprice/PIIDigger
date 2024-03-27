@@ -44,32 +44,26 @@ handles={
 }
 
 
-def processFile(filename: str, 
-                dataHandlers: list, 
-                logConfig: dict,
-               ) -> list:
+def readFile(filename: str, 
+            logConfig: dict,
+            ) -> list:
     ''''
     Handle all file IO and text extraction operations for this file type.  Returns a list of results that have been validated by each datahandler.  
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
     '''
 
-    logger=logging.getLogger('plaintext-handler')
+    logger = logging.getLogger('plaintext-handler')
     if not logger.handlers:
         logger.addHandler(QueueHandler(logConfig['q']))
     logger.setLevel(logConfig['level'])
     logger.propagate=False
-    
-    results={
-        'filename': filename,
-        'matches': {}
-    }
+    content = ''
     
     enc = getEncoding(filename)
 
     if enc == None:
         logger.info('%s: Unknown encoding type', filename)
-        results['matches']={}
-        return results
+        return content
     else:
         logger.debug('%s: Encoding %s', filename, enc)
     
@@ -84,27 +78,14 @@ def processFile(filename: str,
     # Then we combine all the file content into one string before breaking it up into bite-sized chunks for regex processing
     try:
         with codecs.open(filename, 'r', encoding=enc, errors='replace') as f:
-            lines=f.readlines()
+            lines = f.readlines()
             logger.debug('%s: Read %d lines', filename, len(lines))
             
-            lines=[line.strip() for line in lines]
+            lines = [line.strip() for line in lines]
             
-            content=' '.join(lines)
+            content = ' '.join(lines)
             logger.debug('%s: Joined %d lines into content string (len=%d)', filename, len(lines), len(content))
 
-            # To conserve memory, especially on large files.  We only need the file content in one long string.
-            del lines
-
-            chunks=globalfuncs.makeChunks(content)
-            logger.debug('%s: Created %d chunks', filename, len(chunks))
-
-            del content
-
-            for handler in dataHandlers:
-                logger.debug('%s: Processing %d chunks with %s', filename, len(chunks), handler.dhName)
-                for chunk in chunks:
-                    results=globalfuncs.processMatches(results, handler.findMatch(chunk), handler.dhName)
-                logger.debug('%s: %d chunks processed with %s', filename, len(chunks), handler.dhName)
     except FileNotFoundError:
         logger.error('Previously discovered file no longer exists: %s. File skipped', f.absolute())
     except PermissionError as e:
@@ -118,15 +99,7 @@ def processFile(filename: str,
     except Exception as e:
         logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
         
-    # Since Python sets aren't serializable as a JSON object type, we'll convert our results to Lists now.
-    logger.debug('%s: Rebuilding result sets into lists', filename)
-    for handler in results['matches']:
-        for key in results['matches'][handler]:
-            l=list(results['matches'][handler][key])
-            results['matches'][handler][key]=l
-
-    logger.debug('%s: Processing complete', filename)
-    return results
+    return [content]
 
 
 def main():
