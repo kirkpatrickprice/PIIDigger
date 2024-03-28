@@ -6,6 +6,7 @@ from piidigger.filehandlers import plaintext
 from piidigger.globalfuncs import clearQ
 
 @pytest.mark.parametrize('filename, expected_result', [
+                            ('testdata/plaintext/does-not-exist.txt', ['']),
                             ('testdata/plaintext/empty-file-utf16le-crlf.txt', ['']),
                             ('testdata/plaintext/lorem-ipsum-1line-utf8-crlf.txt', ['Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.']),
                             ('testdata/plaintext/lorem-ipsum-1line-with-blank-ending-line-utf16le-crlf.txt', ['Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.']),

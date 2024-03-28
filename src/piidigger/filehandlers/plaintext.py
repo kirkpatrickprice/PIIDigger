@@ -1,12 +1,6 @@
 import codecs, logging
 from logging.handlers import QueueHandler
 
-if __name__=='__main__':
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).absolute().parent.parent / ''))
-
-#import piidigger.globalfuncs as globalfuncs
 from piidigger.getencoding import getEncoding
 
 # Each filehandler must have the following:
@@ -63,7 +57,7 @@ def readFile(filename: str,
 
     if enc == None:
         logger.info('%s: Unknown encoding type', filename)
-        return ['']
+        return [content]
     else:
         logger.debug('%s: Encoding %s', filename, enc)
     
