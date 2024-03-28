@@ -1,6 +1,6 @@
 import pytest
 
-from src.piidigger.getencoding import getEncoding
+from piidigger.getencoding import getEncoding
 
 @pytest.mark.parametrize('testFile, expected_result', [
                                 ('testdata/pan/sample-pans.json', 'ascii'),

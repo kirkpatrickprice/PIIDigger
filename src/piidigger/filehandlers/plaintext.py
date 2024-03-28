@@ -6,7 +6,7 @@ if __name__=='__main__':
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).absolute().parent.parent / ''))
 
-import piidigger.globalfuncs as globalfuncs
+#import piidigger.globalfuncs as globalfuncs
 from piidigger.getencoding import getEncoding
 
 # Each filehandler must have the following:
@@ -52,7 +52,7 @@ def readFile(filename: str,
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
     '''
 
-    logger = logging.getLogger('plaintext-handler')
+    logger = logging.getLogger('plaintext_handler')
     if not logger.handlers:
         logger.addHandler(QueueHandler(logConfig['q']))
     logger.setLevel(logConfig['level'])
@@ -63,11 +63,11 @@ def readFile(filename: str,
 
     if enc == None:
         logger.info('%s: Unknown encoding type', filename)
-        return content
+        return ['']
     else:
         logger.debug('%s: Encoding %s', filename, enc)
     
-    # After making our best guess with the encoding, replace any unexpected characters with a plain ASCII "?"
+    # After getting the encoding from chardet, replace any unexpected characters with a plain ASCII "?"
     # The risk is we could lose something important, but if that's the one piece of data anywhere on the file system that would have matched,
     # then it's a risk worth taking for a more stable discovery tool.  More likely is that we might miss ONE INSTANCE of data in a file system that has 
     # many more instances for discovery.
@@ -75,7 +75,6 @@ def readFile(filename: str,
     # First we open the file, then we pass each line of text to the datahandler.  File IO is the bottle neck, so by reading each file just once, we should
     # be able to maintain reasonable performance.
 
-    # Then we combine all the file content into one string before breaking it up into bite-sized chunks for regex processing
     try:
         with codecs.open(filename, 'r', encoding=enc, errors='replace') as f:
             lines = f.readlines()
@@ -99,21 +98,4 @@ def readFile(filename: str,
     except Exception as e:
         logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
         
-    return [content]
-
-
-def main():
-    from sys import argv
-    from multiprocessing import Queue
-    handlers=globalfuncs.getAllDataHandlerModules()
-    logConfig={'q': Queue(),
-                'level': "DEBUG",
-                }
-    
-    for arg in argv[1:]:
-
-        print(processFile(arg, handlers, logConfig))
-
-if __name__ == '__main__':
-    main()
-
+    return [content.strip()]

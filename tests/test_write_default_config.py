@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from src.piidigger.globalfuncs import writeDefaultConfig, getDefaultConfig
+from piidigger.globalfuncs import writeDefaultConfig, getDefaultConfig
 import tomli
 
 def test_write_default_config():

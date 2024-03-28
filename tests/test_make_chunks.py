@@ -1,6 +1,6 @@
 import pytest
 
-from src.piidigger.globalfuncs import makeChunks
+from piidigger.globalfuncs import makeChunks
 
 #The first test breaks up the string on a word boundary
 #The second test is just a bit too long (next word boundary exceeds the chunk size), but still passes
