@@ -6,14 +6,6 @@ from logging.handlers import QueueHandler
 
 from docx2python import docx2python
 
-# Only need to modify the path during unit testing of this file.
-if __name__=='__main__':
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).absolute().parent.parent / ''))
-
-import piidigger.globalfuncs as globalfuncs
-
 warnings.filterwarnings('ignore', category=UserWarning, module='docx2python')
 
 # Each filehandler must have the following:
@@ -31,7 +23,7 @@ handles={
         ],
 }
 
-def processFile(filename: str, dataHandlers: list, logConfig: dict) -> list:
+def readFile(filename: str, logConfig: dict) -> list:
     ''''
     Handle all file IO and text extraction operations for this file type.  Returns a list of results that have been validated by each datahandler.  
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
@@ -43,10 +35,7 @@ def processFile(filename: str, dataHandlers: list, logConfig: dict) -> list:
     logger.setLevel(logConfig['level'])
     logger.propagate=False
 
-    results={
-        'filename': filename,
-        'matches': dict()
-    }
+    content: str = ''
 
     try:
         # Read in all of the docx content and close the file
@@ -58,49 +47,15 @@ def processFile(filename: str, dataHandlers: list, logConfig: dict) -> list:
 
         # Close the file now that we're done with it.
         docxContent.close()
-
-        # Break up the text into bite-sized chunks for regex processing
-        chunks=globalfuncs.makeChunks(content)
-        logger.debug('%s: Created %d chunks', filename, len(chunks))
-
-        del content
-
-        for handler in dataHandlers:
-            logger.debug('%s: Processing %d chunks with %s', filename, len(chunks), handler.dhName)
-            for chunk in chunks:
-                results=globalfuncs.processMatches(results, handler.findMatch(chunk), handler.dhName)
-    except FileNotFoundError:
-        logger.error('Previously discovered file no longer exists: %s. File skipped', filename)
-    except PermissionError as e:
-        logger.error('PermissionError adding %s.  File skipped.  Error message: %s', filename, str(e))
-    except OSError as e:
-        logger.error('OSError adding %s.  File skipped.  Error message: %s', filename, str(e))
-    except Exception as e:
-        logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
         
+    except FileNotFoundError:
+        logger.error('%s: Previously discovered file no longer exists. File skipped', filename)
+    except PermissionError as e:
+        logger.error('%s: PermissionError.  File skipped.  Error message: %s', filename, str(e))
+    except OSError as e:
+        logger.error('%s: OSError.  File skipped.  Error message: %s', filename, str(e))
+    except Exception as e:
+        logger.error('%s: Unknown exception.  File skipped.  Error message: %s', filename, str(e))
     
-    # Since Python sets aren't serializable as a JSON object type, we'll convert our results to Lists now. 
-    logger.debug('%s: Rebuilding result sets into lists', filename)                   
-    for handler in results['matches']:
-        for key in results['matches'][handler]:
-            l=list(results['matches'][handler][key])
-            results['matches'][handler][key]=l
-
-    logger.debug('%s: Processing complete', filename)
-    return results
-
-
-def main():
-    from sys import argv
-    from multiprocessing import Queue
-    handlers=globalfuncs.getAllDataHandlerModules()
-    logConfig={'q': Queue(),
-                'level': "DEBUG",
-                }
-    for arg in argv[1:]:
-
-        print(processFile(arg, handlers, logConfig))
-
-if __name__ == '__main__':
-    main()
+    return [content]
 
