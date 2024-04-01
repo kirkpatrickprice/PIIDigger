@@ -92,4 +92,4 @@ def readFile(filename: str,
     except Exception as e:
         logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
         
-    return [content.strip()]
+    yield content.strip()
