@@ -57,5 +57,5 @@ def readFile(filename: str, logConfig: dict) -> list:
     except Exception as e:
         logger.error('%s: Unknown exception.  File skipped.  Error message: %s', filename, str(e))
     
-    return [content]
+    return [content.strip()]
 
