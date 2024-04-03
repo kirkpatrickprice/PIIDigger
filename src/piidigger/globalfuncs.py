@@ -68,8 +68,6 @@ fileHandlers={ handler: getattr(getattr(fh, handler), 'handles') for handler in 
 # }
 
 
-version='0.0.1'
-
 ######################################################
 ############### Global functions #####################
 ######################################################
