@@ -2,6 +2,7 @@ import codecs, logging
 from logging.handlers import QueueHandler
 
 from piidigger.getencoding import getEncoding
+from piidigger.globalvars import maxChunkSize
 
 # Each filehandler must have the following:
 #   "handles" -     dictionary to identify lists of file extensions and mime types that the handler will manage.
@@ -40,10 +41,11 @@ handles={
 
 def readFile(filename: str, 
             logConfig: dict,
-            ) -> list:
+            maxChunkCount: int = 100_000,
+            ):
     ''''
-    Handle all file IO and text extraction operations for this file type.  Returns a list of results that have been validated by each datahandler.  
-    "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
+    Handle all file IO and text extraction operations for this file type.  Returns a generator object tied to maxChunkSize (650) * maxChunkCount bytes of text.  
+    "filename" is a string of the path and filename to process.  logConfig is a two-key dictionary consisting of 'q' and 'level' for logging.
     '''
 
     logger = logging.getLogger('plaintext_handler')
@@ -51,7 +53,9 @@ def readFile(filename: str,
         logger.addHandler(QueueHandler(logConfig['q']))
     logger.setLevel(logConfig['level'])
     logger.propagate=False
-    content = ''
+    content: str = ''
+    totalBytes: int = 0
+    maxContentSize = maxChunkSize * maxChunkCount
     
     enc = getEncoding(filename)
 
@@ -66,18 +70,31 @@ def readFile(filename: str,
     # then it's a risk worth taking for a more stable discovery tool.  More likely is that we might miss ONE INSTANCE of data in a file system that has 
     # many more instances for discovery.
 
-    # First we open the file, then we pass each line of text to the datahandler.  File IO is the bottle neck, so by reading each file just once, we should
-    # be able to maintain reasonable performance.
+    # File IO is the bottle neck but we could also hit some really big files.
+    # By returning (through yield) the content in chunks, we can strike a balance between memory consumption and file IO speed.
+
+    # First we open the file, then we add each line so long as the resulting line length remains less than maxContentSize.  
+    # For the last line, we add one word at a time until we reach the limit.  
 
     try:
         with codecs.open(filename, 'r', encoding=enc, errors='replace') as f:
-            lines = f.readlines()
-            logger.debug('%s: Read %d lines', filename, len(lines))
-            
-            lines = [line.strip() for line in lines]
-            
-            content = ' '.join(lines)
-            logger.debug('%s: Joined %d lines into content string (len=%d)', filename, len(lines), len(content))
+            for line in f:
+                if (len(content.strip()) + len(line.strip())) < maxContentSize:
+                    content += line.strip() + ' '
+                else:
+                    for word in line.split():
+                        content += word + ' '
+                        if len(content.strip()) > maxContentSize:
+                            totalBytes += len(content.strip())
+                            yield content.strip()
+                            content = ''
+
+    # Once we've processed the entire file, it's time to send that last bit of info that hasn't already been sent.
+        totalBytes += len(content.strip())
+        logger.debug('%s: Read %d lines', filename, totalBytes)
+
+        # Return the last chunk of content    
+        yield content.strip()
 
     except FileNotFoundError:
         logger.error('Previously discovered file no longer exists: %s. File skipped', f.absolute())
@@ -91,5 +108,4 @@ def readFile(filename: str,
         logger.error('Codec lookup error processing file %s (enc=%s)', filename, enc)
     except Exception as e:
         logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
-        
-    yield content.strip()
+
