@@ -21,6 +21,7 @@ import piidigger.classes as classes
 from piidigger import console
 from piidigger import filescan
 from piidigger import globalfuncs
+from piidigger.globalvars import errorCodes
 
 
 def cleanup(processes: dict,
@@ -200,17 +201,21 @@ def fileHandlerDispatcher(config: classes.Config,
             for content in fileHandlerModule.readFile(filename, logConfig):
                 logger.debug('%s: Received %d bytes from file hander', filename, len(content))
 
-                chunks=globalfuncs.makeChunks(content)
-                logger.debug('%s: Created %d chunks', filename, len(chunks))
+                if content == '':
+                    break
+                
+                # chunks=globalfuncs.makeChunks(content)
+                # logger.debug('%s: Created %d chunks', filename, len(chunks))
 
                 # We only need chunks from here out.  Conserve a little memory by deleting "content"
-                del content
+                #del content
 
                 for handler in dataHandlerModules:
-                    logger.debug('%s: Processing %d chunks with %s', filename, len(chunks), handler.dhName)
-                    for chunk in chunks:
-                        results=globalfuncs.processMatches(results, handler.findMatch(chunk), handler.dhName)
-                    logger.debug('%s: %d chunks processed with %s', filename, len(chunks), handler.dhName)
+                    #logger.debug('%s: Processing %d chunks with %s', filename, len(chunks), handler.dhName)
+                    # for chunk in chunks:
+                    #     results=globalfuncs.processMatches(results, handler.findMatch(chunk), handler.dhName)
+                    results=globalfuncs.processMatches(results, handler.findMatch(content), handler.dhName)
+                    # logger.debug('%s: %d chunks processed with %s', filename, len(chunks), handler.dhName)
 
             # Update the status counters
             with totals['totalFilesScanned'].get_lock():
@@ -339,16 +344,16 @@ def main():
 
     if args.cpuCount:
         print('CPU cores:', cpu_count())
-        sys.exit(globalfuncs.errorCodes['ok'])
+        sys.exit(errorCodes['ok'])
 
     if args.listDH:
         print('Data handler modules: ', globalfuncs.getSupportedDataHandlerNames())
-        sys.exit(globalfuncs.errorCodes['ok'])
+        sys.exit(errorCodes['ok'])
 
     if args.listFT:
         print('File extns: ', globalfuncs.getSupportedFileExts())
         print('MIME types: ', globalfuncs.getSupportedFileMimes())
-        sys.exit(globalfuncs.errorCodes['ok'])
+        sys.exit(errorCodes['ok'])
 
     if len(args.createConfigFile) >0:
         tomlFile = str(args.createConfigFile) if str(args.createConfigFile).endswith('.toml') else str(args.createConfigFile)+'.toml'
@@ -356,10 +361,10 @@ def main():
 
         if configFileWritten=='Success':
             console.normal('Default configuration written to '+args.createConfigFile)
-            sys.exit(globalfuncs.errorCodes['ok'])
+            sys.exit(errorCodes['ok'])
         else:
             console.error('Config file not written: %s' % (configFileWritten))
-            sys.exit(globalfuncs.errorCodes['unknown'])
+            sys.exit(errorCodes['unknown'])
 
     if args.defaultConfig:
         config=classes.Config(configFile='', useDefault=True)

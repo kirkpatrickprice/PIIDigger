@@ -9,7 +9,7 @@ from multiprocessing import Process, freeze_support, set_start_method
 sys.path.insert(0, str(Path(__file__).absolute().parent / "src"))
 
 from piidigger.piidigger import main
-from piidigger.globalfuncs import errorCodes
+from piidigger.globalvars import errorCodes
 
 exitCode = errorCodes['ok']
 
