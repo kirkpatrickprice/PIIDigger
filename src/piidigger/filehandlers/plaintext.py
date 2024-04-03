@@ -2,6 +2,7 @@ import codecs, logging
 from logging.handlers import QueueHandler
 
 from piidigger.getencoding import getEncoding
+from piidigger.globalfuncs import appendContent
 from piidigger.globalvars import maxChunkSize
 
 # Each filehandler must have the following:
@@ -79,15 +80,11 @@ def readFile(filename: str,
     try:
         with codecs.open(filename, 'r', encoding=enc, errors='replace') as f:
             for line in f:
-                if (len(content.strip()) + len(line.strip())) < maxContentSize:
-                    content += line.strip() + ' '
-                else:
-                    for word in line.split():
-                        content += word + ' '
-                        if len(content.strip()) > maxContentSize:
-                            totalBytes += len(content.strip())
-                            yield content.strip()
-                            content = ''
+                content, unused = appendContent(content, line, maxContentSize)
+                if len(content.strip()) > maxContentSize:
+                    totalBytes += len(content.strip())
+                    yield content.strip()
+                    content = unused
 
     # Once we've processed the entire file, it's time to send that last bit of info that hasn't already been sent.
         totalBytes += len(content.strip())
