@@ -3,7 +3,7 @@ from logging.handlers import QueueHandler
 
 from piidigger.getencoding import getEncoding
 from piidigger.globalfuncs import appendContent
-from piidigger.globalvars import maxChunkSize
+from piidigger.globalvars import maxChunkSize, defaultChunkCount
 
 # Each filehandler must have the following:
 #   "handles" -     dictionary to identify lists of file extensions and mime types that the handler will manage.
@@ -42,7 +42,7 @@ handles={
 
 def readFile(filename: str, 
             logConfig: dict,
-            maxChunkCount: int = 100_000,
+            maxChunkCount: int = defaultChunkCount,
             ):
     ''''
     Handle all file IO and text extraction operations for this file type.  Returns a generator object tied to maxChunkSize (650) * maxChunkCount bytes of text.  

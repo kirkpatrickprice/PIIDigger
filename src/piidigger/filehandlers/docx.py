@@ -7,7 +7,7 @@ from logging.handlers import QueueHandler
 from docx2python import docx2python
 from docx2python.iterators import iter_paragraphs
 
-from piidigger.globalvars import maxChunkSize
+from piidigger.globalvars import maxChunkSize, defaultChunkCount
 from piidigger.globalfuncs import appendContent
 
 warnings.filterwarnings('ignore', category=UserWarning, module='docx2python')
@@ -29,7 +29,7 @@ handles={
 
 def readFile(filename: str, 
              logConfig: dict,
-             maxChunkCount = 100_000):
+             maxChunkCount = defaultChunkCount):
     ''''
     Handle all file IO and text extraction operations for this file type.  Returns a list of results that have been validated by each datahandler.  
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
