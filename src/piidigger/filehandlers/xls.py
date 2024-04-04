@@ -46,7 +46,7 @@ def readFile(filename: str,
     try:
         # Don't use "on_demand" in order to keep the code simpler.  All worksheets are loaded into RAM.
 
-        book=xlrd.open_workbook(filename, on_demand=False, formatting_info=False,)
+        book=xlrd.open_workbook(filename, on_demand=True, formatting_info=False,)
         logger.debug('%s: Read %d worksheets', filename, len(book.sheet_names()))
         for sheet in book.sheet_names():
             logger.debug('Processing worksheet: %s', str(sheet))
