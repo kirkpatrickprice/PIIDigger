@@ -7,7 +7,12 @@ from openpyxl.utils.exceptions import *
 from zipfile import BadZipFile
 
 import piidigger.globalfuncs as globalfuncs
-from piidigger.globalvars import maxChunkSize, defaultChunkCount
+from piidigger.globalvars import (
+    excelBlankColLimit, 
+    excelBlankRowLimit, 
+    maxChunkSize, 
+    defaultChunkCount,
+    )
 
 # Ignore the UserWarning message from OpenPyXL that seem to pop up here and there
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
@@ -77,7 +82,7 @@ def readFile(filename: str,
                         continue
                     if item is None or item == '':
                         blankColCount+=1
-                        if blankColCount>globalfuncs.excelBlankColLimit:
+                        if blankColCount>excelBlankColLimit:
                             break
                         continue
                     line += str(item) + ' '
@@ -88,7 +93,7 @@ def readFile(filename: str,
                     blankRowCount=0
                 else:
                     blankRowCount+=1
-                    if blankRowCount>globalfuncs.excelBlankRowLimit:
+                    if blankRowCount>excelBlankRowLimit:
                         logger.debug('%s[Sheet %s]: Blank row count exceeded at row %d', filename, sheet, rowCount)
                         break
                 if len(content.strip()) > maxContentSize:

@@ -3,7 +3,10 @@ from logging.handlers import QueueHandler
 
 from piidigger.getencoding import getEncoding
 from piidigger.globalfuncs import appendContent
-from piidigger.globalvars import maxChunkSize, defaultChunkCount
+from piidigger.globalvars import (
+    maxChunkSize,
+    defaultChunkCount,
+    )
 
 # Each filehandler must have the following:
 #   "handles" -     dictionary to identify lists of file extensions and mime types that the handler will manage.

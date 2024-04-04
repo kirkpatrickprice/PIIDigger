@@ -7,8 +7,11 @@ from logging.handlers import QueueHandler
 from docx2python import docx2python
 from docx2python.iterators import iter_paragraphs
 
-from piidigger.globalvars import maxChunkSize, defaultChunkCount
 from piidigger.globalfuncs import appendContent
+from piidigger.globalvars import (
+    maxChunkSize,
+    defaultChunkCount,
+    )
 
 warnings.filterwarnings('ignore', category=UserWarning, module='docx2python')
 
