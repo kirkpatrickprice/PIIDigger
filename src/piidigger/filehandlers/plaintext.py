@@ -2,7 +2,7 @@ import codecs, logging
 from logging.handlers import QueueHandler
 
 from piidigger.getencoding import getEncoding
-from piidigger.globalfuncs import appendContent
+from piidigger.filehandlers._sharedfuncs import appendContent
 from piidigger.globalvars import (
     maxChunkSize,
     defaultChunkCount,

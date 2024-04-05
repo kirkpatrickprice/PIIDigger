@@ -7,7 +7,7 @@ from logging.handlers import QueueHandler
 from docx2python import docx2python
 from docx2python.iterators import iter_paragraphs
 
-from piidigger.globalfuncs import appendContent
+from piidigger.filehandlers._sharedfuncs import appendContent
 from piidigger.globalvars import (
     maxChunkSize,
     defaultChunkCount,
@@ -68,7 +68,7 @@ def readFile(filename: str,
                     content = unused
 
         # No size check -- we'll just append the properties to the end of the content and send it
-        content += ' ' + str(docxContent.properties).replace('\t', ' ').strip()
+        content += ' ' + str(docxContent.core_properties).replace('\t', ' ').strip()
 
     # Once we've processed the entire file, it's time to send that last bit of info that hasn't already been sent.
         totalBytes += len(content.strip())

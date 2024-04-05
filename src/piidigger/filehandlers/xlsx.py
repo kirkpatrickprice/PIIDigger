@@ -6,7 +6,7 @@ from logging.handlers import QueueHandler
 from openpyxl.utils.exceptions import *
 from zipfile import BadZipFile
 
-import piidigger.globalfuncs as globalfuncs
+from piidigger.filehandlers._sharedfuncs import appendContent
 from piidigger.globalvars import (
     excelBlankColLimit, 
     excelBlankRowLimit, 
@@ -87,7 +87,7 @@ def readFile(filename: str,
                         continue
                     line += str(item) + ' '
                     rowHasData=True
-                content, unused = globalfuncs.appendContent(content, line, maxContentSize)
+                content, unused = appendContent(content, line, maxContentSize)
 
                 if rowHasData:
                     blankRowCount=0

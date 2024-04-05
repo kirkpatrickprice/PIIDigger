@@ -3,7 +3,7 @@ from logging.handlers import QueueHandler
 
 import xlrd
 
-from piidigger.globalfuncs import appendContent
+from piidigger.filehandlers._sharedfuncs import appendContent
 from piidigger.globalvars import (
     excelBlankColLimit, 
     excelBlankRowLimit, 
