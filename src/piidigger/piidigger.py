@@ -21,7 +21,10 @@ import piidigger.classes as classes
 from piidigger import console
 from piidigger import filescan
 from piidigger import globalfuncs
-from piidigger.globalvars import errorCodes
+from piidigger.globalvars import (
+    errorCodes,
+    version,
+    )
 
 
 def cleanup(processes: dict,
@@ -113,6 +116,12 @@ def commandLineParser() -> argparse.ArgumentParser:
         dest='listFT',
         action='store_true',
         help='Display the list of file types and exit'
+    )
+    miscInfoControl.add_argument(
+        '--version', '-v',
+        dest='version',
+        action='store_true',
+        help='Display the version number and exit'
     )
     
     return parser.parse_args()
@@ -355,6 +364,10 @@ def main():
         print('MIME types: ', globalfuncs.getSupportedFileMimes())
         sys.exit(errorCodes['ok'])
 
+    if args.version:
+        print('PIIDigger version:', version)
+        sys.exit(errorCodes['ok'])
+
     if len(args.createConfigFile) >0:
         tomlFile = str(args.createConfigFile) if str(args.createConfigFile).endswith('.toml') else str(args.createConfigFile)+'.toml'
         configFileWritten=globalfuncs.writeDefaultConfig(tomlFile)
@@ -395,6 +408,7 @@ def main():
     logger=logging.getLogger('main')
         
     logger.info('Command line arguments: %s', sys.argv[1:])
+    logger.info('Starting PIIDigger version %s', version)
     logger.info("Configuration: %s", json.dumps(config.getConfig()))
 
     if len(config.getMimeTypes()) == 0:        
