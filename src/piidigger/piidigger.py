@@ -227,10 +227,10 @@ def fileHandlerDispatcher(config: classes.Config,
                     # logger.debug('%s: %d chunks processed with %s', filename, len(chunks), handler.dhName)
 
             # Update the status counters
-            with totals['totalFilesScanned'].get_lock():
-                totals['totalFilesScanned'].value+=1
-            with totals['totalBytes'].get_lock():
-                totals['totalBytes'].value+=item.getFileSize()
+            with totals['filesScanned'].get_lock():
+                totals['filesScanned'].value+=1
+            with totals['bytesScanned'].get_lock():
+                totals['bytesScanned'].value+=item.getFileSize()
             
             # Submit the results to outputhandlers
             if len(results['matches']) > 0:
@@ -309,7 +309,12 @@ def progressLineWorker(totals: dict,
 
         while True:
             screenWidth=console.getTerminalSize()[0]
-            line='%s | Folders scanned: %d | Files identified: %d | Files scanned: %d (%s) | Results found: %d' % (str(datetime.now() - startTime).split('.')[0], totals['totalDirs'].value, totals['totalFilesFound'].value, totals['totalFilesScanned'].value, globalfuncs.sizeof_fmt(totals['totalBytes'].value), totals['totalResults'].value)
+            line='{} | Folders scanned: {:,}/{:,} | Files scanned: {:,}/{:,} ({}/{}) | Results found: {}'.format(
+                str(datetime.now() - startTime).split('.')[0], 
+                totals['dirsScanned'].value, totals['dirsFound'].value, 
+                totals['filesScanned'].value, totals['filesFound'].value, 
+                globalfuncs.sizeof_fmt(totals['bytesScanned'].value), globalfuncs.sizeof_fmt(totals['bytesFound'].value),
+                totals['totalResults'].value)
             if len(line) > screenWidth:
                 line=line[:screenWidth-1]
 
@@ -388,7 +393,14 @@ def main():
         config.setMaxProcs(min(cpu_count(), args.maxProc))
 
     # Create queues and other structures needed for asynchronous implementation
-    totals={k: mp.Value(c_uint64, 0) for k in ['totalDirs', 'totalFilesFound', 'totalFilesScanned', 'totalBytes', 'totalResults']}
+    totals={k: mp.Value(c_uint64, 0) for k in [
+        'dirsScanned', 
+        'dirsFound', 
+        'filesScanned', 
+        'filesFound', 
+        'bytesScanned', 
+        'bytesFound',
+        'totalResults']}
     queues={name: mp.Queue() for name in ['logQ', 'dirsQ', 'filesQ', 'totalsQ',]}
     activeFilesQProcesses=mp.Value(c_int, 0)
     processes = dict()
@@ -431,10 +443,11 @@ def main():
     # Setup each of the subprocesses that are needed
     processes['progressLine']=[mp.Process(target=progressLineWorker, args=(totals,queues['logQ'], start, stopEvent), name='progressLine_process', daemon=True)]
     processes['outputHandlers']=resultsDispatcher(config, queues, stopEvent)
-    processes['findFiles']=[mp.Process(target=filescan.findFilesWorker, args=(config, queues, totals, stopEvent,), name='findFiles_process', daemon=True)]
+    processes['findFiles']=[mp.Process(target=filescan.findFilesWorker, args=(config, queues, totals, stopEvent,), name='findFiles'+str(i)+'_process', daemon=True) for i in range(config.getMaxFilesScanProcs())]
     processes['filesQWorkers']=[mp.Process(target=fileHandlerDispatcher, args=(config, queues, totals, stopEvent, activeFilesQProcesses), name='fileHandler'+str(i)+'_process', daemon=True) for i in range(config.getMaxProcs())]
     processes['findDirs']=[mp.Process(target=filescan.findDirsWorker, args=(config, queues, totals, stopEvent,), name='findDirs_process', daemon=True)]
-    console.normal('Starting %d file scanner processes' % (config.getMaxProcs()))
+    console.normal('Starting %d file scanner processes' % (config.getMaxFilesScanProcs()))
+    console.normal('Starting %d file handler processes' % (config.getMaxProcs()))
 
     # Start each process in the processes dictionary
     for processType in processes:
@@ -473,7 +486,7 @@ def main():
     finally:
         # If the logger hasn't already been shutdown by a KeyboardInterrupt or other event
         if processes['logger'][0].is_alive():
-            logger.info('Scanned %d files for %s', totals['totalFilesScanned'].value, globalfuncs.sizeof_fmt(totals['totalBytes'].value))
+            logger.info('Scanned %d files for %s', totals['filesScanned'].value, globalfuncs.sizeof_fmt(totals['bytesScanned'].value))
             logger.info('Found %d files with matching content', totals['totalResults'].value)
 
             # Terminate the logProcessor and progress line worker

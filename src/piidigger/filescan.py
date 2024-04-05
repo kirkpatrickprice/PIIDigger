@@ -48,7 +48,7 @@ def findDirsWorker(config: classes.Config,
         for d in config.getStartDirs():
             localQ.append(pathlib.Path(d))
             queues['dirsQ'].put(pathlib.Path(d))
-            totals['totalDirs'].value+=1
+            totals['dirsFound'].value+=1
 
         while not stopEvent.is_set() or not ctrlc:
             try:
@@ -75,7 +75,7 @@ def findDirsWorker(config: classes.Config,
                                 logger.debug('Including directory %s', str(subD))
                                 localQ.append(subD)
                                 queues['dirsQ'].put(subD)
-                                totals['totalDirs'].value+=1
+                                totals['dirsFound'].value+=1
                     except FileNotFoundError:
                         pass
                     except OSError as e:
@@ -88,13 +88,11 @@ def findDirsWorker(config: classes.Config,
         queues['dirsQ'].put(None)
         globalfuncs.waitOnQ(queues['dirsQ'])
     except KeyboardInterrupt:
-        console.normal('\n')
-        console.warn('User terminated scan.  Shutting down.')
         logger.info('KeyboardInterrupt received in findDirsWorker')
         globalfuncs.clearQ(queues['dirsQ'])
     finally:
         # All directories have been scanned.  Send the sentinel message to shutdown the consumer threads
-        logger.info('Found %d folders', totals['totalDirs'].value)
+        logger.info('Found %d folders', totals['dirsFound'].value)
         logger.info('Stopping findDirsWorker')
 
         
@@ -131,6 +129,8 @@ def findFilesWorker(config: classes.Config,
             
             # Path-ify the directory name
             d=pathlib.Path(item)
+            with totals['dirsScanned'].get_lock():
+                totals['dirsScanned'].value+=1
             
             try: 
                 logger.info('Scanning directory: %s', str(d))
@@ -140,8 +140,12 @@ def findFilesWorker(config: classes.Config,
                         mimeType = getMime(f)
                         match=fileMatches(f, config.getFileExts(), config.getMimeTypes())
                         if match:
-                            queues['filesQ'].put(classes.File(f, mimeType))
-                            totals['totalFilesFound'].value+=1
+                            fObj=classes.File(f, mimeType)
+                            queues['filesQ'].put(fObj)
+                            with totals['filesFound'].get_lock():
+                                totals['filesFound'].value+=1
+                            with totals['bytesFound'].get_lock():
+                                totals['bytesFound'].value+=fObj.getFileSize()
                         else:
                             logger.debug('%s: Item not added (suffix: %s | mime: %s)', f, f.suffix, mimeType)
                     else:
@@ -163,7 +167,7 @@ def findFilesWorker(config: classes.Config,
         globalfuncs.clearQ(queues['dirsQ'])
         globalfuncs.clearQ(queues['filesQ'])
     finally:
-        logger.info('Found %d files', totals['totalFilesFound'].value)
+        logger.info('Found %d files', totals['filesFound'].value)
         logger.info('Stopping findFilesWorker')
 
 
@@ -209,108 +213,4 @@ def fileMatches(f: pathlib.Path, fileExts: list, mimeTypes: list) -> bool:
     return extFound or mimeFound
 
 
-def _filesQStubWorker(queues: dict, totals: dict):
-    import random, time
-    
-    result={'filename': '/path/to/filename.txt',
-            'pan': {
-                'visa': {'4893 01** **** 6137',}}}
-    
-    logger=logging.getLogger('filesQStubWorker')
-    logger.addHandler(QueueHandler(queues['logQ']))
-    logger.propagate=False
-    logger.info('Starting filesQStubWorker')
 
-    while True:
-        item=queues['filesQ'].get()
-        if item == None:
-            queues['filesQ'].put(item)
-            break
-        r=(random.random())
-        time.sleep(r/4)
-        totals['totalFilesScanned'].value+=1
-        if r<.1:
-            queues['resultsQ'].put(result)
-    
-    # Send the sentinel message to the results queue to shutdown
-    queues['resultsQ'].put(None)
-    logger.info('Stopping filesQStubWorker')
-
-def _resultsQStubWorker(queues: dict, totals: dict):
-    logger=logging.getLogger('resultsQStubWorker')
-    logger.addHandler(QueueHandler(queues['logQ']))
-    logger.propagate=False
-    logger.info('Starting resultsQStubWorker')
-
-    while True:
-        item=queues['resultsQ'].get()
-        if item == None:
-            break
-        totals['totalResults'].value+=1
-
-    logger.info('Stopping filesQStubWorker')
-
-def main():
-    '''
-    Testing for the fileparser module.  Normally these options would all be set in the main program or passed to findDirsWorker and findFilesWorker
-    '''
-    from datetime import datetime
-    import os
-    start=datetime.now()
-    config=classes.Config('dne.toml')
-    queues={name: mp.Queue() for name in ['logQ', 'dirsQ', 'filesQ', 'resultsQ']}
-    totals={k: mp.Value('i', 0) for k in ['totalDirs', 'totalFilesFound', 'totalFilesScanned', 'totalResults']}
-    stopEvent=mp.Event()
-    stopEvent.clear()
-    
-    
-    console.normal('File spec to match: %s' % (str(config.getFileExts())))
-    console.normal('Mime types to match: %s' % (str(config.getMimeTypes())))
-    console.normal('Scanning %s for matching files...' % (config.getStartDirs()))
-
-    #####################################
-    # Bring up the pipe line in reverse order -- starting with results and working back to scanning for directories
-    #####################################
-    processResultsThread=threading.Thread(target=_resultsQStubWorker, args=(queues,totals,), daemon=True)
-    processResultsThread.start()
-
-    filesQProcesses=[mp.Process(target=_filesQStubWorker, args=(queues,totals)) for i in range(os.cpu_count())]
-    
-    #Uncomment for debugging the files queue stub
-    #filesQProcesses=[mp.Process(target=_filesQStubWorker, args=(queues,totals))]
-
-    # for process in filesQProcesses:
-    #     try:
-    #         process.start()
-    #     except KeyboardInterrupt:
-    #         print('Quitting...')
-    #         exit()
-
-    # findFilesThread=threading.Thread(target=findFilesWorker, args=(config, queues, totals))
-    # findFilesThread.start()
-    
-    findDirsThread=threading.Thread(target=findDirsWorker, args=(config, queues, totals, stopEvent))
-    findDirsThread.start()
-
-    # Populate the dirsQ with the initial directories from the config.  findFilesWorker will start with these while waiting for findDirs to identify more
-    # for item in config.getStartDirs():
-    #     queues['dirsQ'].put(item)
-
-    ##################################
-    # Wait for the threads/processes to complete by joining each of the threads/processes in the pipeline in pipeline order
-    ##################################
-    findDirsThread.join()
-    # findFilesThread.join()
-    # for process in filesQProcesses:
-    #     process.join()
-    # processResultsThread.join()
-
-    # There will be an extra item in the files queue, so pull it out.  Without this, the queuefeederthread used by MP will not shutdown
-    _=queues['filesQ'].get()
-
-    print("\nTotal time: ", datetime.now() - start)
-
-    sys.exit()
-    
-if __name__ == '__main__':
-    main()
