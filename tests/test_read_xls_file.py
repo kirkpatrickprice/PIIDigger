@@ -5,6 +5,7 @@ import pytest
 from piidigger.filehandlers import xls
 from piidigger.globalfuncs import clearQ
 
+@pytest.mark.filehandlers
 @pytest.mark.parametrize('filename, expected_result', [
                             ('testdata/xls/empty-file.xls', [('', 0)]),
                             ('testdata/xls/random-data-table.xls', 

@@ -5,6 +5,7 @@ import pytest
 from piidigger.filehandlers import docx
 from piidigger.globalfuncs import clearQ
 
+@pytest.mark.filehandlers
 @pytest.mark.parametrize('filename, expected_result', [
                             ('testdata/docx/empty-file.docx', []),
                             ('testdata/docx/lorem-ipsum-1line-comments.docx', 

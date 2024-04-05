@@ -2,6 +2,7 @@ import pytest
 
 from piidigger.getencoding import getEncoding
 
+@pytest.mark.filehandlers
 @pytest.mark.parametrize('testFile, expected_result', [
                                 ('testdata/pan/sample-pans.json', 'ascii'),
                                 ('testdata/binary-json.json', None),

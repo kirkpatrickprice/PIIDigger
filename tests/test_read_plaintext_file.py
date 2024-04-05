@@ -5,6 +5,7 @@ import pytest
 from piidigger.filehandlers import plaintext
 from piidigger.globalfuncs import clearQ
 
+@pytest.mark.filehandlers
 @pytest.mark.parametrize('filename, expected_result', [
                             ('testdata/plaintext/does-not-exist.txt', []),
                             ('testdata/plaintext/empty-file-utf16le-crlf.txt', [('', 0)]),

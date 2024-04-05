@@ -5,6 +5,7 @@ import pytest
 from piidigger.globalfuncs import writeDefaultConfig, getDefaultConfig
 import tomli
 
+@pytest.mark.utils
 def test_write_default_config():
     expectedConfig=getDefaultConfig()
     testFile = 'testDefault.toml'

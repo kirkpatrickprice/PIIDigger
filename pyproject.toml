@@ -63,3 +63,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = "src/"
 addopts = ["--import-mode=importlib",]
+markers = [
+    "datahandlers: mark a test as a data handler test",
+    "filehandlers: mark a test as a file handler test",
+    "unit: mark a test as a unit test",
+    "utils: mark a test as a utility test",
+    ]

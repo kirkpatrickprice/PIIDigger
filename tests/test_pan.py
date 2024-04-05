@@ -2,6 +2,7 @@ import pytest
 
 from piidigger.datahandlers import pan
 
+@pytest.mark.datahandlers
 @pytest.mark.parametrize('data, expected_result', [
                             ('4893 0133 3538 6137', {'visa': {'4893 01** **** 6137'}}),
                             ('4684399293674835', {'visa': {'468439******4835'}}),
