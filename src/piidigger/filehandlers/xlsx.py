@@ -98,7 +98,7 @@ def readFile(filename: str,
                     if blankRowCount>excelBlankRowLimit:
                         logger.debug('%s[Sheet %s]: Blank row count exceeded at row %d', filename, sheet, rowCount)
                         break
-                if len(content.strip()) > maxContentSize:
+                if len(content.strip()) >= maxContentSize:
                     totalBytes += len(content.strip())
                     yield content.strip()
                     content = unused
@@ -124,8 +124,8 @@ def readFile(filename: str,
         logger.error('%s: %s', filename, e)
     except BadZipFile as e:
         logger.error('%s: %s', filename, e)
-    except Exception as e:
-        logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
+    # except Exception as e:
+    #     logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
     else:
         book.close()
 

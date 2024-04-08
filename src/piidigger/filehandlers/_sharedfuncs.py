@@ -6,24 +6,18 @@
 def appendContent(content: str, line: str, maxContentSize: int):
     '''Appends a line of text to a content string, returning the updated content string'''
 
-    if (len(content.strip()) + len(line.strip())) < maxContentSize:
-        if content == '':
-            content = replaceChars(line)
-        else:
-            content += ' '+replaceChars(line)
-    else:
-        i: int = 0
-        words: list = line.split()
-        for word in line.split():
-            i+=1
-            if content == '':
-                content = word
-            else:
-                content += ' ' + word
-            if len(content.strip()) > maxContentSize:
-                return (content.strip(), ' '.join(words[i:])) 
-    
-    return content.strip(), ''
+    line = replaceChars(line)
+    contentWords=content.split()
+    lineWords = line.split()
+
+    while len(' '.join(contentWords)) < maxContentSize:
+        try:
+            word=lineWords.pop(0)
+            contentWords.append(word)
+        except IndexError:
+            break
+        
+    return ' '.join(contentWords), ' '.join(lineWords)    
 
 
 def replaceChars(content: str) -> str:
