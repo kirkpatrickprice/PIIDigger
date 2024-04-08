@@ -44,7 +44,8 @@ CPU cores: 16
 ## Chunk Size
 For now, the Regex chunk size is hard-coded at 650 bytes.  In testing, this seemed to be the "happy place" at least for the current set of datahandlers.  Maybe there will be a feature to adjust that dynamically based on performance.
 
-The quantity of data read from each file is a funciton of Regex chunk size.  Currently, the file handlers will read 100,000 Regex chunks (or approx 61MB) of data at a time.  This should ensure that disk IO is not the bottle neck, while hopefully consuming reasonable amounts of RAM.
+The quantity of data read from each file is a function of Regex chunk size.  Currently, the file handlers will read 100,000 Regex chunks (or approx 61MB) of data at a time.  This should ensure that disk IO is not the bottle neck, while hopefully consuming reasonable amounts of RAM.
+
 
 ## RAM Utilization
 As a rule, fewer concurrent processes will use less RAM than the default.  However, RAM usage will NOT be a one-to-one correlation with the `-p` value.
