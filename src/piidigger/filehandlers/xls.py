@@ -1,5 +1,6 @@
 import logging
 from logging.handlers import QueueHandler
+from collections.abc import Iterator
 
 import xlrd
 
@@ -29,7 +30,8 @@ handles={
 
 def readFile(filename: str, 
                 logConfig: dict,
-                maxChunkCount = defaultChunkCount,):
+                maxChunkCount = defaultChunkCount,
+            ) -> Iterator[str]:
     ''''
     Handle all file IO and text extraction operations for this file type.  Returns a list of results that have been validated by each datahandler.  
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.

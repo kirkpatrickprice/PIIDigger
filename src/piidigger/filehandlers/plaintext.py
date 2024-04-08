@@ -1,5 +1,6 @@
 import codecs, logging
 from logging.handlers import QueueHandler
+from collections.abc import Iterator
 
 from piidigger.getencoding import getEncoding
 from piidigger.filehandlers._sharedfuncs import appendContent
@@ -46,7 +47,7 @@ handles={
 def readFile(filename: str, 
             logConfig: dict,
             maxChunkCount: int = defaultChunkCount,
-            ):
+            ) -> Iterator[str]:
     ''''
     Handle all file IO and text extraction operations for this file type.  Returns a generator object tied to maxChunkSize (650) * maxChunkCount bytes of text.  
     "filename" is a string of the path and filename to process.  logConfig is a two-key dictionary consisting of 'q' and 'level' for logging.
