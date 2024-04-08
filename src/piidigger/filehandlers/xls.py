@@ -87,7 +87,7 @@ def readFile(filename: str,
                     if blankRowCount > excelBlankRowLimit:
                         logger.debug('%s[Sheet %s]: Blank row count exceeded at row %d', filename, sheet, rowCount)
                         break
-                if len(content.strip()) > maxContentSize:
+                if len(content.strip()) >= maxContentSize:
                     totalBytes += len(content.strip())
                     yield content.strip()
                     content = unused

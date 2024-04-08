@@ -26,7 +26,7 @@ from piidigger.globalfuncs import clearQ
                                 ]),
                             ('testdata/docx/lorem-ipsum-1line-with-footnote-endnote.docx', 
                                 [
-                                    ("Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.----footnote1--------endnote1---- footnote1)  FOOTNOTE endnote1)  ENDNOTE {'title': None, 'subject': None, 'creator': 'Randy Bartels', 'keywords': None, 'description': None, 'lastModifiedBy': 'Randy Bartels', 'revision': '4', 'created': '2024-03-28T21:17:00Z', 'modified': '2024-03-28T21:18:00Z'}", 419)
+                                    ("Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.----footnote1--------endnote1---- footnote1) FOOTNOTE endnote1) ENDNOTE {'title': None, 'subject': None, 'creator': 'Randy Bartels', 'keywords': None, 'description': None, 'lastModifiedBy': 'Randy Bartels', 'revision': '4', 'created': '2024-03-28T21:17:00Z', 'modified': '2024-03-28T21:18:00Z'}", 417)
                                 ]),
                             ('testdata/docx/lorem-ipsum-1line-with-table.docx', 
                                 [

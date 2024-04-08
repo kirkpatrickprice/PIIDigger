@@ -124,8 +124,8 @@ def readFile(filename: str,
         logger.error('%s: %s', filename, e)
     except BadZipFile as e:
         logger.error('%s: %s', filename, e)
-    # except Exception as e:
-    #     logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
+    except Exception as e:
+        logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
     else:
         book.close()
 
