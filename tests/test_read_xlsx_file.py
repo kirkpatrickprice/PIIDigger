@@ -39,6 +39,7 @@ from piidigger.globalfuncs import clearQ
                                     ('Samantha Watson Female 23 s.watson@randatmail.com Upper secondary David Warren Male 21 d.warren@randatmail.com Bachelor Camila Fowler Female 25 c.fowler@randatmail.com Upper secondary Sawyer Richards Male 30 s.richards@randatmail.com Master Kristian Chapman Male 22 k.chapman@randatmail.com Primary Leonardo Payne Male 25 l.payne@randatmail.com Master Madaline Russell Female 19 m.russell@randatmail.com Primary Elian Cameron Male 21 e.cameron@randatmail.com Doctoral Dale Hunt Male 18 d.hunt@randatmail.com Primary Mike Evans Male 20 m.evans@randatmail.com Primary Eleanor Casey Female 26 e.casey@randatmail.com Doctoral John Thompson Male 22 j.thompson@randatmail.com Upper secondary Emily Taylor Female 23 e.taylor@randatmail.com Lower secondary Michael Davis Male 22 m.davis@randatmail.com Bachelor Lyndon Kelly Male 30 l.kelly@randatmail.com Bachelor Joyce Dixon Female 19 j.dixon@randatmail.com Bachelor Adison Myers Male 30 a.myers@randatmail.com Doctoral Brooke Harper Female 18 b.harper@randatmail.com Lower secondary', 1026)
                                 ]),
                             ('testdata/xlsx/test-1sheet-1cell.xlsx', [('S1R1C1', 6)]),
+                            ('testdata/xlsx/test-1sheet-1cell-carriage-return.xlsx', [('S1R1C1L1 S1R1C1L2', 17)]),
                             ('testdata/xlsx/test-1sheet-1row.xlsx', [("S1R1C1 S1R1C2 S1R1C3 S1R1C4", 27)]),
                             ('testdata/xlsx/test-1sheet-10row-table.xlsx', 
                                 [
