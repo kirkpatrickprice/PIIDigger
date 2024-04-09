@@ -21,6 +21,10 @@ import piidigger.classes as classes
 from piidigger import console
 from piidigger import filescan
 from piidigger import globalfuncs
+from piidigger.globalvars import (
+    errorCodes,
+    version,
+    )
 
 
 def cleanup(processes: dict,
@@ -113,6 +117,12 @@ def commandLineParser() -> argparse.ArgumentParser:
         action='store_true',
         help='Display the list of file types and exit'
     )
+    miscInfoControl.add_argument(
+        '--version', '-v',
+        dest='version',
+        action='store_true',
+        help='Display the version number and exit'
+    )
     
     return parser.parse_args()
 
@@ -165,7 +175,7 @@ def fileHandlerDispatcher(config: classes.Config,
     try:
         with activeFilesQProcesses.get_lock():
             activeFilesQProcesses.value+=1
-        dataHandlersModules=globalfuncs.getEnabledDataHandlerModules(config.getDataHandlers())
+        dataHandlerModules=globalfuncs.getEnabledDataHandlerModules(config.getDataHandlers())
 
         logger=logging.getLogger('fileHandlerDispatch')
         if not logger.handlers:
@@ -173,6 +183,7 @@ def fileHandlerDispatcher(config: classes.Config,
         logger.setLevel(config.getLogLevel())
         logger.propagate=False
         logger.debug('Process %s (%s) started (Active=%d)', mp.current_process().name, mp.current_process().pid, activeFilesQProcesses.value)
+        resultsQs = [qName for qName in queues.keys() if qName.endswith('_resultsQ')]
         
         logConfig={'q': queues['logQ'],
                 'level': config.getLogLevel(),
@@ -185,21 +196,60 @@ def fileHandlerDispatcher(config: classes.Config,
             if item == None:
                 queues['filesQ'].put(item)
                 break
+
+            # Set some variables for this item
             filename=item.getFullPath()
             fileHandlerModule=globalfuncs.getFileHandlerModule(item.getFileHandlerName())
-            logger.info('[%s]Processing %s with %s', mp.current_process().name, filename, fileHandlerModule.__name__)
-            result=fileHandlerModule.processFile(filename, dataHandlersModules, logConfig)
-            logger.debug('[%s]%s: Returned from %s', mp.current_process().name, filename, fileHandlerModule.__name__)
-            with totals['totalFilesScanned'].get_lock():
-                totals['totalFilesScanned'].value+=1
-            with totals['totalBytes'].get_lock():
-                totals['totalBytes'].value+=item.getFileSize()
+            results={
+                'filename': filename,
+                'matches': {}
+            }
             
-            if len(result['matches'])>0:
-                logger.debug('%s: %s matches found', filename, str(result['matches'].keys()))
-                totals['totalResults'].value+=globalfuncs.countResults(result['matches'])
-                for q in [qName for qName in queues.keys() if qName.endswith('_resultsQ')]:
-                    queues[q].put(result)
+            logger.info('[%s]Processing %s with %s', mp.current_process().name, filename, fileHandlerModule.__name__)
+            
+            for content in fileHandlerModule.readFile(filename, logConfig):
+                logger.debug('%s: Received %d bytes from file hander', filename, len(content))
+
+                if content == '':
+                    break
+                
+                # chunks=globalfuncs.makeChunks(content)
+                # logger.debug('%s: Created %d chunks', filename, len(chunks))
+
+                # We only need chunks from here out.  Conserve a little memory by deleting "content"
+                #del content
+
+                for handler in dataHandlerModules:
+                    #logger.debug('%s: Processing %d chunks with %s', filename, len(chunks), handler.dhName)
+                    # for chunk in chunks:
+                    #     results=globalfuncs.processMatches(results, handler.findMatch(chunk), handler.dhName)
+                    results=globalfuncs.processMatches(results, handler.findMatch(content), handler.dhName)
+                    # logger.debug('%s: %d chunks processed with %s', filename, len(chunks), handler.dhName)
+
+            # Update the status counters
+            with totals['filesScanned'].get_lock():
+                totals['filesScanned'].value+=1
+            with totals['bytesScanned'].get_lock():
+                totals['bytesScanned'].value+=item.getFileSize()
+            
+            # Submit the results to outputhandlers
+            if len(results['matches']) > 0:
+                logger.debug('%s: %s matches found', filename, str(results['matches'].keys()))
+                
+                # Since Python sets aren't serializable as a JSON object type, we'll convert our results to Lists now.
+                logger.debug('%s: Rebuilding result sets into lists', filename)
+                for handler in results['matches']:
+                    for key in results['matches'][handler]:
+                        l=list(results['matches'][handler][key])
+                        results['matches'][handler][key]=l
+
+                # Update the results totals
+                totals['totalResults'].value += globalfuncs.countResults(results['matches'])
+                for q in resultsQs:
+                    queues[q].put(results)
+
+            logger.debug('%s: Processing complete', filename)
+
     except KeyboardInterrupt:
         for q in [qName for qName in queues.keys() if qName.endswith('_resultsQ')]:
             globalfuncs.clearQ(queues[q])
@@ -259,7 +309,12 @@ def progressLineWorker(totals: dict,
 
         while True:
             screenWidth=console.getTerminalSize()[0]
-            line='%s | Folders scanned: %d | Files identified: %d | Files scanned: %d (%s) | Results found: %d' % (str(datetime.now() - startTime).split('.')[0], totals['totalDirs'].value, totals['totalFilesFound'].value, totals['totalFilesScanned'].value, globalfuncs.sizeof_fmt(totals['totalBytes'].value), totals['totalResults'].value)
+            line='{} | Folders scanned: {:,}/{:,} | Files scanned: {:,}/{:,} ({}/{}) | Results found: {}'.format(
+                str(datetime.now() - startTime).split('.')[0], 
+                totals['dirsScanned'].value, totals['dirsFound'].value, 
+                totals['filesScanned'].value, totals['filesFound'].value, 
+                globalfuncs.sizeof_fmt(totals['bytesScanned'].value), globalfuncs.sizeof_fmt(totals['bytesFound'].value),
+                totals['totalResults'].value)
             if len(line) > screenWidth:
                 line=line[:screenWidth-1]
 
@@ -303,16 +358,20 @@ def main():
 
     if args.cpuCount:
         print('CPU cores:', cpu_count())
-        sys.exit(globalfuncs.errorCodes['ok'])
+        sys.exit(errorCodes['ok'])
 
     if args.listDH:
         print('Data handler modules: ', globalfuncs.getSupportedDataHandlerNames())
-        sys.exit(globalfuncs.errorCodes['ok'])
+        sys.exit(errorCodes['ok'])
 
     if args.listFT:
         print('File extns: ', globalfuncs.getSupportedFileExts())
         print('MIME types: ', globalfuncs.getSupportedFileMimes())
-        sys.exit(globalfuncs.errorCodes['ok'])
+        sys.exit(errorCodes['ok'])
+
+    if args.version:
+        print('PIIDigger version:', version)
+        sys.exit(errorCodes['ok'])
 
     if len(args.createConfigFile) >0:
         tomlFile = str(args.createConfigFile) if str(args.createConfigFile).endswith('.toml') else str(args.createConfigFile)+'.toml'
@@ -320,10 +379,10 @@ def main():
 
         if configFileWritten=='Success':
             console.normal('Default configuration written to '+args.createConfigFile)
-            sys.exit(globalfuncs.errorCodes['ok'])
+            sys.exit(errorCodes['ok'])
         else:
             console.error('Config file not written: %s' % (configFileWritten))
-            sys.exit(globalfuncs.errorCodes['unknown'])
+            sys.exit(errorCodes['unknown'])
 
     if args.defaultConfig:
         config=classes.Config(configFile='', useDefault=True)
@@ -334,7 +393,14 @@ def main():
         config.setMaxProcs(min(cpu_count(), args.maxProc))
 
     # Create queues and other structures needed for asynchronous implementation
-    totals={k: mp.Value(c_uint64, 0) for k in ['totalDirs', 'totalFilesFound', 'totalFilesScanned', 'totalBytes', 'totalResults']}
+    totals={k: mp.Value(c_uint64, 0) for k in [
+        'dirsScanned', 
+        'dirsFound', 
+        'filesScanned', 
+        'filesFound', 
+        'bytesScanned', 
+        'bytesFound',
+        'totalResults']}
     queues={name: mp.Queue() for name in ['logQ', 'dirsQ', 'filesQ', 'totalsQ',]}
     activeFilesQProcesses=mp.Value(c_int, 0)
     processes = dict()
@@ -354,6 +420,7 @@ def main():
     logger=logging.getLogger('main')
         
     logger.info('Command line arguments: %s', sys.argv[1:])
+    logger.info('Starting PIIDigger version %s', version)
     logger.info("Configuration: %s", json.dumps(config.getConfig()))
 
     if len(config.getMimeTypes()) == 0:        
@@ -376,10 +443,11 @@ def main():
     # Setup each of the subprocesses that are needed
     processes['progressLine']=[mp.Process(target=progressLineWorker, args=(totals,queues['logQ'], start, stopEvent), name='progressLine_process', daemon=True)]
     processes['outputHandlers']=resultsDispatcher(config, queues, stopEvent)
-    processes['findFiles']=[mp.Process(target=filescan.findFilesWorker, args=(config, queues, totals, stopEvent,), name='findFiles_process', daemon=True)]
+    processes['findFiles']=[mp.Process(target=filescan.findFilesWorker, args=(config, queues, totals, stopEvent,), name='findFiles'+str(i)+'_process', daemon=True) for i in range(config.getMaxFilesScanProcs())]
     processes['filesQWorkers']=[mp.Process(target=fileHandlerDispatcher, args=(config, queues, totals, stopEvent, activeFilesQProcesses), name='fileHandler'+str(i)+'_process', daemon=True) for i in range(config.getMaxProcs())]
     processes['findDirs']=[mp.Process(target=filescan.findDirsWorker, args=(config, queues, totals, stopEvent,), name='findDirs_process', daemon=True)]
-    console.normal('Starting %d file scanner processes' % (config.getMaxProcs()))
+    console.normal('Starting %d file scanner processes' % (config.getMaxFilesScanProcs()))
+    console.normal('Starting %d file handler processes' % (config.getMaxProcs()))
 
     # Start each process in the processes dictionary
     for processType in processes:
@@ -418,7 +486,7 @@ def main():
     finally:
         # If the logger hasn't already been shutdown by a KeyboardInterrupt or other event
         if processes['logger'][0].is_alive():
-            logger.info('Scanned %d files for %s', totals['totalFilesScanned'].value, globalfuncs.sizeof_fmt(totals['totalBytes'].value))
+            logger.info('Scanned %d files for %s', totals['filesScanned'].value, globalfuncs.sizeof_fmt(totals['bytesScanned'].value))
             logger.info('Found %d files with matching content', totals['totalResults'].value)
 
             # Terminate the logProcessor and progress line worker

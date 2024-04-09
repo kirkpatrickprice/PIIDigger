@@ -2,17 +2,18 @@ import logging
 import openpyxl
 import warnings
 from logging.handlers import QueueHandler
+from collections.abc import Iterator
 
 from openpyxl.utils.exceptions import *
 from zipfile import BadZipFile
 
-# Only need to modify the path during unit testing of this file.
-if __name__=='__main__':
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).absolute().parent.parent / ''))
-
-import piidigger.globalfuncs as globalfuncs
+from piidigger.filehandlers._sharedfuncs import appendContent
+from piidigger.globalvars import (
+    excelBlankColLimit, 
+    excelBlankRowLimit, 
+    maxChunkSize, 
+    defaultChunkCount,
+    )
 
 # Ignore the UserWarning message from OpenPyXL that seem to pop up here and there
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
@@ -37,23 +38,25 @@ handles={
         ],
 }
 
-def processFile(filename: str, dataHandlers: list, logConfig: dict) -> list:
+def readFile(filename: str, 
+             logConfig: dict,
+             maxChunkCount: int = defaultChunkCount,
+            ) -> Iterator[str]:
     ''''
     Handle all file IO and text extraction operations for this file type.  Returns a list of results that have been validated by each datahandler.  
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
     '''
 
-    logger=logging.getLogger('xlsx-handler')
+    logger: logging = logging.getLogger('xlsx-handler')
     if not logger.handlers:
         logger.addHandler(QueueHandler(logConfig['q']))
     logger.setLevel(logConfig['level'])
     logger.propagate=False
-    
-    results={
-        'filename': filename,
-        'matches': dict()
-    }
+    content: str = ''
+    totalBytes: int = 0
+    maxContentSize = maxChunkSize * maxChunkCount
 
+    
     try:
         # Don't use "on_demand" in order to keep the code simpler.  All worksheets are loaded into RAM.
         # Some spreadsheet dimensions can't be accurately determined -- e.g. if there's a lot of extraneous formatting to make it look "pretty"
@@ -65,7 +68,7 @@ def processFile(filename: str, dataHandlers: list, logConfig: dict) -> list:
         for sheet in book.sheetnames:
             logger.debug('%s: Processing worksheet: %s', filename, str(sheet))
             activeSheet=book[sheet]
-            content=str()
+            content: str = ''
             blankRowCount=0
             rowCount=0
             # create a string with all of the content of this sheet
@@ -74,37 +77,35 @@ def processFile(filename: str, dataHandlers: list, logConfig: dict) -> list:
             for row in activeSheet.iter_rows(values_only=True):
                 rowCount+=1
                 rowHasData=False
-                blankColCount=0
+                line: str = ''
+                blankColCount: int = 0
                 for item in row:
                     if isinstance(item, openpyxl.cell.cell.MergedCell):
                         continue
                     if item is None or item == '':
                         blankColCount+=1
-                        if blankColCount>globalfuncs.excelBlankColLimit:
+                        if blankColCount>excelBlankColLimit:
                             break
                         continue
-                    content += str(item) + ' '
+                    line += str(item) + ' '
                     rowHasData=True
+                content, unused = appendContent(content, line, maxContentSize)
+
                 if rowHasData:
                     blankRowCount=0
-                    content += ' '
                 else:
                     blankRowCount+=1
-                    if blankRowCount>globalfuncs.excelBlankRowLimit:
+                    if blankRowCount>excelBlankRowLimit:
                         logger.debug('%s[Sheet %s]: Blank row count exceeded at row %d', filename, sheet, rowCount)
                         break
+                if len(content.strip()) >= maxContentSize:
+                    totalBytes += len(content.strip())
+                    yield content.strip()
+                    content = unused
 
             logger.debug('%s[Sheet %s]: Read content (%d bytes)', filename, sheet, len(content))
-            chunks = globalfuncs.makeChunks(content)
-            logger.debug('%s[Sheet %s]: Created %d chunks', filename, sheet, len(chunks))
-
-            del content
-
-            for handler in dataHandlers:
-                logger.debug('%s[Sheet %s]: Processing %d chunks with %s', filename, sheet, len(chunks), handler.dhName)
-                for chunk in chunks:
-                    results=globalfuncs.processMatches(results, handler.findMatch(chunk), handler.dhName)
-        book.close()
+            yield content.strip()
+            
     except FileNotFoundError:
         logger.error('Previously discovered file no longer exists: %s. File skipped', filename)
     except PermissionError as e:
@@ -125,31 +126,8 @@ def processFile(filename: str, dataHandlers: list, logConfig: dict) -> list:
         logger.error('%s: %s', filename, e)
     except Exception as e:
         logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
+    else:
+        book.close()
 
 
-    
-    # Since Python sets aren't serializable as a JSON object type, we'll convert our results to Lists now.
-    logger.debug('%s: Rebuilding result sets into lists', filename)
-    for handler in results['matches']:
-        for key in results['matches'][handler]:
-            l=list(results['matches'][handler][key])
-            results['matches'][handler][key]=l
-
-    logger.debug('%s: Processing complete', filename)
-    return results
-
-
-def main():
-    from sys import argv
-    from multiprocessing import Queue
-    handlers=globalfuncs.getAllDataHandlerModules()
-    logConfig={'q': Queue(),
-                'level': "DEBUG",
-                }
-    for arg in argv[1:]:
-
-        print(processFile(arg, handlers, logConfig))
-
-if __name__ == '__main__':
-    main()
 

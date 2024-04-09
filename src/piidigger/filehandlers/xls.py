@@ -1,14 +1,16 @@
 import logging
-import xlrd
 from logging.handlers import QueueHandler
+from collections.abc import Iterator
 
-# Only need to modify the path during unit testing of this file.
-if __name__=='__main__':
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).absolute().parent.parent / ''))
+import xlrd
 
-import piidigger.globalfuncs as globalfuncs
+from piidigger.filehandlers._sharedfuncs import appendContent
+from piidigger.globalvars import (
+    excelBlankColLimit, 
+    excelBlankRowLimit, 
+    maxChunkSize, 
+    defaultChunkCount,
+    )
 
 # Each filehandler must have the following:
 #   "handles" -     dictionary to identify lists of file extensions and mime types that the handler will manage.
@@ -26,7 +28,10 @@ handles={
         ],
 }
 
-def processFile(filename: str, dataHandlers: list, logConfig: dict) -> list:
+def readFile(filename: str, 
+                logConfig: dict,
+                maxChunkCount = defaultChunkCount,
+            ) -> Iterator[str]:
     ''''
     Handle all file IO and text extraction operations for this file type.  Returns a list of results that have been validated by each datahandler.  
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
@@ -37,21 +42,18 @@ def processFile(filename: str, dataHandlers: list, logConfig: dict) -> list:
         logger.addHandler(QueueHandler(logConfig['q']))
     logger.setLevel(logConfig['level'])
     logger.propagate=False
+    totalBytes: int = 0
+    maxContentSize = maxChunkSize * maxChunkCount
     
-    results={
-        'filename': filename,
-        'matches': dict()
-    }
-
     try:
         # Don't use "on_demand" in order to keep the code simpler.  All worksheets are loaded into RAM.
 
-        book=xlrd.open_workbook(filename, on_demand=False, formatting_info=False,)
+        book=xlrd.open_workbook(filename, on_demand=True, formatting_info=False,)
         logger.debug('%s: Read %d worksheets', filename, len(book.sheet_names()))
         for sheet in book.sheet_names():
             logger.debug('Processing worksheet: %s', str(sheet))
             activeSheet=book.sheet_by_name(sheet)
-            content=str()
+            content: str = ''
             blankRowCount=0
             rowCount=0
             totalRows=activeSheet.nrows
@@ -60,38 +62,39 @@ def processFile(filename: str, dataHandlers: list, logConfig: dict) -> list:
             # Iterate through each cell in each row.  If we reach a limit of blank cells, move to the next row
             # If we reach a limit of blank rows, then move to the next sheet.
             for row in range(totalRows):
-                rowCount+=1
                 logger.debug('%s[Sheet %s]: Processing row [%d]', filename, sheet, rowCount)
+                line: str = ''
+                rowCount+=1
                 rowHasData=False
                 blankColCount=0
                 for col in range(totalCols):
                     item=activeSheet.cell_value(row, col)
                     if item is None or item == '':
                         blankColCount+=1
-                        if blankColCount>globalfuncs.excelBlankColLimit:
+                        if blankColCount > excelBlankColLimit:
                             break
                         continue
-                    content += str(item) + ' '
+                    # xlrd converts all numbers to floats.  If the float is really an integer (ends in '.0'), convert it to a string without the decimal point
+                    if type(item) == float and str(item)[-2:] == '.0':
+                        item = str(item)[:-2]
+                    line += str(item) + ' '
                     rowHasData=True
+                content, unused = appendContent(content, line, maxContentSize)
                 if rowHasData:
                     blankRowCount=0
-                    content += ' '
                 else:
                     blankRowCount+=1
-                    if blankRowCount>globalfuncs.excelBlankRowLimit:
+                    if blankRowCount > excelBlankRowLimit:
                         logger.debug('%s[Sheet %s]: Blank row count exceeded at row %d', filename, sheet, rowCount)
                         break
-
+                if len(content.strip()) >= maxContentSize:
+                    totalBytes += len(content.strip())
+                    yield content.strip()
+                    content = unused
+            book.unload_sheet(sheet)
             logger.debug('%s[Sheet %s]: Read content (%d bytes)', filename, sheet, len(content))
-            chunks = globalfuncs.makeChunks(content)
-            logger.debug('%s[Sheet %s]: Created %d chunks', filename, sheet, len(chunks))
-
-            del content
-
-            for handler in dataHandlers:
-                logger.debug('%s[Sheet %s]: Processing %d chunks with %s', filename, sheet, len(chunks), handler.dhName)
-                for chunk in chunks:
-                    results=globalfuncs.processMatches(results, handler.findMatch(chunk), handler.dhName)
+            yield content.strip()
+            
         book.release_resources()
     except FileNotFoundError:
         logger.error('Previously discovered file no longer exists: %s. File skipped', filename)
@@ -107,28 +110,4 @@ def processFile(filename: str, dataHandlers: list, logConfig: dict) -> list:
         logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
 
     
-    # Since Python sets aren't serializable as a JSON object type, we'll convert our results to Lists now.                    
-    logger.debug('%s: Rebuilding result sets into lists', filename)
-    for handler in results['matches']:
-        for key in results['matches'][handler]:
-            l=list(results['matches'][handler][key])
-            results['matches'][handler][key]=l
-
-    logger.debug('%s: Processing complete', filename)
-    return results
-
-
-def main():
-    from sys import argv
-    from multiprocessing import Queue
-    handlers=globalfuncs.getAllDataHandlerModules()
-    logConfig={'q': Queue(),
-                'level': "DEBUG",
-                }
-    for arg in argv[1:]:
-
-        print(processFile(arg, handlers, logConfig))
-
-if __name__ == '__main__':
-    main()
 

@@ -143,63 +143,52 @@ class Config:
         # Add Results and Log folders to the list of folders to exlude
         self.config['excludeDirs'][globalfuncs.getOSType()].append(str(pathlib.Path(self.getRootPath()) / outpath))
         self.config['excludeDirs'][globalfuncs.getOSType()].append(str(pathlib.Path(pathlib.Path(self.getRootPath()) / self.getLogFile()).parent))
-    
-
+ 
     def getDataHandlers(self):
         return self.config['dataHandlers']
-    
     
     def getEnabledOutputTypes(self):
         #return [key for key in self.config['results'].keys()]
         return self.config['results'].keys()
-    
-
+ 
     def getExcludeDirs(self):
         return self.config['excludeDirs'][globalfuncs.getOSType()]
-    
-
+ 
     def getFileExts(self):
         return self.config['includeFiles']['ext']
-    
-
+ 
     def getConfig(self):
         return self.config
-    
-
+ 
     def getLocalFilesOnly(self):
         return self.config['localFilesOnly']
     
-    
     def getLogLevel(self):
         return self.config['logging']['logLevel']
-    
-
+ 
     def getLogFile(self):
         return self.config['logging']['logFile']
 
+    def getMaxFilesScanProcs(self):
+        return max(self.getMaxProcs() // 4, 1)
 
     def getMaxProcs(self):
         return self.config['maxProcs']
-    
 
     def getMimeTypes(self):
         return self.config['includeFiles']['mime']
-    
 
     def getOutputFile(self, resultType: str = ""):
         if resultType:
             return self.config['results'][resultType]
         else:
             return self.config['results']
-    
 
     def getRootPath(self):
         return self.config['rootPath']
-    
 
     def getStartDirs(self):
         return self.config['includeFiles']['startDirs'][globalfuncs.getOSType()]
-    
     
     def setMaxProcs(self, procs):
         self.config['maxProcs']=procs

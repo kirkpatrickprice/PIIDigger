@@ -14,11 +14,6 @@ def getEncoding(filename: str,) -> str:
 
     '''
 
-# Determing the encoding is not an exact science.  In this method, we read up to MAXLINES of data for each encoding type and if no error is thrown, then that's our guess.
-# If we do throw a UnicodeDecodeError exception, then we try the next one.
-
-# Encodings should be listed in order of preference.  For instance, try UTF-8 before trying the more generic ASCII.  
-# Taken from https://docs.python.org/3.9/library/codecs.html#standard-encodings and includes the ones that support Western and many European languages
     logger=logging.getLogger(moduleName)
     detector = UniversalDetector()
     detector.logger.level=logging.INFO
