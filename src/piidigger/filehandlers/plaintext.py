@@ -1,13 +1,13 @@
 import codecs, logging
 from logging.handlers import QueueHandler
+from collections.abc import Iterator
 
-if __name__=='__main__':
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).absolute().parent.parent / ''))
-
-import piidigger.globalfuncs as globalfuncs
 from piidigger.getencoding import getEncoding
+from piidigger.filehandlers._sharedfuncs import appendContent
+from piidigger.globalvars import (
+    maxChunkSize,
+    defaultChunkCount,
+    )
 
 # Each filehandler must have the following:
 #   "handles" -     dictionary to identify lists of file extensions and mime types that the handler will manage.
@@ -44,67 +44,59 @@ handles={
 }
 
 
-def processFile(filename: str, 
-                dataHandlers: list, 
-                logConfig: dict,
-               ) -> list:
+def readFile(filename: str, 
+            logConfig: dict,
+            maxChunkCount: int = defaultChunkCount,
+            ) -> Iterator[str]:
     ''''
-    Handle all file IO and text extraction operations for this file type.  Returns a list of results that have been validated by each datahandler.  
-    "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
+    Handle all file IO and text extraction operations for this file type.  Returns a generator object tied to maxChunkSize (650) * maxChunkCount bytes of text.  
+    "filename" is a string of the path and filename to process.  logConfig is a two-key dictionary consisting of 'q' and 'level' for logging.
     '''
 
-    logger=logging.getLogger('plaintext-handler')
+    logger = logging.getLogger('plaintext_handler')
     if not logger.handlers:
         logger.addHandler(QueueHandler(logConfig['q']))
     logger.setLevel(logConfig['level'])
     logger.propagate=False
-    
-    results={
-        'filename': filename,
-        'matches': {}
-    }
+    content: str = ''
+    totalBytes: int = 0
+    maxContentSize = maxChunkSize * maxChunkCount
     
     enc = getEncoding(filename)
 
     if enc == None:
         logger.info('%s: Unknown encoding type', filename)
-        results['matches']={}
-        return results
+        return [content]
     else:
         logger.debug('%s: Encoding %s', filename, enc)
     
-    # After making our best guess with the encoding, replace any unexpected characters with a plain ASCII "?"
+    # After getting the encoding from chardet, replace any unexpected characters with a plain ASCII "?"
     # The risk is we could lose something important, but if that's the one piece of data anywhere on the file system that would have matched,
     # then it's a risk worth taking for a more stable discovery tool.  More likely is that we might miss ONE INSTANCE of data in a file system that has 
     # many more instances for discovery.
 
-    # First we open the file, then we pass each line of text to the datahandler.  File IO is the bottle neck, so by reading each file just once, we should
-    # be able to maintain reasonable performance.
+    # File IO is the bottle neck but we could also hit some really big files.
+    # By returning (through yield) the content in chunks, we can strike a balance between memory consumption and file IO speed.
 
-    # Then we combine all the file content into one string before breaking it up into bite-sized chunks for regex processing
+    # First we open the file, then we add each line so long as the resulting line length remains less than maxContentSize.  
+    # For the last line, we add one word at a time until we reach the limit.  
+
     try:
         with codecs.open(filename, 'r', encoding=enc, errors='replace') as f:
-            lines=f.readlines()
-            logger.debug('%s: Read %d lines', filename, len(lines))
-            
-            lines=[line.strip() for line in lines]
-            
-            content=' '.join(lines)
-            logger.debug('%s: Joined %d lines into content string (len=%d)', filename, len(lines), len(content))
+            for line in f:
+                content, unused = appendContent(content, line, maxContentSize)
+                if len(content.strip()) > maxContentSize:
+                    totalBytes += len(content.strip())
+                    yield content.strip()
+                    content = unused
 
-            # To conserve memory, especially on large files.  We only need the file content in one long string.
-            del lines
+    # Once we've processed the entire file, it's time to send that last bit of info that hasn't already been sent.
+        totalBytes += len(content.strip())
+        logger.debug('%s: Read %d lines', filename, totalBytes)
 
-            chunks=globalfuncs.makeChunks(content)
-            logger.debug('%s: Created %d chunks', filename, len(chunks))
+        # Return the last chunk of content    
+        yield content.strip()
 
-            del content
-
-            for handler in dataHandlers:
-                logger.debug('%s: Processing %d chunks with %s', filename, len(chunks), handler.dhName)
-                for chunk in chunks:
-                    results=globalfuncs.processMatches(results, handler.findMatch(chunk), handler.dhName)
-                logger.debug('%s: %d chunks processed with %s', filename, len(chunks), handler.dhName)
     except FileNotFoundError:
         logger.error('Previously discovered file no longer exists: %s. File skipped', f.absolute())
     except PermissionError as e:
@@ -117,30 +109,4 @@ def processFile(filename: str,
         logger.error('Codec lookup error processing file %s (enc=%s)', filename, enc)
     except Exception as e:
         logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
-        
-    # Since Python sets aren't serializable as a JSON object type, we'll convert our results to Lists now.
-    logger.debug('%s: Rebuilding result sets into lists', filename)
-    for handler in results['matches']:
-        for key in results['matches'][handler]:
-            l=list(results['matches'][handler][key])
-            results['matches'][handler][key]=l
-
-    logger.debug('%s: Processing complete', filename)
-    return results
-
-
-def main():
-    from sys import argv
-    from multiprocessing import Queue
-    handlers=globalfuncs.getAllDataHandlerModules()
-    logConfig={'q': Queue(),
-                'level': "DEBUG",
-                }
-    
-    for arg in argv[1:]:
-
-        print(processFile(arg, handlers, logConfig))
-
-if __name__ == '__main__':
-    main()
 

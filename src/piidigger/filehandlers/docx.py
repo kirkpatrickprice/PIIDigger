@@ -3,16 +3,16 @@
 import logging
 import warnings
 from logging.handlers import QueueHandler
+from collections.abc import Iterator
 
 from docx2python import docx2python
+from docx2python.iterators import iter_paragraphs
 
-# Only need to modify the path during unit testing of this file.
-if __name__=='__main__':
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).absolute().parent.parent / ''))
-
-import piidigger.globalfuncs as globalfuncs
+from piidigger.filehandlers._sharedfuncs import appendContent
+from piidigger.globalvars import (
+    maxChunkSize,
+    defaultChunkCount,
+    )
 
 warnings.filterwarnings('ignore', category=UserWarning, module='docx2python')
 
@@ -31,7 +31,9 @@ handles={
         ],
 }
 
-def processFile(filename: str, dataHandlers: list, logConfig: dict) -> list:
+def readFile(filename: str, 
+             logConfig: dict,
+             maxChunkCount = defaultChunkCount) -> Iterator[str]:
     ''''
     Handle all file IO and text extraction operations for this file type.  Returns a list of results that have been validated by each datahandler.  
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
@@ -42,65 +44,47 @@ def processFile(filename: str, dataHandlers: list, logConfig: dict) -> list:
         logger.addHandler(QueueHandler(logConfig['q']))
     logger.setLevel(logConfig['level'])
     logger.propagate=False
-
-    results={
-        'filename': filename,
-        'matches': dict()
-    }
+    content: str = ''
+    totalBytes: int = 0
+    maxContentSize = maxChunkSize * maxChunkCount
 
     try:
         # Read in all of the docx content and close the file
         docxContent=docx2python(filename)
 
-        # Manipulate the text to get everything into one continuous string (space-separated)
-        content=' '.join(docxContent.text.split('\n')).replace('\t', ' ') + ' ' + str(docxContent.core_properties)
-        logger.debug('%s: Read %d bytes', filename, len(content))
+        # This will iterate of the header, body and footer of the document, including all of the text and tables
+        for line in iter_paragraphs(docxContent.document):
+            content, unused = appendContent(content, line, maxContentSize)
+            if len(content.strip()) > maxContentSize:
+                totalBytes += len(content.strip())
+                yield content.strip()
+                content = unused
 
-        # Close the file now that we're done with it.
-        docxContent.close()
+        for comment in docxContent.comments:
+            if not comment is None:
+                content, unused = appendContent(content, comment[3], maxContentSize)
+                if len(content.strip()) > maxContentSize:
+                    totalBytes += len(content.strip())
+                    yield content.strip()
+                    content = unused
 
-        # Break up the text into bite-sized chunks for regex processing
-        chunks=globalfuncs.makeChunks(content)
-        logger.debug('%s: Created %d chunks', filename, len(chunks))
+        # No size check -- we'll just append the properties to the end of the content and send it
+        content += ' ' + str(docxContent.core_properties).replace('\t', ' ').strip()
 
-        del content
+    # Once we've processed the entire file, it's time to send that last bit of info that hasn't already been sent.
+        totalBytes += len(content.strip())
+        logger.debug('%s: Read %d lines', filename, totalBytes)
 
-        for handler in dataHandlers:
-            logger.debug('%s: Processing %d chunks with %s', filename, len(chunks), handler.dhName)
-            for chunk in chunks:
-                results=globalfuncs.processMatches(results, handler.findMatch(chunk), handler.dhName)
-    except FileNotFoundError:
-        logger.error('Previously discovered file no longer exists: %s. File skipped', filename)
-    except PermissionError as e:
-        logger.error('PermissionError adding %s.  File skipped.  Error message: %s', filename, str(e))
-    except OSError as e:
-        logger.error('OSError adding %s.  File skipped.  Error message: %s', filename, str(e))
-    except Exception as e:
-        logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
+        # Return the last chunk of content    
+        yield content.strip()
         
+    except FileNotFoundError:
+        logger.error('%s: Previously discovered file no longer exists. File skipped', filename)
+    except PermissionError as e:
+        logger.error('%s: PermissionError.  File skipped.  Error message: %s', filename, str(e))
+    except OSError as e:
+        logger.error('%s: OSError.  File skipped.  Error message: %s', filename, str(e))
+    except Exception as e:
+        logger.error('%s: Unknown exception.  File skipped.  Error message: %s', filename, str(e))
     
-    # Since Python sets aren't serializable as a JSON object type, we'll convert our results to Lists now. 
-    logger.debug('%s: Rebuilding result sets into lists', filename)                   
-    for handler in results['matches']:
-        for key in results['matches'][handler]:
-            l=list(results['matches'][handler][key])
-            results['matches'][handler][key]=l
-
-    logger.debug('%s: Processing complete', filename)
-    return results
-
-
-def main():
-    from sys import argv
-    from multiprocessing import Queue
-    handlers=globalfuncs.getAllDataHandlerModules()
-    logConfig={'q': Queue(),
-                'level': "DEBUG",
-                }
-    for arg in argv[1:]:
-
-        print(processFile(arg, handlers, logConfig))
-
-if __name__ == '__main__':
-    main()
 

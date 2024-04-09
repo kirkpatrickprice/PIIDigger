@@ -10,27 +10,15 @@ from piidigger import console
 from piidigger import filehandlers as fh
 from piidigger import datahandlers as dh
 from piidigger import outputhandlers as oh
+from piidigger.globalvars import maxChunkSize
 
-######################################################
-############### Global variables #####################
-######################################################
-
-errorCodes={
-    "ok": 0,
-    "userTerm": 1,
-    "invalidConfig": 1,
-    'unknownError': 1024,
-}
-
-excelBlankRowLimit=250
-excelBlankColLimit=500
 
 # Dynamically build the supported file handlers based on the contents of the filehandlers package.
 # Each file handler needs a globally-defined variable called "handles" with a dictionary as follows:
 #   ext: [a list of file extensions with the leading .]
 #   mime: [a list of mime-type strings]
 
-fileHandlers={ handler: getattr(getattr(fh, handler), 'handles') for handler in fh.__dir__() if not handler.startswith('__') }
+fileHandlers={ handler: getattr(getattr(fh, handler), 'handles') for handler in fh.__dir__() if not handler.startswith('_') }
 
 # Leave these in here as reference until I write more file handlers.
 # fileHandlers={
@@ -79,8 +67,6 @@ fileHandlers={ handler: getattr(getattr(fh, handler), 'handles') for handler in 
 #     },    
 # }
 
-
-version='0.0.1'
 
 ######################################################
 ############### Global functions #####################
@@ -251,7 +237,7 @@ def isAdmin() -> bool:
     return check
 
 
-def makeChunks(s: str, chunkSize: int=650) -> list:
+def makeChunks(s: str, chunkSize: int=maxChunkSize) -> list:
     '''Breaks up a string into smaller strings not larger than chunkSize'''
 
     words = s.split()
