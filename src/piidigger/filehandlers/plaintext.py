@@ -3,7 +3,7 @@ from logging.handlers import QueueHandler
 from collections.abc import Iterator
 
 from piidigger.getencoding import getEncoding
-from piidigger.filehandlers._sharedfuncs import appendContent
+from piidigger.filehandlers._sharedfuncs import ContentHandler
 from piidigger.globalvars import (
     maxChunkSize,
     defaultChunkCount,
@@ -58,15 +58,13 @@ def readFile(filename: str,
         logger.addHandler(QueueHandler(logConfig['q']))
     logger.setLevel(logConfig['level'])
     logger.propagate=False
-    content: str = ''
-    totalBytes: int = 0
-    maxContentSize = maxChunkSize * maxChunkCount
+    
     
     enc = getEncoding(filename)
 
     if enc == None:
         logger.info('%s: Unknown encoding type', filename)
-        return [content]
+        return ['']
     else:
         logger.debug('%s: Encoding %s', filename, enc)
     
@@ -83,19 +81,17 @@ def readFile(filename: str,
 
     try:
         with codecs.open(filename, 'r', encoding=enc, errors='replace') as f:
+            handler: ContentHandler = ContentHandler(maxContentSize = maxChunkSize * maxChunkCount)
             for line in f:
-                content, unused = appendContent(content, line, maxContentSize)
-                if len(content.strip()) > maxContentSize:
-                    totalBytes += len(content.strip())
-                    yield content.strip()
-                    content = unused
+                handler.appendContent(line)
+                if handler.contentBufferFull():
+                    yield handler.getContent()
 
     # Once we've processed the entire file, it's time to send that last bit of info that hasn't already been sent.
-        totalBytes += len(content.strip())
-        logger.debug('%s: Read %d lines', filename, totalBytes)
+        logger.debug('%s: Read %d lines', filename, handler.totalBytes)
 
         # Return the last chunk of content    
-        yield content.strip()
+        yield handler.finalizeContent()
 
     except FileNotFoundError:
         logger.error('Previously discovered file no longer exists: %s. File skipped', f.absolute())

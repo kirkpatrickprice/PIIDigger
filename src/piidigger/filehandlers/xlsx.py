@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from openpyxl.utils.exceptions import *
 from zipfile import BadZipFile
 
-from piidigger.filehandlers._sharedfuncs import appendContent
+from piidigger.filehandlers._sharedfuncs import ContentHandler
 from piidigger.globalvars import (
     excelBlankColLimit, 
     excelBlankRowLimit, 
@@ -68,7 +68,7 @@ def readFile(filename: str,
         for sheet in book.sheetnames:
             logger.debug('%s: Processing worksheet: %s', filename, str(sheet))
             activeSheet=book[sheet]
-            content: str = ''
+            handler: ContentHandler = ContentHandler(maxContentSize = maxChunkSize * maxChunkCount)
             blankRowCount=0
             rowCount=0
             # create a string with all of the content of this sheet
@@ -89,7 +89,7 @@ def readFile(filename: str,
                         continue
                     line += str(item) + ' '
                     rowHasData=True
-                content, unused = appendContent(content, line, maxContentSize)
+                handler.appendContent(line)
 
                 if rowHasData:
                     blankRowCount=0
@@ -98,13 +98,11 @@ def readFile(filename: str,
                     if blankRowCount>excelBlankRowLimit:
                         logger.debug('%s[Sheet %s]: Blank row count exceeded at row %d', filename, sheet, rowCount)
                         break
-                if len(content.strip()) >= maxContentSize:
-                    totalBytes += len(content.strip())
-                    yield content.strip()
-                    content = unused
-
+                if handler.contentBufferFull():
+                    yield handler.getContent()
+                    
             logger.debug('%s[Sheet %s]: Read content (%d bytes)', filename, sheet, len(content))
-            yield content.strip()
+            yield handler.finalizeContent()
             
     except FileNotFoundError:
         logger.error('Previously discovered file no longer exists: %s. File skipped', filename)

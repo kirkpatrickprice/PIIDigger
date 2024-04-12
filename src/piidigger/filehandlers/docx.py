@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from docx2python import docx2python
 from docx2python.iterators import iter_paragraphs
 
-from piidigger.filehandlers._sharedfuncs import appendContent
+from piidigger.filehandlers._sharedfuncs import ContentHandler
 from piidigger.globalvars import (
     maxChunkSize,
     defaultChunkCount,
@@ -44,39 +44,33 @@ def readFile(filename: str,
         logger.addHandler(QueueHandler(logConfig['q']))
     logger.setLevel(logConfig['level'])
     logger.propagate=False
-    content: str = ''
-    totalBytes: int = 0
-    maxContentSize = maxChunkSize * maxChunkCount
-
+    
+    
     try:
         # Read in all of the docx content and close the file
         docxContent=docx2python(filename)
+        handler: ContentHandler = ContentHandler(maxContentSize = maxChunkSize * maxChunkCount)
 
         # This will iterate of the header, body and footer of the document, including all of the text and tables
         for line in iter_paragraphs(docxContent.document):
-            content, unused = appendContent(content, line, maxContentSize)
-            if len(content.strip()) > maxContentSize:
-                totalBytes += len(content.strip())
-                yield content.strip()
-                content = unused
+            handler.appendContent(line)
+            if handler.contentBufferFull():
+                yield handler.getContent()
 
         for comment in docxContent.comments:
             if not comment is None:
-                content, unused = appendContent(content, comment[3], maxContentSize)
-                if len(content.strip()) > maxContentSize:
-                    totalBytes += len(content.strip())
+                handler.appendContent(comment[3])
+                if handler.contentBufferFull():
                     yield content.strip()
-                    content = unused
 
         # No size check -- we'll just append the properties to the end of the content and send it
-        content += ' ' + str(docxContent.core_properties).replace('\t', ' ').strip()
+        handler.appendContent(str(docxContent.core_properties))
 
-    # Once we've processed the entire file, it's time to send that last bit of info that hasn't already been sent.
-        totalBytes += len(content.strip())
-        logger.debug('%s: Read %d lines', filename, totalBytes)
+        # Once we've processed the entire file, it's time to send that last bit of info that hasn't already been sent.
+        logger.debug('%s: Read %d lines', filename, handler.totalBytes)
 
         # Return the last chunk of content    
-        yield content.strip()
+        yield handler.finalizeContent()
         
     except FileNotFoundError:
         logger.error('%s: Previously discovered file no longer exists. File skipped', filename)
