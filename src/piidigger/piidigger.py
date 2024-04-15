@@ -246,7 +246,8 @@ def fileHandlerDispatcher(config: classes.Config,
                         results['matches'][handler][key]=l
 
                 # Update the results totals
-                totals['totalResults'].value += globalfuncs.countResults(results['matches'])
+                with totals['totalResults'].get_lock():
+                    totals['totalResults'].value += globalfuncs.countResults(results['matches'])
                 for q in resultsQs:
                     queues[q].put(results)
 
