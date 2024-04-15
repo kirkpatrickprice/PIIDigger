@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "piidigger"
-version = "1.0.0"
+dynamic = ["version",]
 authors = [
             {name="Randy Bartels", email="rjbartels@outlook.com"},
     ]
@@ -46,6 +46,9 @@ win = ["pywin32"]
 piidigger = "piidigger.piidigger:main"
 getmime = "piidigger.getmime:main"
 getencoding = "piidigger.getencoding:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "piidigger.__version__"}
 
 [project.urls]
 Homepage = "https://github.com/kirkpatrickprice/PIIDigger"

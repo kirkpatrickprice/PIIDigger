@@ -18,12 +18,14 @@ from wakepy import keep
 
 
 import piidigger.classes as classes
-from piidigger import console
-from piidigger import filescan
-from piidigger import globalfuncs
+from piidigger import (
+    console,
+    filescan,
+    globalfuncs,
+    __version__,
+    )
 from piidigger.globalvars import (
     errorCodes,
-    version,
     )
 
 
@@ -370,7 +372,7 @@ def main():
         sys.exit(errorCodes['ok'])
 
     if args.version:
-        print('PIIDigger version:', version)
+        print('PIIDigger version:', __version__)
         sys.exit(errorCodes['ok'])
 
     if len(args.createConfigFile) >0:
@@ -420,7 +422,7 @@ def main():
     logger=logging.getLogger('main')
         
     logger.info('Command line arguments: %s', sys.argv[1:])
-    logger.info('Starting PIIDigger version %s', version)
+    logger.info('Starting PIIDigger version %s', __version__)
     logger.info("Configuration: %s", json.dumps(config.getConfig()))
 
     if len(config.getMimeTypes()) == 0:        
