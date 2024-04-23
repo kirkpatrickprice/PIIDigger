@@ -54,6 +54,11 @@ version = {attr = "piidigger.__version__"}
 Homepage = "https://github.com/kirkpatrickprice/PIIDigger"
 Issues = "https://github.com/kirkpatrickprice/PIIDigger/issues"
 
+[tool.bandit]
+targets = ["."]
+exclude_dirs = ["tests"]
+#skips = ["B324"]
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 
