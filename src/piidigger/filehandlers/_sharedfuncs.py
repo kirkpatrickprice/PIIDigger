@@ -2,12 +2,14 @@
 ############ Shared File Handler Functions ###########
 ######################################################
 
+from collections import deque
+
 class ContentHandler:
     def __init__(self, 
                  maxContentSize: int
                 ):
         self.maxContentSize = maxContentSize
-        self.contentBuffer = []
+        self.contentBuffer = deque()
         self.bufferLength = 0
         self.totalBytes = 0
     
@@ -40,7 +42,7 @@ class ContentHandler:
         contentLength: int = 0
 
         while self.contentBuffer and contentLength < self.maxContentSize:
-            word = self.contentBuffer.pop(0)
+            word = self.contentBuffer.popleft()
             content.append(word)
             self.bufferLength -= len(word) + 1
             contentLength += len(word) + 1
