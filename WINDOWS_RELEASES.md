@@ -1,6 +1,6 @@
-# Windows Binaries
+# Windows Releases
 ## Some general notes
-The ZIP file above contains a standalone, 64-bit version of PIIDigger:
+Each release consists a standalone, 64-bit version of PIIDigger delivered as a ZIP file:
 * It does not require any installation.  Just download and unzip it.
 * There will be a `piddigger.exe` and an `_internal` folder.  Both the EXE and the folder are required to run. 
 * If using PIIDigger on multiple systems
@@ -37,7 +37,7 @@ All `typed commands` assume use of Powershell...
     cd PIIDigger
     py -m venv .venv
     .\.venv\Scripts\activate
-    pip install -e .[win]
+    pip install -e .[win,dev]
     ```
 4. Test that PIIDigger runs correctly from native Python before attempting to package an EXE
     ```
@@ -57,4 +57,4 @@ All `typed commands` assume use of Powershell...
     ```
     This process should take less than a minute and display several status messages.
     
-5. `PIIDigger.zip` should be in the `build\windows` folder.
+5. `PIIDigger.zip` should be in the `dist\windows` folder.

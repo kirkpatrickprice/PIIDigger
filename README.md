@@ -45,7 +45,7 @@ PIIDigger will now be available as a program.  Run it with `piddigger` on the te
 
 PIIDigger will now be available as a program.  Run it with `piddigger.exe` in your PowerShell prompt.
 ### Binary Packages
-If Python is not available, you can download OS-specific binaries from the [binaries/](https://github.com/kirkpatrickprice/PIIDigger/tree/main/binaries) folder above.
+If Python is not available, you can download OS-specific binaries from the [releases](https://github.com/kirkpatrickprice/PIIDigger/releases) page.
 
 NOTE: 
 * Update 26-MAR 2024: I'm trying a new packaging method that should avoid virus warnings from Defender and others.  
