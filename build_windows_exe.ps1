@@ -34,7 +34,7 @@ param(
 )
 
 $base_dir=(Get-Location).Path
-$bin_dir = $base_dir + "\binaries\windows"
+$bin_dir = $base_dir + "\dist\windows"
 $zip_file = $bin_dir + "\PIIDigger.zip"
 $build_dir = $bin_dir + "\piidigger"
 $exe_path = $build_dir+"\piidigger.exe"
@@ -66,7 +66,7 @@ Write-Status "Testing if in a Virtual Environment"
 $pip_version = (pip -V)
 
 if ($pip_version -notlike "*PIIDigger*") {
-    Write-Status "Start the Virtual Environment first"
+    Write-Status "Activate the Virtual Environment first"
     exit
 }
 
@@ -115,7 +115,7 @@ Compress-Archive @archive
 
 Write-Status "Writing hash values"
 foreach ($hash in $hashes) {
-    $hash_path = $bin_dir + "\$hash"
+    $hash_path = $bin_dir + "\$hash" + ".txt"
     (Get-FileHash -Path $zip_file -Algorithm $hash).Hash | Out-File -FilePath $hash_path -Encoding ASCII -NoNewline
     Write-Status "Hash $hash written to $hash_path"
 }
@@ -127,10 +127,10 @@ Remove-Item $build_dir -Recurse
 Write-Status "All done.  Check the $bin_dir directory for updated binaries"
 
 # SIG # Begin signature block
-# MIIfYQYJKoZIhvcNAQcCoIIfUjCCH04CAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# MIIfYwYJKoZIhvcNAQcCoIIfVDCCH1ACAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDs5zbK7n5I3a4F
-# UY3BV7cVOLXu3wDCkCwEyvcDTmPQ/6CCDOgwggZuMIIEVqADAgECAhAtYLGndXgb
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCD08SePJdNq7uEP
+# cZYN8PZULto7CN139OpXm2i0kFf1eaCCDOgwggZuMIIEVqADAgECAhAtYLGndXgb
 # zFvzMEdBS+SKMA0GCSqGSIb3DQEBCwUAMHgxCzAJBgNVBAYTAlVTMQ4wDAYDVQQI
 # DAVUZXhhczEQMA4GA1UEBwwHSG91c3RvbjERMA8GA1UECgwIU1NMIENvcnAxNDAy
 # BgNVBAMMK1NTTC5jb20gQ29kZSBTaWduaW5nIEludGVybWVkaWF0ZSBDQSBSU0Eg
@@ -199,25 +199,25 @@ Write-Status "All done.  Check the $bin_dir directory for updated binaries"
 # up516eDap8nMLDt7TAp4z5T3NmC2gzyKVMtODWgqlBF1JhTqIDfM63kXdlV4cW3i
 # STgzN9vkbFnHI2LmvM4uVEv9XgMqyN0eS3FE0HU+MWJliymm7STheh2ENH+kF3y0
 # rH0/NVjLw78a3Z9UVm1F5VPziIorMaPKPlDRADTsJwjDZ8Zc6Gi/zy4WZbg8Zv87
-# spWrmo2dzJTw7XhQf+xkR6OdMYIRzzCCEcsCAQEwgYwweDELMAkGA1UEBhMCVVMx
+# spWrmo2dzJTw7XhQf+xkR6OdMYIR0TCCEc0CAQEwgYwweDELMAkGA1UEBhMCVVMx
 # DjAMBgNVBAgMBVRleGFzMRAwDgYDVQQHDAdIb3VzdG9uMREwDwYDVQQKDAhTU0wg
 # Q29ycDE0MDIGA1UEAwwrU1NMLmNvbSBDb2RlIFNpZ25pbmcgSW50ZXJtZWRpYXRl
 # IENBIFJTQSBSMQIQLWCxp3V4G8xb8zBHQUvkijANBglghkgBZQMEAgEFAKB8MBAG
 # CisGAQQBgjcCAQwxAjAAMBkGCSqGSIb3DQEJAzEMBgorBgEEAYI3AgEEMBwGCisG
-# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqGSIb3DQEJBDEiBCBKAaffAQyX
-# aly7e0lowTi69k3/j4YbTPD1rCz/Wt7kjzANBgkqhkiG9w0BAQEFAASCAYABoACv
-# uKLDWMkeDlHBRReGSk7PftQoxW4hvz4n441KmTv15IlAnxwlP0fEUxzia6HH+9NW
-# YhG6NmM0kV097gmlI8XTyQG/aeSwhJuvvNpxuzJlWqKRud7BC/0UDAgvY4hEnc94
-# kGtBbTQv45n2FMNi2L4bvV8q720UsvKzU6S/Ac8tgfecIbMrQsCRwiUABvRDyWEF
-# abgcm2aDIIcQFbpBo1z9bHUjBGcc3VpWG5cULvt1lzCEwxf0d68bZXBLGR3GVLYO
-# BCpq7+EDgAYbnErg8G7MW9cB6wDEsJU+s0o7rVmjivfUSHIHBch+smb+2MPCAG8p
-# 9zdB/CE+3vAsB2PcWw4Mfw41qadMMyEX9Ywfh2yK+AzTIgHs4AQovx3pvMbV0R7V
-# G8HxqBOBcXghjbt+e93SFcs5ohQXFtpfOJEksxWxxyCtUGbA26U0KdfpgP3L7lyH
-# +8TpZ0LasclpaiR7TsPYg+5fW4GF4Dpw//o0tqheiv49nmYKN4ctMeVX+56hgg8V
-# MIIPEQYKKwYBBAGCNwMDATGCDwEwgg79BgkqhkiG9w0BBwKggg7uMIIO6gIBAzEN
+# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqGSIb3DQEJBDEiBCAaEmN+4KCT
+# QgpDYsWUn9odKsoMyO7KTLHA7xc0DjGlhzANBgkqhkiG9w0BAQEFAASCAYCBUAXi
+# 4EjGJx0K+ehq/+c6ksjbwcJvzsJdROpBEbMTvbLhi52GpCAqDZ4NSqYmQAKgcnrG
+# Lfjnj+mpPoLA82VE2LK8s16gE1g3xOWGrOdn7+mmVvORcJR2Zf5bEyDuU2oF3L5v
+# HZwoyFgc5vabDvDWNQUpsNXorKvkoEJWdPBBHcOUEBhbhA4IcrLtl3mh0DpONekA
+# T8p4ARvGGFUaDcB2nnTwxE+Pv0zqL7r4cHW3BGHPpXtX2QcPgQ9tUQKk+nU7VONx
+# A71K3I6OflM538lK9eFlPAzAkbP5d85i2T7skQYYOsdvnNoof+lhmBm4cE8+YAVv
+# fPJTG4eUDlR7FLyM0+Gyx82EWjMPAbP7c/a0HBqhpIwf5/SXrYovGJNfcjT0jERY
+# Q1ohx2YqER7uWZ4+lMuOF+J74hs8rpbZuv2HwzoX836pk1DcrcLpa+SErE/mzk2V
+# xSiVVflizp5/Kc0qyKv0x/1EhNYHQNsWHbKNqxLaMeL7Ja3fUYlHspduGR6hgg8X
+# MIIPEwYKKwYBBAGCNwMDATGCDwMwgg7/BgkqhkiG9w0BBwKggg7wMIIO7AIBAzEN
 # MAsGCWCGSAFlAwQCATB3BgsqhkiG9w0BCRABBKBoBGYwZAIBAQYMKwYBBAGCqTAB
-# AwYBMDEwDQYJYIZIAWUDBAIBBQAEILzByttEcXszKw7ViSdFi2+gqdUdjbeQZ/zv
-# nVNmd0w4AghWrkQkHnVFVhgPMjAyNDAzMjYyMTE0NTVaMAMCAQGgggwAMIIE/DCC
+# AwYBMDEwDQYJYIZIAWUDBAIBBQAEIGTzJ+ma0RmajDTRSCyTRlkfQcGCYwdHfjPS
+# SOa+fJPoAghU0fBkFzeJKxgPMjAyNDA0MzAxODU0MTBaMAMCAQGgggwAMIIE/DCC
 # AuSgAwIBAgIQWlqs6Bo1brRiho1XfeA9xzANBgkqhkiG9w0BAQsFADBzMQswCQYD
 # VQQGEwJVUzEOMAwGA1UECAwFVGV4YXMxEDAOBgNVBAcMB0hvdXN0b24xETAPBgNV
 # BAoMCFNTTCBDb3JwMS8wLQYDVQQDDCZTU0wuY29tIFRpbWVzdGFtcGluZyBJc3N1
@@ -281,18 +281,18 @@ Write-Status "All done.  Check the $bin_dir directory for updated binaries"
 # 0BaMqTa6LWzWItgBjGcObXeMxmbQqlEz2YtAcErkZvh0WABDDE4U8GyV/32FdaAv
 # JgTfe9MiL2nSBioYe/g5mHUSWAay/Ip1RQmQCvmF9sNfqlhJwkjy/1U1ibUkTIUB
 # X3HgymyQvqQTZLLys6pL2tCdWcjI9YuLw30rgZm8+K387L7ycUvqrmQ3ZJlujHl3
-# r1hgV76s3WwMPgKk1bAEFMj+rRXimSC+Ev30hXZdqyMdl/il5Ksd0vhGMYICVzCC
-# AlMCAQEwgYcwczELMAkGA1UEBhMCVVMxDjAMBgNVBAgMBVRleGFzMRAwDgYDVQQH
+# r1hgV76s3WwMPgKk1bAEFMj+rRXimSC+Ev30hXZdqyMdl/il5Ksd0vhGMYICWTCC
+# AlUCAQEwgYcwczELMAkGA1UEBhMCVVMxDjAMBgNVBAgMBVRleGFzMRAwDgYDVQQH
 # DAdIb3VzdG9uMREwDwYDVQQKDAhTU0wgQ29ycDEvMC0GA1UEAwwmU1NMLmNvbSBU
 # aW1lc3RhbXBpbmcgSXNzdWluZyBSU0EgQ0EgUjECEFparOgaNW60YoaNV33gPccw
 # CwYJYIZIAWUDBAIBoIIBYTAaBgkqhkiG9w0BCQMxDQYLKoZIhvcNAQkQAQQwHAYJ
-# KoZIhvcNAQkFMQ8XDTI0MDMyNjIxMTQ1NVowKAYJKoZIhvcNAQk0MRswGTALBglg
-# hkgBZQMEAgGhCgYIKoZIzj0EAwIwLwYJKoZIhvcNAQkEMSIEIDjaaEf9kdEAzmdR
-# Kj/ZtkLhTBR0Cq5mabFfZdc377ajMIHJBgsqhkiG9w0BCRACLzGBuTCBtjCBszCB
+# KoZIhvcNAQkFMQ8XDTI0MDQzMDE4NTQxMFowKAYJKoZIhvcNAQk0MRswGTALBglg
+# hkgBZQMEAgGhCgYIKoZIzj0EAwIwLwYJKoZIhvcNAQkEMSIEIMiAOkQK/munQAwh
+# nq/ytIs++1dBu+wxcW9qza3iHGFRMIHJBgsqhkiG9w0BCRACLzGBuTCBtjCBszCB
 # sAQgnXF/jcI3ZarOXkqw4fV115oX1Bzu2P2v7wP9Pb2JR+cwgYswd6R1MHMxCzAJ
 # BgNVBAYTAlVTMQ4wDAYDVQQIDAVUZXhhczEQMA4GA1UEBwwHSG91c3RvbjERMA8G
 # A1UECgwIU1NMIENvcnAxLzAtBgNVBAMMJlNTTC5jb20gVGltZXN0YW1waW5nIElz
-# c3VpbmcgUlNBIENBIFIxAhBaWqzoGjVutGKGjVd94D3HMAoGCCqGSM49BAMCBEYw
-# RAIgNcKnLM2frkbZkn6saThuCy1cnixPZrYA71h6gHaFitsCIGmGl0iuzyy3A07X
-# XPvUUj0dso4iwhCguDVMf0LQuVf5
+# c3VpbmcgUlNBIENBIFIxAhBaWqzoGjVutGKGjVd94D3HMAoGCCqGSM49BAMCBEgw
+# RgIhAMx1EZO4zgbcS2kZo0S8zUfQm+etKveNUil3V9klFh5LAiEAj8xG+GimRg3I
+# LPQ8Tfw7lS2tD4KAJdHfvshl2cWSJEk=
 # SIG # End signature block
