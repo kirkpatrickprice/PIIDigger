@@ -47,6 +47,8 @@ PIIDigger will now be available as a program.  Run it with `piddigger.exe` in yo
 ### Binary Packages
 If Python is not available, you can download OS-specific binaries from the [releases](https://github.com/kirkpatrickprice/PIIDigger/releases) page.
 
+Additional information on [Windows Releases]([ERRATA](https://github.com/kirkpatrickprice/PIIDigger/blob/main/WINDOWS_RELEASES.md))
+
 NOTE: 
 * Update 26-MAR 2024: I'm trying a new packaging method that should avoid virus warnings from Defender and others.  
 * See the [ERRATA](https://github.com/kirkpatrickprice/PIIDigger/blob/main/ERRATA.md) page for information about antivirus products and packaged Python binaries.  

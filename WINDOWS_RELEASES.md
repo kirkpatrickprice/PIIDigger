@@ -1,10 +1,10 @@
 # Windows Releases
 ## Some general notes
-Each release consists a standalone, 64-bit version of PIIDigger delivered as a ZIP file:
+Each release consists of a standalone, 64-bit version of PIIDigger delivered as a ZIP file:
 * It does not require any installation.  Just download and unzip it.
 * There will be a `piddigger.exe` and an `_internal` folder.  Both the EXE and the folder are required to run. 
 * If using PIIDigger on multiple systems
-    * You can create a `piidigger.toml` file with your own configuration, for instance, maybe for writing results files to a shared network folder.  
+    * You can create a `piidigger.toml` file with your own configuration, for instance, maybe for writing results files to a shared network folder.  See "Advanced Configuration" on the main [readme](https:\\github.com\kirkpatrickprice\PIIDigger) file for additional information.
     * You could then repackage PIIDigger into a new ZIP file
     * This configuration file will be used automatically if it exists.
 
