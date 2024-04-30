@@ -170,7 +170,8 @@ class Config:
         return self.config['logging']['logFile']
 
     def getMaxFilesScanProcs(self):
-        return max(self.getMaxProcs() // 4, 1)
+        #return max(self.getMaxProcs() // 4, 1)
+        return 1
 
     def getMaxProcs(self):
         return self.config['maxProcs']

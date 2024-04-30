@@ -4,7 +4,7 @@ from collections.abc import Iterator
 
 import xlrd
 
-from piidigger.filehandlers._sharedfuncs import appendContent
+from piidigger.filehandlers._sharedfuncs import ContentHandler
 from piidigger.globalvars import (
     excelBlankColLimit, 
     excelBlankRowLimit, 
@@ -42,8 +42,6 @@ def readFile(filename: str,
         logger.addHandler(QueueHandler(logConfig['q']))
     logger.setLevel(logConfig['level'])
     logger.propagate=False
-    totalBytes: int = 0
-    maxContentSize = maxChunkSize * maxChunkCount
     
     try:
         # Don't use "on_demand" in order to keep the code simpler.  All worksheets are loaded into RAM.
@@ -53,7 +51,7 @@ def readFile(filename: str,
         for sheet in book.sheet_names():
             logger.debug('Processing worksheet: %s', str(sheet))
             activeSheet=book.sheet_by_name(sheet)
-            content: str = ''
+            handler: ContentHandler = ContentHandler(maxContentSize = maxChunkSize * maxChunkCount)
             blankRowCount=0
             rowCount=0
             totalRows=activeSheet.nrows
@@ -79,7 +77,7 @@ def readFile(filename: str,
                         item = str(item)[:-2]
                     line += str(item) + ' '
                     rowHasData=True
-                content, unused = appendContent(content, line, maxContentSize)
+                handler.appendContent(line)
                 if rowHasData:
                     blankRowCount=0
                 else:
@@ -87,13 +85,11 @@ def readFile(filename: str,
                     if blankRowCount > excelBlankRowLimit:
                         logger.debug('%s[Sheet %s]: Blank row count exceeded at row %d', filename, sheet, rowCount)
                         break
-                if len(content.strip()) >= maxContentSize:
-                    totalBytes += len(content.strip())
-                    yield content.strip()
-                    content = unused
+                if handler.contentBufferFull():
+                    yield handler.getContent()
             book.unload_sheet(sheet)
-            logger.debug('%s[Sheet %s]: Read content (%d bytes)', filename, sheet, len(content))
-            yield content.strip()
+            logger.debug('%s[Sheet %s]: Read content (%d bytes)', filename, sheet, handler.totalBytes)
+            yield handler.finalizeContent()
             
         book.release_resources()
     except FileNotFoundError:
