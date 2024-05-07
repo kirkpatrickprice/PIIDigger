@@ -25,7 +25,13 @@ Check out the [ERRATA](https://github.com/kirkpatrickprice/PIIDigger/blob/main/E
 Check out the [PERFORMANCE](https://github.com/kirkpatrickprice/PIIDigger/blob/main/PERFORMANCE.md) page for notes on tuning performance, especially on production servers.
 
 ## Installation
-### If Python is Available (e.g. MacOS and/or Linux)
+
+### Binary Packages
+You can download OS-specific binaries from the [releases](https://github.com/kirkpatrickprice/PIIDigger/releases) page.
+
+Additional information on [Windows Releases](https://github.com/kirkpatrickprice/PIIDigger/blob/main/WINDOWS_RELEASES.md)
+
+### Installing from Pip (e.g. MacOS and/or Linux)
 
 NOTE: A virtual environment is strongly recommended to isolate PIIDigger and its dependencies from any other Python programs already on your system.  However, if you're not actively using Python, a system-wide installation is possible by running only the last command below.
 
@@ -44,14 +50,10 @@ PIIDigger will now be available as a program.  Run it with `piddigger` on the te
     python.exe -m pip install -U piidigger[win]
 
 PIIDigger will now be available as a program.  Run it with `piddigger.exe` in your PowerShell prompt.
-### Binary Packages
-If Python is not available, you can download OS-specific binaries from the [releases](https://github.com/kirkpatrickprice/PIIDigger/releases) page.
 
-Additional information on [Windows Releases](https://github.com/kirkpatrickprice/PIIDigger/blob/main/WINDOWS_RELEASES.md)
-
-NOTE: 
-* Update 26-MAR 2024: I'm trying a new packaging method that should avoid virus warnings from Defender and others.  
-* See the [ERRATA](https://github.com/kirkpatrickprice/PIIDigger/blob/main/ERRATA.md) page for information about antivirus products and packaged Python binaries.  
+NOTE:
+* Update 26-MAR 2024: I'm trying a new packaging method that should avoid virus warnings from Defender and others.
+* See the [ERRATA](https://github.com/kirkpatrickprice/PIIDigger/blob/main/ERRATA.md) page for information about antivirus products and packaged Python binaries.
 
 ## Usage
 ```
