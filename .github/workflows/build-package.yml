@@ -1,0 +1,47 @@
+name: Build
+on:
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m venv .
+          source .\bin\activate
+          pip install -e .[win,build]
+      - name: Run build script
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+          .\build_windows_exe.ps1 -NoCodeSign
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: windows
+          path: dist/windows
+  build-unix:
+    runs-on: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: python -m pip install -e .[build]
+      - name: Run build script
+        run: |
+          pyinstaller --onedir --distpath dist -i piidigger.ico --collect-submodules wakepy piidigger.py
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: unix
+          path: dist/*
