@@ -41,6 +41,8 @@ classifiers = [
 dev = ["pytest>=7.4.4",]
 test = ["pytest>=7.4.4",]
 win = ["pywin32"]
+build = ["pyinstaller>=6.6.0",]
+pypi = ["build>=1.2.1", "twine>=5.0.0",]
 
 [project.scripts]
 piidigger = "piidigger.piidigger:main"
