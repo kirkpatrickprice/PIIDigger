@@ -1,5 +1,6 @@
 import datetime
 import logging
+import multiprocessing as mp
 import os
 import pathlib
 import platform
@@ -193,7 +194,66 @@ class Config:
     
     def setMaxProcs(self, procs):
         self.config['maxProcs']=procs
+
+class ProcessManager:
+    def __init__(self, name: str):
+        self.processes: list = []
+        self.name = name
         
+    def register(self, 
+                 *,
+                 target: callable,
+                 name: str,
+                 num_processes: int, 
+                 args: tuple = None
+                 ):
+        
+        self.processes.append(
+            {
+            'target': target,
+            'start_order': len(self.processes) + 1,
+            'shutdown_order': None,
+            'name': name,
+            'num_processes': num_processes,
+            'processes': [],
+            'started': False,
+            'args': args,
+            }
+        )
+
+    def start(self):
+        try:
+            self.processes.sort(key=lambda x: x['start_order'])
+            for i, process in enumerate(self.processes):
+                if not process['started']:
+                    process['shutdown_order'] = len(self.processes) - i
+                    for j in range(process['num_processes']):
+                        p = mp.Process(target=process['target'], 
+                                    name=f'{process['name']}_{j}',
+                                    args=process['args'],
+                        )
+                        p.start()                
+                        process['processes'].append(p)
+                    process['started'] = True
+        except KeyboardInterrupt:
+            self.terminate_all_processes()
+
+    def wait_for_processes(self):
+        try:
+            self.processes.sort(key=lambda x: x['shutdown_order'],)
+            for process in self.processes:
+                for p in process['processes']:
+                    p.join()
+        except KeyboardInterrupt:
+            self.terminate_all_processes()
+
+    def terminate_all_processes(self):
+        print(f'{self.name}: Terminating all processes.')
+        self.processes.sort(key=lambda x: x['shutdown_order'],)
+        for process in self.processes:
+            for p in process['processes']:
+                p.terminate()
+                p.join()        
 
 def _isAll(x) -> bool:
     '''

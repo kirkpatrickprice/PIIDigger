@@ -29,28 +29,8 @@ from piidigger.globalvars import (
     )
 
 
-def cleanup(processes: dict,
-            queues: dict,
-            stopEvent: mp.Event,
-            abort: bool=False,
-           ):
+def cleanup(queues: dict,):
     '''Cleans up all processes on ending the program'''
-
-    #Set the stopEvent so that processes have a chance to shutdown normally
-    stopEvent.set()
-
-    if abort:
-        sleep(.5)
-        for processType in processes:
-            for process in processes[processType]:
-                if process.is_alive():
-                    console.normal('Terminating process: %s' % process.name)
-                    process.terminate()
-
-    try:
-        processes['progressLine'][0].join()
-    except KeyboardInterrupt:
-        pass
 
     # Clean up any queues that still have stuff in them.  This will ensure that the mp.Queue-based QueueHandler thread will also terminate
     print()
@@ -268,36 +248,31 @@ def fileHandlerDispatcher(config: classes.Config,
         del logger
 
 
-def resultsDispatcher(config: classes.Config, 
+def getOutputHandlers(config: classes.Config,
                       queues: dict,
-                      stopEvent: mp.Event,
-                     ) -> list:
+                      stopEvent: mp.Event):
 
     '''Setup the results queue handlers for the enabled output types.
     
-    Returns a list of mp.Process() objects which will be started later'''
+    Returns a list of callables which will be added to the ProcessManager for execution.'''
     
     try:
-        logger=logging.getLogger('resultsDispatcher')
-        logger.addHandler(QueueHandler(queues['logQ']))
-        logger.propagate=False
-        
-        procs=list()
-
         for resultsType in config.getEnabledOutputTypes():
             try:
                 makedirs(str(Path(config.getOutputFile(resultsType)).absolute().parent), exist_ok=True)
             except Exception as e:
                 console.error(str(e))
                 stopEvent.set()
-            module=globalfuncs.getOutputHandlerModule(resultsType)
-            qName=resultsType+'_resultsQ'
-            proc=mp.Process(target=module.processResult, name=resultsType+'_process', args=(config.getOutputFile(resultsType), queues[qName], stopEvent), daemon=True)
-            procs.append(proc)
+            yield {
+                    'target': globalfuncs.getOutputHandlerModule(resultsType).processResult,
+                    'name': resultsType+'_handler', 
+                    'num_processes': 1,
+                    'args': (config.getOutputFile(resultsType), 
+                             queues[resultsType+'_resultsQ'], 
+                             stopEvent),
+                  }
     except KeyboardInterrupt:
         pass
-
-    return procs
 
 
 def progressLineWorker(totals: dict, 
@@ -412,11 +387,18 @@ def main():
         queues.update({name: mp.Queue()})
     stopEvent=mp.Event()
     stopEvent.clear()
+    pm=classes.ProcessManager(name='mainPM')
 
-    # Configure logging
+    # Configure logging / the logger process should be managed separately from all of the others.
+    loggerPM=classes.ProcessManager(name='loggerPM')
     makedirs(str(Path(config.getLogFile()).absolute().parent), exist_ok=True)
-    processes['logger'] = [mp.Process(target=logProcessor, args=(config, queues['logQ'], stopEvent), name='logger_process', daemon=True)]
-    processes['logger'][0].start()
+    loggerPM.register(target=logProcessor, 
+                name='logProcessor',
+                num_processes=1, 
+                args=(config, queues['logQ'], stopEvent))
+    
+    # We need to start the logProcessor process before we can start the other processes
+    loggerPM.start()
     logger=logging.getLogger()
     logger.setLevel(config.getLogLevel())
     logger.addHandler(QueueHandler(queues['logQ']))
@@ -444,65 +426,54 @@ def main():
     #####################################
         
     # Setup each of the subprocesses that are needed
-    processes['progressLine']=[mp.Process(target=progressLineWorker, args=(totals,queues['logQ'], start, stopEvent), name='progressLine_process', daemon=True)]
-    processes['outputHandlers']=resultsDispatcher(config, queues, stopEvent)
-    processes['findFiles']=[mp.Process(target=filescan.findFilesWorker, args=(config, queues, totals, stopEvent,), name='findFiles'+str(i)+'_process', daemon=True) for i in range(config.getMaxFilesScanProcs())]
-    processes['filesQWorkers']=[mp.Process(target=fileHandlerDispatcher, args=(config, queues, totals, stopEvent, activeFilesQProcesses), name='fileHandler'+str(i)+'_process', daemon=True) for i in range(config.getMaxProcs())]
-    processes['findDirs']=[mp.Process(target=filescan.findDirsWorker, args=(config, queues, totals, stopEvent,), name='findDirs_process', daemon=True)]
+    pm.register(target=progressLineWorker, 
+                name='progressLineWorker',
+                num_processes=1, 
+                args=(totals,queues['logQ'], start, stopEvent),
+                )
+    for outputHandler in getOutputHandlers(config, queues, stopEvent):
+        pm.register(target=outputHandler['target'],
+                    name=outputHandler['name'],
+                    num_processes=outputHandler['num_processes'],
+                    args=outputHandler['args'],
+                    )
+    pm.register(target=filescan.findFilesWorker, 
+                name='findFilesWorker',
+                num_processes=config.getMaxFilesScanProcs(), 
+                args=(config, queues, totals, stopEvent,),
+                )
+    pm.register(target=fileHandlerDispatcher, 
+                name='fileHandler',
+                num_processes=config.getMaxProcs(),
+                args=(config, queues, totals, stopEvent, activeFilesQProcesses),)
+    pm.register(target=filescan.findDirsWorker, 
+                name='findDirsWorker',
+                num_processes=1,
+                args=(config, queues, totals, stopEvent,),
+                )
     console.normal('Starting %d file scanner processes' % (config.getMaxFilesScanProcs()))
     console.normal('Starting %d file handler processes' % (config.getMaxProcs()))
 
-    # Start each process in the processes dictionary
-    for processType in processes:
-        for process in processes[processType]:
-            try:
-                if not process.is_alive():
-                    process.start()
-                    logger.info('Starting process %s (%s)', process.name, process.pid)
-            except Exception as e:
-                logger.info('Error starting %s: %s', process.name, str(e))
-
+    # Start the processes
+    pm.start()
+    
 
     ##################################
     # Wait for the threads/processes to complete by joining each of the threads/processes in the pipeline in pipeline order
     ##################################
 
     try:
-        for processType in ['findDirs', 'findFiles', 'filesQWorkers']:
-            for process in processes[processType]:
-                logger.info('Joining process %s (%s)', process.name, process.pid)
-                process.join()
-                logger.info('Returned from process: %s (%s)', process.name, process.pid)
+        pm.wait_for_processes()
     except KeyboardInterrupt:
-        #console.normal('\nUser terminated scan')
-        cleanup(processes, queues, stopEvent, abort=True)
-        CLEANED=True
+        console.normal('\nKeyboard Interrupt in Main')
+        pm.terminate_all_processes()
     except Exception:
         console.error('An unknown error was encountered.  Error message was captured in %s.' % config.getLogFile())
         logger.error(traceback.print_exc())
-    else:
-        # Send the sentinel to the results queues and then block until they shutdown properly.
-        for q in [qName for qName in queues.keys() if qName.endswith('_resultsQ')]:
-            queues[q].put(None)        
-        for process in processes['outputHandlers']:
-            process.join()
     finally:
+        cleanup(queues)
         # If the logger hasn't already been shutdown by a KeyboardInterrupt or other event
-        if processes['logger'][0].is_alive():
-            logger.info('Scanned %d files for %s', totals['filesScanned'].value, globalfuncs.sizeof_fmt(totals['bytesScanned'].value))
-            logger.info('Found %d files with matching content', totals['totalResults'].value)
-
-            # Terminate the logProcessor and progress line worker
-            logger.info('Scan complete.  Shutting down.')
-            queues['logQ'].put(None)
-        
-        stopEvent.set()        
-        processes['progressLine'][0].join()
-        console.normal('\nWaiting for logger process to terminate.')
-        
-        # Make sure all of the queues are empty so that the MPQueueing support threads will shutdown
-        if not CLEANED: 
-            cleanup(processes, queues, stopEvent)
+        loggerPM.terminate_all_processes()
 
         console.normal('Scan complete.')
             
