@@ -14,8 +14,8 @@ from piidigger.globalvars import errorCodes
 exitCode = errorCodes['ok']
 
 if __name__=='__main__':
-    freeze_support()
     try:
+        freeze_support()
         m = Process(target=main)
         m.start()
         m.join()
