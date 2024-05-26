@@ -138,11 +138,13 @@ def logProcessor(config: classes.Config,
 
             logger.handle(message)
     except KeyboardInterrupt:
+        console.normal('\n')
+        console.warn('User terminated scan.  Shutting down.')
+
         # Give other processes a chance to write their final messages to the queue
-        sleep(5)
+        sleep(2)
         globalfuncs.clearQ(queue)
         stopCause='ctrlc'
-        logger.info('[logProcessor]User terminated scan')
     finally:
         logger.info('[logProcessor]Stopping logProcessor (%s)', str(stopCause))
         
@@ -234,15 +236,18 @@ def fileHandlerDispatcher(config: classes.Config,
             logger.debug('%s: Processing complete', filename)
 
     except KeyboardInterrupt:
-        for q in [qName for qName in queues.keys() if qName.endswith('_resultsQ')]:
-            globalfuncs.clearQ(queues[q])
+        pass
     finally:
         logger.info('[%s]FileWorkerProcess terminated', mp.current_process().name)
         with activeFilesQProcesses.get_lock():
             activeFilesQProcesses.value-=1
             logger.info('FileWorkerProcesses remaining: %d', activeFilesQProcesses.value)
-        # To allow the queue to shutdown properly, remove the last item from the filesQ if we're the last filesQ processor still running
         if activeFilesQProcesses.value==0:
+            # Put the sentinel on the results queues
+            for q in [qName for qName in queues.keys() if qName.endswith('_resultsQ')]:
+                queues[q].put(None)
+            
+            # To allow the queue to shutdown properly, remove the last item from the filesQ if we're the last filesQ processor still running
             logger.debug('[%s]Last FileWorkerProcess terminated.  Clearing filesQ.', mp.current_process().name)
             queues['filesQ'].get()
         del logger
@@ -330,151 +335,170 @@ def progressLineWorker(totals: dict,
         logger.info('progressLineWorker stopped')
 
 def main():
-    start=datetime.now()
-    args=commandLineParser()
-    CLEANED=False
-
-    if args.cpuCount:
-        print('CPU cores:', cpu_count())
-        sys.exit(errorCodes['ok'])
-
-    if args.listDH:
-        print('Data handler modules: ', globalfuncs.getSupportedDataHandlerNames())
-        sys.exit(errorCodes['ok'])
-
-    if args.listFT:
-        print('File extns: ', globalfuncs.getSupportedFileExts())
-        print('MIME types: ', globalfuncs.getSupportedFileMimes())
-        sys.exit(errorCodes['ok'])
-
-    if args.version:
-        print('PIIDigger version:', __version__)
-        sys.exit(errorCodes['ok'])
-
-    if len(args.createConfigFile) >0:
-        tomlFile = str(args.createConfigFile) if str(args.createConfigFile).endswith('.toml') else str(args.createConfigFile)+'.toml'
-        configFileWritten=globalfuncs.writeDefaultConfig(tomlFile)
-
-        if configFileWritten=='Success':
-            console.normal('Default configuration written to '+args.createConfigFile)
-            sys.exit(errorCodes['ok'])
-        else:
-            console.error('Config file not written: %s' % (configFileWritten))
-            sys.exit(errorCodes['unknown'])
-
-    if args.defaultConfig:
-        config=classes.Config(configFile='', useDefault=True)
-    else:
-        config=classes.Config(configFile=args.configFile)
-
-    if args.maxProc>0:
-        config.setMaxProcs(min(cpu_count(), args.maxProc))
-
-    # Create queues and other structures needed for asynchronous implementation
-    totals={k: mp.Value(c_uint64, 0) for k in [
-        'dirsScanned', 
-        'dirsFound', 
-        'filesScanned', 
-        'filesFound', 
-        'bytesScanned', 
-        'bytesFound',
-        'totalResults']}
-    queues={name: mp.Queue() for name in ['logQ', 'dirsQ', 'filesQ', 'totalsQ',]}
-    activeFilesQProcesses=mp.Value(c_int, 0)
-    processes = dict()
-    for resultsType in config.getEnabledOutputTypes():
-        name=resultsType+'_resultsQ'
-        queues.update({name: mp.Queue()})
-    stopEvent=mp.Event()
-    stopEvent.clear()
-    pm=classes.ProcessManager(name='mainPM')
-
-    # Configure logging / the logger process should be managed separately from all of the others.
-    loggerPM=classes.ProcessManager(name='loggerPM')
-    makedirs(str(Path(config.getLogFile()).absolute().parent), exist_ok=True)
-    loggerPM.register(target=logProcessor, 
-                name='logProcessor',
-                num_processes=1, 
-                args=(config, queues['logQ'], stopEvent))
-    
-    # We need to start the logProcessor process before we can start the other processes
-    loggerPM.start()
-    logger=logging.getLogger()
-    logger.setLevel(config.getLogLevel())
-    logger.addHandler(QueueHandler(queues['logQ']))
-    logger=logging.getLogger('main')
-        
-    logger.info('Command line arguments: %s', sys.argv[1:])
-    logger.info('Starting PIIDigger version %s', __version__)
-    logger.info("Configuration: %s", json.dumps(config.getConfig()))
-
-    if len(config.getMimeTypes()) == 0:        
-        logger.info("MIME detection disabled.")
-
-    if not globalfuncs.isAdmin():
-        message='Not running as an administrator. File system access may be restricted.'
-        console.warn(message)
-        logger.info(message)
-
-    if globalfuncs.getOSType() == 'linux':
-        console.warn('Sleep prevention disabled on Linux. Consider using \'screen\' or \'tmux\' to ensure that PIIDigger survives an SSH disconnect.')
-    
-    console.normal('Scanning %s for files matching %s' % (config.getStartDirs(), config.getDataHandlers()))
-    
-    #####################################
-    # Bring up the pipe line in reverse order -- starting with results and working back to scanning for directories
-    #####################################
-        
-    # Setup each of the subprocesses that are needed
-    pm.register(target=progressLineWorker, 
-                name='progressLineWorker',
-                num_processes=1, 
-                args=(totals,queues['logQ'], start, stopEvent),
-                )
-    for outputHandler in getOutputHandlers(config, queues, stopEvent):
-        pm.register(target=outputHandler['target'],
-                    name=outputHandler['name'],
-                    num_processes=outputHandler['num_processes'],
-                    args=outputHandler['args'],
-                    )
-    pm.register(target=filescan.findFilesWorker, 
-                name='findFilesWorker',
-                num_processes=config.getMaxFilesScanProcs(), 
-                args=(config, queues, totals, stopEvent,),
-                )
-    pm.register(target=fileHandlerDispatcher, 
-                name='fileHandler',
-                num_processes=config.getMaxProcs(),
-                args=(config, queues, totals, stopEvent, activeFilesQProcesses),)
-    pm.register(target=filescan.findDirsWorker, 
-                name='findDirsWorker',
-                num_processes=1,
-                args=(config, queues, totals, stopEvent,),
-                )
-    console.normal('Starting %d file scanner processes' % (config.getMaxFilesScanProcs()))
-    console.normal('Starting %d file handler processes' % (config.getMaxProcs()))
-
-    # Start the processes
-    pm.start()
-    
-
-    ##################################
-    # Wait for the threads/processes to complete by joining each of the threads/processes in the pipeline in pipeline order
-    ##################################
-
     try:
-        pm.wait_for_processes()
+        start=datetime.now()
+        args=commandLineParser()
+
+        if args.cpuCount:
+            print('CPU cores:', cpu_count())
+            sys.exit(errorCodes['ok'])
+
+        if args.listDH:
+            print('Data handler modules: ', globalfuncs.getSupportedDataHandlerNames())
+            sys.exit(errorCodes['ok'])
+
+        if args.listFT:
+            print('File extns: ', globalfuncs.getSupportedFileExts())
+            print('MIME types: ', globalfuncs.getSupportedFileMimes())
+            sys.exit(errorCodes['ok'])
+
+        if args.version:
+            print('PIIDigger version:', __version__)
+            sys.exit(errorCodes['ok'])
+
+        if len(args.createConfigFile) >0:
+            tomlFile = str(args.createConfigFile) if str(args.createConfigFile).endswith('.toml') else str(args.createConfigFile)+'.toml'
+            configFileWritten=globalfuncs.writeDefaultConfig(tomlFile)
+
+            if configFileWritten=='Success':
+                console.normal('Default configuration written to '+args.createConfigFile)
+                sys.exit(errorCodes['ok'])
+            else:
+                console.error('Config file not written: %s' % (configFileWritten))
+                sys.exit(errorCodes['unknown'])
+
+        if args.defaultConfig:
+            config=classes.Config(configFile='', useDefault=True)
+        else:
+            config=classes.Config(configFile=args.configFile)
+
+        if args.maxProc>0:
+            config.setMaxProcs(min(cpu_count(), args.maxProc))
+
+        # Create queues and other structures needed for asynchronous implementation
+        totals={k: mp.Value(c_uint64, 0) for k in [
+            'dirsScanned', 
+            'dirsFound', 
+            'filesScanned', 
+            'filesFound', 
+            'bytesScanned', 
+            'bytesFound',
+            'totalResults']}
+        queues={name: mp.Queue() for name in ['logQ', 'dirsQ', 'filesQ', 'totalsQ',]}
+        activeFilesQProcesses=mp.Value(c_int, 0)
+        for resultsType in config.getEnabledOutputTypes():
+            name=resultsType+'_resultsQ'
+            queues.update({name: mp.Queue()})
+        stopEvent=mp.Event()
+        stopEvent.clear()
+        
+        # Configure logging / the logger process should be managed separately from all of the others.
+        loggerPM=classes.ProcessManager(name='loggerPM', 
+                                        logQ=queues['logQ'],
+                                        logLevel=config.getLogLevel(),
+                                        )
+        makedirs(str(Path(config.getLogFile()).absolute().parent), exist_ok=True)
+        loggerPM.register(target=logProcessor, 
+                    name='logProcessor',
+                    num_processes=1, 
+                    args=(config, queues['logQ'], stopEvent))
+        
+        # We need to start the logProcessor process before we can start the other processes
+        loggerPM.start()
+        logger=logging.getLogger()
+        logger.setLevel(config.getLogLevel())
+        logger.addHandler(QueueHandler(queues['logQ']))
+        logger=logging.getLogger('main')
+            
+        logger.info('Command line arguments: %s', sys.argv[1:])
+        logger.info('Starting PIIDigger version %s', __version__)
+        logger.info("Configuration: %s", json.dumps(config.getConfig()))
+
+        if len(config.getMimeTypes()) == 0:        
+            logger.info("MIME detection disabled.")
+
+        if not globalfuncs.isAdmin():
+            message='Not running as an administrator. File system access may be restricted.'
+            console.warn(message)
+            logger.info(message)
+
+        if globalfuncs.getOSType() == 'linux':
+            console.warn('Sleep prevention disabled on Linux. Consider using \'screen\' or \'tmux\' to ensure that PIIDigger survives an SSH disconnect.')
+        
+        console.normal('Scanning %s for files matching %s' % (config.getStartDirs(), config.getDataHandlers()))
+        
+        #####################################
+        # Bring up the pipe line in reverse order -- starting with results and working back to scanning for directories
+        #####################################
+            
+        # Setup each of the subprocesses that are needed
+        mainPM=classes.ProcessManager(name='mainPM', 
+                                logQ=queues['logQ'],
+                                logLevel=config.getLogLevel(),
+                                )
+        for outputHandler in getOutputHandlers(config, queues, stopEvent):
+            mainPM.register(target=outputHandler['target'],
+                        name=outputHandler['name'],
+                        num_processes=outputHandler['num_processes'],
+                        args=outputHandler['args'],
+                        )
+        mainPM.register(target=filescan.findFilesWorker, 
+                    name='findFilesWorker',
+                    num_processes=config.getMaxFilesScanProcs(), 
+                    args=(config, queues, totals, stopEvent,),
+                    )
+        mainPM.register(target=fileHandlerDispatcher, 
+                    name='fileHandler',
+                    num_processes=config.getMaxProcs(),
+                    args=(config, queues, totals, stopEvent, activeFilesQProcesses),)
+        mainPM.register(target=filescan.findDirsWorker, 
+                    name='findDirsWorker',
+                    num_processes=1,
+                    args=(config, queues, totals, stopEvent,),
+                    )
+        console.normal('Starting %d file scanner processes' % (config.getMaxFilesScanProcs()))
+        console.normal('Starting %d file handler processes' % (config.getMaxProcs()))
+
+        # Start the progress line worker in a separate process manager
+        progressPM=classes.ProcessManager(name='progressPM', 
+                                        logQ=queues['logQ'],
+                                        logLevel=config.getLogLevel(),
+                                        )
+        progressPM.register(target=progressLineWorker, 
+                    name='progressLineWorker',
+                    num_processes=1, 
+                    args=(totals,queues['logQ'], start, stopEvent),
+                    )
+        
+        # Start the processes
+        progressPM.start()
+        mainPM.start()
+
+        ##################################
+        # Wait for the main program to finish
+        ##################################
+
+        mainPM.wait_for_processes()
     except KeyboardInterrupt:
-        console.normal('\nKeyboard Interrupt in Main')
-        pm.terminate_all_processes()
+        # If the keyboard interrupt was early enought, maybe not all of the process managers have been started
+        # So only stop the ones that have been started
+        if progressPM:
+            progressPM.terminate_all_processes()
+        if mainPM:
+            mainPM.terminate_all_processes()
+        if loggerPM:
+            loggerPM.terminate_all_processes()
     except Exception:
         console.error('An unknown error was encountered.  Error message was captured in %s.' % config.getLogFile())
         logger.error(traceback.print_exc())
-    finally:
-        cleanup(queues)
+    else:
+        queues['logQ'].put(None)
         # If the logger hasn't already been shutdown by a KeyboardInterrupt or other event
-        loggerPM.terminate_all_processes()
-
+        stopEvent.set()
+        progressPM.wait_for_processes()
+    finally:
+        loggerPM.wait_for_processes()
+        cleanup(queues)
         console.normal('Scan complete.')
             
 if __name__ == '__main__':
