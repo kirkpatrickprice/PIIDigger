@@ -161,8 +161,6 @@ def findFilesWorker(config: classes.Config,
         queues['filesQ'].put(None)
         globalfuncs.waitOnQ(queues['filesQ'])
     except KeyboardInterrupt:
-        console.normal('\n')
-        console.warn('User terminated scan.  Shutting down.')
         logger.info('KeyboardInterrupt received in findFilesWorker')
         globalfuncs.clearQ(queues['dirsQ'])
         globalfuncs.clearQ(queues['filesQ'])
