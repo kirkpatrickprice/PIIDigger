@@ -335,46 +335,45 @@ def progressLineWorker(totals: dict,
         logger.info('progressLineWorker stopped')
 
 def main():
-    try:
-        start=datetime.now()
-        args=commandLineParser()
+    start=datetime.now()
+    args=commandLineParser()
+    if args.cpuCount:
+        print('CPU cores:', cpu_count())
+        sys.exit(errorCodes['ok'])
 
-        if args.cpuCount:
-            print('CPU cores:', cpu_count())
+    if args.listDH:
+        print('Data handler modules: ', globalfuncs.getSupportedDataHandlerNames())
+        sys.exit(errorCodes['ok'])
+
+    if args.listFT:
+        print('File extns: ', globalfuncs.getSupportedFileExts())
+        print('MIME types: ', globalfuncs.getSupportedFileMimes())
+        sys.exit(errorCodes['ok'])
+
+    if args.version:
+        print('PIIDigger version:', __version__)
+        sys.exit(errorCodes['ok'])
+
+    if len(args.createConfigFile) >0:
+        tomlFile = str(args.createConfigFile) if str(args.createConfigFile).endswith('.toml') else str(args.createConfigFile)+'.toml'
+        configFileWritten=globalfuncs.writeDefaultConfig(tomlFile)
+
+        if configFileWritten=='Success':
+            console.normal('Default configuration written to '+args.createConfigFile)
             sys.exit(errorCodes['ok'])
-
-        if args.listDH:
-            print('Data handler modules: ', globalfuncs.getSupportedDataHandlerNames())
-            sys.exit(errorCodes['ok'])
-
-        if args.listFT:
-            print('File extns: ', globalfuncs.getSupportedFileExts())
-            print('MIME types: ', globalfuncs.getSupportedFileMimes())
-            sys.exit(errorCodes['ok'])
-
-        if args.version:
-            print('PIIDigger version:', __version__)
-            sys.exit(errorCodes['ok'])
-
-        if len(args.createConfigFile) >0:
-            tomlFile = str(args.createConfigFile) if str(args.createConfigFile).endswith('.toml') else str(args.createConfigFile)+'.toml'
-            configFileWritten=globalfuncs.writeDefaultConfig(tomlFile)
-
-            if configFileWritten=='Success':
-                console.normal('Default configuration written to '+args.createConfigFile)
-                sys.exit(errorCodes['ok'])
-            else:
-                console.error('Config file not written: %s' % (configFileWritten))
-                sys.exit(errorCodes['unknown'])
-
-        if args.defaultConfig:
-            config=classes.Config(configFile='', useDefault=True)
         else:
-            config=classes.Config(configFile=args.configFile)
+            console.error('Config file not written: %s' % (configFileWritten))
+            sys.exit(errorCodes['unknown'])
 
-        if args.maxProc>0:
-            config.setMaxProcs(min(cpu_count(), args.maxProc))
+    if args.defaultConfig:
+        config=classes.Config(configFile='', useDefault=True)
+    else:
+        config=classes.Config(configFile=args.configFile)
 
+    if args.maxProc>0:
+        config.setMaxProcs(min(cpu_count(), args.maxProc))
+
+    try:
         # Create queues and other structures needed for asynchronous implementation
         totals={k: mp.Value(c_uint64, 0) for k in [
             'dirsScanned', 
@@ -481,13 +480,13 @@ def main():
         mainPM.wait_for_processes()
     except KeyboardInterrupt:
         # If the keyboard interrupt was early enought, maybe not all of the process managers have been started
-        # So only stop the ones that have been started
-        if progressPM:
+        # So wrap the cleanup in a try/except block to catch undeclared variables
+        try:
             progressPM.terminate_all_processes()
-        if mainPM:
             mainPM.terminate_all_processes()
-        if loggerPM:
             loggerPM.terminate_all_processes()
+        except UnboundLocalError:
+            pass
     except Exception:
         console.error('An unknown error was encountered.  Error message was captured in %s.' % config.getLogFile())
         logger.error(traceback.print_exc())
@@ -497,8 +496,11 @@ def main():
         stopEvent.set()
         progressPM.wait_for_processes()
     finally:
-        loggerPM.wait_for_processes()
-        cleanup(queues)
+        try:
+            loggerPM.wait_for_processes()
+            cleanup(queues)
+        except UnboundLocalError:
+            pass
         console.normal('Scan complete.')
             
 if __name__ == '__main__':
