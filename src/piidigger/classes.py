@@ -196,9 +196,19 @@ class Config:
         self.config['maxProcs']=procs
 
 class ProcessManager:
-    def __init__(self, name: str):
+    def __init__(self, 
+                 name: str,
+                 logQ: mp.Queue,
+                 logLevel: str):
+        
         self.processes: list = []
         self.name = name
+        self.logger=logging.getLogger(name)
+        self.logger.addHandler(logging.handlers.QueueHandler(logQ))
+        self.logger.setLevel(logLevel)
+        self.logger.propagate=False
+        self.logger.debug(f'Initialized ProcessManager {name}.')
+        
         
     def register(self, 
                  *,
@@ -208,8 +218,7 @@ class ProcessManager:
                  args: tuple = None
                  ):
         
-        self.processes.append(
-            {
+        p={
             'target': target,
             'start_order': len(self.processes) + 1,
             'shutdown_order': None,
@@ -219,7 +228,9 @@ class ProcessManager:
             'started': False,
             'args': args,
             }
-        )
+        
+        self.processes.append(p)
+        self.logger.debug(f'{self.name}: Registered process {name} with {num_processes} processes.')
 
     def start(self):
         try:
@@ -232,8 +243,9 @@ class ProcessManager:
                                     name=f'{process['name']}_{j}',
                                     args=process['args'],
                         )
-                        p.start()                
                         process['processes'].append(p)
+                        p.start()
+                        self.logger.debug(f'Started process {p.name} (PID={p.pid}).')
                     process['started'] = True
         except KeyboardInterrupt:
             self.terminate_all_processes()
@@ -243,15 +255,17 @@ class ProcessManager:
             self.processes.sort(key=lambda x: x['shutdown_order'],)
             for process in self.processes:
                 for p in process['processes']:
+                    self.logger.debug(f'Joining process {p.name} (PID={p.pid}).')
                     p.join()
         except KeyboardInterrupt:
             self.terminate_all_processes()
 
     def terminate_all_processes(self):
-        print(f'{self.name}: Terminating all processes.')
+        self.logger.debug(f'{self.name}: Terminating all processes.')
         self.processes.sort(key=lambda x: x['shutdown_order'],)
         for process in self.processes:
             for p in process['processes']:
+                self.logger.debug(f'Terminating process {p.name} (PID={p.pid}).')
                 p.terminate()
                 p.join()        
 
