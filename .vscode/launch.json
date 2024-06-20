@@ -1,0 +1,156 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "PIIDigger: Test FileScan",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/piidigger/filescan.py",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+        },
+        {
+            "name": "PIIDigger: Test GetMime",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/piidigger/getmime.py",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}/",
+            "args": [
+                "testdata/pans/sample-pans.json",
+                "testdata/pans/example-file.utf16.txt",
+                "testdata/pans/example-file-utf16-BOM.txt",
+                "testdata/pans/example-encrypted.zip",
+                ]
+        },
+        {
+            "name": "PIIDigger: Test GetEncoding",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/piidigger/getencoding.py",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}/",
+            "args": [
+                "testdata/pan/sample-pans.json",
+                "testdata/pan/example-file.utf16.txt",
+                "testdata/pan/example-file-utf16-BOM.txt",
+                "testdata/EULA.txt",
+                "testdata/cuepkg-2023-12-23_19-21-28_3.log",
+                "piidigger-results/piidigger-results.json",
+                "logs/piidigger.log",
+                ]
+        },
+        {
+            "name": "PIIDigger: Test PlainText File handler",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/piidigger/filehandlers/plaintext.py",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}/",
+            "args": [
+                "requirements.txt",
+                "testdata/pan/sample-pans.json",
+                "testdata/pan/example-file2 (1).txt",
+                ]
+        },
+        {
+            "name": "PIIDigger: Test XLS file handler",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/piidigger/filehandlers/xls.py",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}/",
+            "args": [
+                "testdata/pan/Excel Sheet.xls",
+                ]
+        },
+        {
+            "name": "PIIDigger: Test Config Class",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/classes.py",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+        },
+        {
+            "name": "PIIDigger: Test Create Config",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/piidigger.py",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--create-conf", "default-config"
+            ]
+        },
+        {
+            "name": "PIIDigger: Test Main (Only Testdir)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/piidigger.py",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "-f", "piidigger-testdir.toml",
+                "-p", "1"
+            ]
+        },
+        {
+            "name": "PIIDigger: Test Main (Only OneDrive)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/piidigger.py",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "-f", "piidigger-onedrive.toml",
+                "-p", "1"
+            ]
+        },
+        {
+            "name": "PIIDigger: Test Main (All Downloads)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/piidigger.py",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "-f", "piidigger-alldownloads.toml",
+                "-p", "1"
+            ]
+        },
+        {
+            "name": "PIIDigger: Test Main (piidigger.toml)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/piidigger.py",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "-p 1",
+            ]
+        },
+        {
+            "name": "PIIDigger: Test Main (Default Config)",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/piidigger.py",
+            "justMyCode": true,
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "-d",
+            ]
+        },
+    ]
+}

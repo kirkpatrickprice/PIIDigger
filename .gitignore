@@ -183,7 +183,6 @@ cython_debug/
 *.code-workspace
 
 # End of https://www.toptal.com/developers/gitignore/api/python,visualstudiocode
-.vscode/launch.json
 conf.d/test.yaml
 
 # PIIDigger application testing files
