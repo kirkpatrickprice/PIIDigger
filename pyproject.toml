@@ -16,15 +16,15 @@ description = "Python program to identify Personally Identifiable Information in
 readme = "README.md"
 keywords = ["pii discovery", "data discovery", "credit card discovery"]
 requires-python = ">=3.9,<4"
-dependencies = ["chardet>=5.2.0",
-                "colorama>=0.4.6",
-                "docx2python>=2.10.1",
+dependencies = ["chardet==5.2.0",
+                "colorama==0.4.6",
+                "docx2python==2.10.1",
                 "openpyxl==3.0.10",
-                "puremagic>=1.20",
-                "pyyaml>=6.0",
-                "tomli>=2.0.1",
-                "wakepy>=0.7.2",
-                "xlrd>=2.0.1",
+                "puremagic==1.20",
+                "pyyaml==6.0.1",
+                "tomli==2.0.1",
+                "wakepy==0.7.2",
+                "xlrd==2.0.1",
                 ]
 classifiers = [
     "Development Status :: 4 - Beta",
