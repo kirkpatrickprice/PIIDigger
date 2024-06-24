@@ -53,12 +53,17 @@ class LogManager:
         finally:
             logger.info('[logProcessor]Stopping logProcessor (%s)', str(stopCause))
 
-    def get_logger(self, name: str, ) -> logging.Logger:
+    @staticmethod
+    def getLogger( name: str = '',
+                    logConfig: dict={'q': mp.Queue, 
+                                    'level': None},
+                  ) -> logging.Logger:
         """
         Returns a logger instance for subprocesses to use, which puts log events onto a queue.
         """
         logger = logging.getLogger(name)
-        logger.setLevel(self.logLevel)
-        logger.addHandler(logging.handlers.QueueHandler(self.logQueue))
+        logger.setLevel(logConfig['level'])
+        if not logger.handlers:
+            logger.addHandler(logging.handlers.QueueHandler(logConfig['q']))
         logger.propagate = False
         return logger

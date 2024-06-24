@@ -1,7 +1,6 @@
-import logging
 import openpyxl
 import warnings
-from logging.handlers import QueueHandler
+import multiprocessing as mp
 from collections.abc import Iterator
 
 from openpyxl.utils.exceptions import *
@@ -14,6 +13,7 @@ from piidigger.globalvars import (
     maxChunkSize, 
     defaultChunkCount,
     )
+from piidigger.logmanager import LogManager
 
 # Ignore the UserWarning message from OpenPyXL that seem to pop up here and there
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
@@ -47,11 +47,8 @@ def readFile(filename: str,
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
     '''
 
-    logger: logging = logging.getLogger('xlsx-handler')
-    if not logger.handlers:
-        logger.addHandler(QueueHandler(logConfig['q']))
-    logger.setLevel(logConfig['level'])
-    logger.propagate=False
+    logger=LogManager.getLogger(name=mp.current_process().name+'_xlsx-handler', logConfig=logConfig,)
+    
     content: str = ''
     totalBytes: int = 0
     maxContentSize = maxChunkSize * maxChunkCount

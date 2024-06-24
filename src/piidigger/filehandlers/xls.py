@@ -1,5 +1,5 @@
 import logging
-from logging.handlers import QueueHandler
+import multiprocessing as mp
 from collections.abc import Iterator
 
 import xlrd
@@ -11,6 +11,7 @@ from piidigger.globalvars import (
     maxChunkSize, 
     defaultChunkCount,
     )
+from piidigger.logmanager import LogManager
 
 # Each filehandler must have the following:
 #   "handles" -     dictionary to identify lists of file extensions and mime types that the handler will manage.
@@ -37,11 +38,7 @@ def readFile(filename: str,
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
     '''
 
-    logger=logging.getLogger('xls-handler')
-    if not logger.handlers:
-        logger.addHandler(QueueHandler(logConfig['q']))
-    logger.setLevel(logConfig['level'])
-    logger.propagate=False
+    logger=LogManager.getLogger(name=mp.current_process().name+'_xls-handler', logConfig=logConfig,)
     
     try:
         # Don't use "on_demand" in order to keep the code simpler.  All worksheets are loaded into RAM.

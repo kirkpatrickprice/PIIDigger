@@ -1,8 +1,7 @@
 '''Process DOCX files'''
 
-import logging
+import multiprocessing as mp
 import warnings
-from logging.handlers import QueueHandler
 from collections.abc import Iterator
 
 from docx2python import docx2python
@@ -13,6 +12,7 @@ from piidigger.globalvars import (
     maxChunkSize,
     defaultChunkCount,
     )
+from piidigger.logmanager import LogManager
 
 warnings.filterwarnings('ignore', category=UserWarning, module='docx2python')
 
@@ -39,13 +39,8 @@ def readFile(filename: str,
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
     '''
 
-    logger=logging.getLogger('docx-handler')
-    if not logger.handlers:
-        logger.addHandler(QueueHandler(logConfig['q']))
-    logger.setLevel(logConfig['level'])
-    logger.propagate=False
-    
-    
+    logger=LogManager.getLogger(name=mp.current_process().name+'_docx-handler', logConfig=logConfig)
+        
     try:
         # Read in all of the docx content and close the file
         docxContent=docx2python(filename)
@@ -61,7 +56,7 @@ def readFile(filename: str,
             if not comment is None:
                 handler.appendContent(comment[3])
                 if handler.contentBufferFull():
-                    yield content.strip()
+                    yield handler.strip()
 
         # No size check -- we'll just append the properties to the end of the content and send it
         handler.appendContent(str(docxContent.core_properties))

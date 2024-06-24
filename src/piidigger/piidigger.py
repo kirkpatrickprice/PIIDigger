@@ -115,7 +115,7 @@ def fileHandlerDispatcher(config: classes.Config,
                           totals: dict,
                           stopEvent: mp.Event,
                           activeFilesQProcesses: mp.Value,
-                          logger: LogManager,
+                          logConfig: dict,
                          ):
 
     try:
@@ -123,18 +123,10 @@ def fileHandlerDispatcher(config: classes.Config,
             activeFilesQProcesses.value+=1
         dataHandlerModules=globalfuncs.getEnabledDataHandlerModules(config.getDataHandlers())
 
-        logger=logging.getLogger('fileHandlerDispatch')
-        if not logger.handlers:
-            logger.addHandler(QueueHandler(queues['logQ']))
-        logger.setLevel(config.getLogLevel())
-        logger.propagate=False
+        logger=LogManager.getLogger(name=mp.current_process().name, logConfig=logConfig, )
         logger.debug('Process %s (%s) started (Active=%d)', mp.current_process().name, mp.current_process().pid, activeFilesQProcesses.value)
         resultsQs = [qName for qName in queues.keys() if qName.endswith('_resultsQ')]
         
-        logConfig={'q': queues['logQ'],
-                'level': config.getLogLevel(),
-                }
-
         while True:
             if stopEvent.is_set():
                 break
@@ -357,6 +349,9 @@ def main():
             logLevel=config.getLogLevel(), 
             logQueue=queues['logQ'],
             )
+        logConfig={'q': queues['logQ'],
+                   'level': config.getLogLevel()
+                  }
         
         # Configure logging / the logger process should be managed separately from all of the others.
         loggerPM=classes.ProcessManager(name='loggerPM', 
@@ -371,10 +366,7 @@ def main():
         
         # We need to start the logProcessor process before we can start the other processes
         loggerPM.start()
-        logger=logging.getLogger()
-        logger.setLevel(config.getLogLevel())
-        logger.addHandler(QueueHandler(queues['logQ']))
-        logger=logging.getLogger('main')
+        logger=LogManager.getLogger(name='main', logConfig=logConfig)
             
         logger.info('Command line arguments: %s', sys.argv[1:])
         logger.info('Starting PIIDigger version %s', __version__)
@@ -416,7 +408,7 @@ def main():
         mainPM.register(target=fileHandlerDispatcher, 
                     name='fileHandler',
                     num_processes=config.getMaxProcs(),
-                    args=(config, queues, totals, stopEvent, activeFilesQProcesses),)
+                    args=(config, queues, totals, stopEvent, activeFilesQProcesses, logConfig),)
         mainPM.register(target=filescan.findDirsWorker, 
                     name='findDirsWorker',
                     num_processes=1,
