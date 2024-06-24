@@ -5,11 +5,9 @@ import os
 import pathlib
 import platform
 import string
+from time import sleep
+from typing import Optional
 
-# try:
-#     # If we're on Python later than 3.11 then tomllib is included.  We'll use the "toml" namespace so that the same code will work on older Pythons where toml had to be installed.
-#     import tomllib as toml
-# except ModuleNotFoundError:
 import tomli
 
 from piidigger import globalfuncs

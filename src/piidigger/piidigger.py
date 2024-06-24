@@ -18,6 +18,7 @@ from wakepy import keep
 
 
 import piidigger.classes as classes
+from piidigger.logmanager import LogManager
 from piidigger import (
     console,
     filescan,
@@ -106,54 +107,15 @@ def commandLineParser() -> argparse.ArgumentParser:
         help='Display the version number and exit'
     )
     
-    return parser.parse_args()
+    return parser.parse_args()        
 
-
-def logProcessor(config: classes.Config, 
-                 queue: mp.Queue,
-                 stopEvent: mp.Event):
-    try:
-        logger=logging.getLogger()
-
-        logFileFormatter=logging.Formatter('%(asctime)s:[%(name)s]:%(levelname)s:%(message)s')
-        logFileHandler=logging.FileHandler(filename=config.getLogFile(),mode='w',encoding='utf-8')
-        logFileHandler.setFormatter(logFileFormatter)
-
-        logger.setLevel(config.getLogLevel())
-        logger.addHandler(logFileHandler)
-
-        logger.info('Starting logProcessor (%s)', mp.current_process().pid)
-        stopCause=None
-
-        while True:
-            if stopEvent.is_set():
-                stopCause = 'stopEvent'
-                break
-
-            message = queue.get(1)
-
-            if message == None:
-                stopCause = 'endQueue'
-                break
-
-            logger.handle(message)
-    except KeyboardInterrupt:
-        console.normal('\n')
-        console.warn('User terminated scan.  Shutting down.')
-
-        # Give other processes a chance to write their final messages to the queue
-        sleep(2)
-        globalfuncs.clearQ(queue)
-        stopCause='ctrlc'
-    finally:
-        logger.info('[logProcessor]Stopping logProcessor (%s)', str(stopCause))
-        
 
 def fileHandlerDispatcher(config: classes.Config,
                           queues: dict,
                           totals: dict,
                           stopEvent: mp.Event,
                           activeFilesQProcesses: mp.Value,
+                          logger: LogManager,
                          ):
 
     try:
@@ -390,6 +352,11 @@ def main():
             queues.update({name: mp.Queue()})
         stopEvent=mp.Event()
         stopEvent.clear()
+        logManager=LogManager(
+            logFile=config.getLogFile(), 
+            logLevel=config.getLogLevel(), 
+            logQueue=queues['logQ'],
+            )
         
         # Configure logging / the logger process should be managed separately from all of the others.
         loggerPM=classes.ProcessManager(name='loggerPM', 
@@ -397,10 +364,10 @@ def main():
                                         logLevel=config.getLogLevel(),
                                         )
         makedirs(str(Path(config.getLogFile()).absolute().parent), exist_ok=True)
-        loggerPM.register(target=logProcessor, 
+        loggerPM.register(target=logManager.logProcessor, 
                     name='logProcessor',
                     num_processes=1, 
-                    args=(config, queues['logQ'], stopEvent))
+                    args=(stopEvent,))
         
         # We need to start the logProcessor process before we can start the other processes
         loggerPM.start()
