@@ -5,7 +5,7 @@ from time import sleep
 
 from piidigger import (
     console,
-    globalfuncs
+    queuefuncs,
 )
 
 class LogManager:
@@ -49,7 +49,7 @@ class LogManager:
 
             # Give other processes a chance to write their final messages to the queue
             sleep(2)
-            globalfuncs.clearQ(self.logQueue)
+            queuefuncs.clearQ(self.logQueue)
             stopCause='ctrlc'
         finally:
             logger.info('[logProcessor]Stopping logProcessor (%s)', str(stopCause))

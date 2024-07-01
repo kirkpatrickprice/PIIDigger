@@ -21,6 +21,7 @@ from piidigger import (
     console,
     filescan,
     globalfuncs,
+    queuefuncs,
     __version__,
     )
 from piidigger.globalvars import (
@@ -36,7 +37,7 @@ def cleanup(queues: dict,):
     for q in queues:
         if not queues[q].empty():
             console.normal('Cleaning up queue: %s' % q)
-            globalfuncs.clearQ(queues[q])
+            queuefuncs.clearQ(queues[q])
 
 def commandLineParser() -> argparse.ArgumentParser:
     '''Handles the command line options'''

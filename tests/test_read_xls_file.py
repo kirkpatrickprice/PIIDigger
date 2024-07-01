@@ -3,7 +3,7 @@ from queue import Queue
 import pytest
 
 from piidigger.filehandlers import xls
-from piidigger.globalfuncs import clearQ
+from piidigger.queuefuncs import clearQ
 
 @pytest.mark.filehandlers
 @pytest.mark.parametrize('filename, expected_result', [

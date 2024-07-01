@@ -1,4 +1,6 @@
 import pytest
+from queue import Queue
+from logging import INFO
 
 from piidigger.getencoding import getEncoding
 
@@ -9,6 +11,7 @@ from piidigger.getencoding import getEncoding
                             ]
                         )
 def test_getEncoding(testFile, expected_result):
-    result=getEncoding(testFile)
+    logConfig={'q': Queue(), 'level': INFO}
+    result=getEncoding(testFile, logConfig)
 
     assert result==expected_result

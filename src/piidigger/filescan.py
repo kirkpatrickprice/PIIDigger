@@ -5,6 +5,8 @@ import multiprocessing as mp
 
 from piidigger.getmime import getMime
 from piidigger import globalfuncs
+import piidigger.queuefuncs as queuefuncs
+
 try:
     from win32api import GetFileAttributes
     win32apiLoaded=True
@@ -81,7 +83,7 @@ def findDirsWorker(config: classes.Config,
         globalfuncs.waitOnQ(queues['dirsQ'])
     except KeyboardInterrupt:
         logger.info('KeyboardInterrupt received in findDirsWorker')
-        globalfuncs.clearQ(queues['dirsQ'])
+        queuefuncs.clearQ(queues['dirsQ'])
     finally:
         # All directories have been scanned.  Send the sentinel message to shutdown the consumer threads
         logger.info('Found %d folders', totals['dirsFound'].value)
@@ -157,8 +159,8 @@ def findFilesWorker(config: classes.Config,
         globalfuncs.waitOnQ(queues['filesQ'])
     except KeyboardInterrupt:
         logger.info('KeyboardInterrupt received in findFilesWorker')
-        globalfuncs.clearQ(queues['dirsQ'])
-        globalfuncs.clearQ(queues['filesQ'])
+        queuefuncs.clearQ(queues['dirsQ'])
+        queuefuncs.clearQ(queues['filesQ'])
     finally:
         logger.info('Found %d files', totals['filesFound'].value)
         logger.info('Stopping findFilesWorker')
