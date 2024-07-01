@@ -39,7 +39,7 @@ def readFile(filename: str,
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
     '''
 
-    logger=LogManager.getLogger(name=mp.current_process().name+'_docx-handler', logConfig=logConfig)
+    logger=LogManager.getLogger(name=mp.current_process().name+'_docx_handler', logConfig=logConfig)
         
     try:
         # Read in all of the docx content and close the file

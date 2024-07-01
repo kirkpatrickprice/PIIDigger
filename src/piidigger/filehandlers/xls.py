@@ -38,7 +38,7 @@ def readFile(filename: str,
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
     '''
 
-    logger=LogManager.getLogger(name=mp.current_process().name+'_xls-handler', logConfig=logConfig,)
+    logger=LogManager.getLogger(name=mp.current_process().name+'_xls_handler', logConfig=logConfig,)
     
     try:
         # Don't use "on_demand" in order to keep the code simpler.  All worksheets are loaded into RAM.

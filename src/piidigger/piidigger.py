@@ -1,12 +1,10 @@
 import argparse
-import logging
 import multiprocessing as mp
 import sys
 import textwrap
 import traceback
 from ctypes import c_int, c_uint64
 from datetime import datetime
-from logging.handlers import QueueHandler
 from os import makedirs, cpu_count
 from pathlib import Path
 from time import sleep
@@ -235,9 +233,9 @@ def getOutputHandlers(config: classes.Config,
 
 
 def progressLineWorker(totals: dict, 
-                       logQ: mp.Queue, 
                        startTime: datetime,
                        stopEvent: mp.Event,
+                       logConfig: dict,
                       ):
 
     def _printProgressLine():
@@ -264,16 +262,13 @@ def progressLineWorker(totals: dict,
             sleep(INTERVAL)
 
     try:
-        logger=logging.getLogger('progressLineWorker')
-        logger.addHandler(QueueHandler(logQ))
-        logger.propagate=False
+        logger=LogManager.getLogger(name='progressLineWorker', 
+                                    logConfig=logConfig
+                                   )
         logger.info('progressLineWorker started')
 
         console.normal('If needed, press CTRL-C to terminate scan')
 
-        #_printProgressLine()
-
-        # Removed temporarily as it was having trouble with PyInstaller  
         if globalfuncs.getOSType()=='linux':
             _printProgressLine()
         else:
@@ -355,9 +350,7 @@ def main():
         
         # Configure logging / the logger process should be managed separately from all of the others.
         loggerPM=classes.ProcessManager(name='loggerPM', 
-                                        logQ=queues['logQ'],
-                                        logLevel=config.getLogLevel(),
-                                        )
+                                        logConfig=logConfig,)
         makedirs(str(Path(config.getLogFile()).absolute().parent), exist_ok=True)
         loggerPM.register(target=logManager.logProcessor, 
                     name='logProcessor',
@@ -390,10 +383,8 @@ def main():
         #####################################
             
         # Setup each of the subprocesses that are needed
-        mainPM=classes.ProcessManager(name='mainPM', 
-                                logQ=queues['logQ'],
-                                logLevel=config.getLogLevel(),
-                                )
+        mainPM=classes.ProcessManager(name='mainPM',
+                                      logConfig=logConfig,)
         for outputHandler in getOutputHandlers(config, queues, stopEvent):
             mainPM.register(target=outputHandler['target'],
                         name=outputHandler['name'],
@@ -403,7 +394,7 @@ def main():
         mainPM.register(target=filescan.findFilesWorker, 
                     name='findFilesWorker',
                     num_processes=config.getMaxFilesScanProcs(), 
-                    args=(config, queues, totals, stopEvent,),
+                    args=(config, queues, totals, stopEvent, logConfig),
                     )
         mainPM.register(target=fileHandlerDispatcher, 
                     name='fileHandler',
@@ -412,20 +403,18 @@ def main():
         mainPM.register(target=filescan.findDirsWorker, 
                     name='findDirsWorker',
                     num_processes=1,
-                    args=(config, queues, totals, stopEvent,),
+                    args=(config, queues, totals, stopEvent, logConfig),
                     )
         console.normal('Starting %d file scanner processes' % (config.getMaxFilesScanProcs()))
         console.normal('Starting %d file handler processes' % (config.getMaxProcs()))
 
         # Start the progress line worker in a separate process manager
-        progressPM=classes.ProcessManager(name='progressPM', 
-                                        logQ=queues['logQ'],
-                                        logLevel=config.getLogLevel(),
-                                        )
+        progressPM=classes.ProcessManager(name='progressPM',
+                                          logConfig=logConfig,)
         progressPM.register(target=progressLineWorker, 
                     name='progressLineWorker',
                     num_processes=1, 
-                    args=(totals,queues['logQ'], start, stopEvent),
+                    args=(totals, start, stopEvent, logConfig),
                     )
         
         # Start the processes

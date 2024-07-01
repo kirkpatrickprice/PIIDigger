@@ -1,5 +1,4 @@
 import datetime
-import logging
 import multiprocessing as mp
 import os
 import pathlib
@@ -13,8 +12,7 @@ import tomli
 from piidigger import globalfuncs
 from piidigger import console
 from piidigger.getmime import testMagic
-
-logger=logging.getLogger(__name__)
+from piidigger.logmanager import LogManager
 
 class File:
     def __init__(self, f: pathlib.Path, mimeType: str):
@@ -24,7 +22,6 @@ class File:
         self.mimeType=mimeType
         self.handler=globalfuncs.getFileHandlerName(self.ext, self.mimeType)
         self.times=(f.stat().st_atime, f.stat().st_mtime)
-        logger.debug('Initialized File object for %s, mimeType=%s, times=%s, handler=%s', self.getFullPath(), self.mimeType, str(self.times), self.handler)
         self.size=f.stat().st_size
         
     def __lt__(self, other):
@@ -43,8 +40,7 @@ class File:
         return self.times[1]
     
     def getFileHandlerName(self) -> str:
-        return self.handler
-    
+        return self.handler    
     
     def getFileSize(self):
         return self.size
@@ -196,16 +192,13 @@ class Config:
 class ProcessManager:
     def __init__(self, 
                  name: str,
-                 logQ: mp.Queue,
-                 logLevel: str):
+                 logConfig: dict,):
         
         self.processes: list = []
         self.name = name
-        self.logger=logging.getLogger(name)
-        self.logger.addHandler(logging.handlers.QueueHandler(logQ))
-        self.logger.setLevel(logLevel)
-        self.logger.propagate=False
-        self.logger.debug(f'Initialized ProcessManager {name}.')
+        self.logger=LogManager.getLogger(name=name, 
+                                         logConfig=logConfig)
+        self.logger.info(f'Initialized ProcessManager {name}.')
         
         
     def register(self, 
@@ -228,7 +221,7 @@ class ProcessManager:
             }
         
         self.processes.append(p)
-        self.logger.debug(f'{self.name}: Registered process {name} with {num_processes} processes.')
+        self.logger.info(f'{self.name}: Registered process {name} with {num_processes} processes.')
 
     def start(self):
         try:
@@ -243,7 +236,7 @@ class ProcessManager:
                         )
                         process['processes'].append(p)
                         p.start()
-                        self.logger.debug(f'Started process {p.name} (PID={p.pid}).')
+                        self.logger.info(f'Started process {p.name} (PID={p.pid}).')
                     process['started'] = True
         except KeyboardInterrupt:
             self.terminate_all_processes()
@@ -253,17 +246,17 @@ class ProcessManager:
             self.processes.sort(key=lambda x: x['shutdown_order'],)
             for process in self.processes:
                 for p in process['processes']:
-                    self.logger.debug(f'Joining process {p.name} (PID={p.pid}).')
+                    self.logger.info(f'Joining process {p.name} (PID={p.pid}).')
                     p.join()
         except KeyboardInterrupt:
             self.terminate_all_processes()
 
     def terminate_all_processes(self):
-        self.logger.debug(f'{self.name}: Terminating all processes.')
+        self.logger.info(f'{self.name}: Terminating all processes.')
         self.processes.sort(key=lambda x: x['shutdown_order'],)
         for process in self.processes:
             for p in process['processes']:
-                self.logger.debug(f'Terminating process {p.name} (PID={p.pid}).')
+                self.logger.info(f'Terminating process {p.name} (PID={p.pid}).')
                 p.terminate()
                 p.join()        
 

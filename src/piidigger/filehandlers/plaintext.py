@@ -58,7 +58,7 @@ def readFile(filename: str,
                                   logConfig=logConfig,
                                   )
        
-    enc = getEncoding(filename)
+    enc = getEncoding(filename, logConfig)
 
     if enc == None:
         logger.info('%s: Unknown encoding type', filename)

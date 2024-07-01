@@ -1,4 +1,5 @@
 import logging
+from logging.handlers import QueueHandler
 import multiprocessing as mp
 from time import sleep
 
@@ -18,7 +19,7 @@ class LogManager:
         Processes log events from a queue and writes them to a log file.
         """
         try:
-            logger=logging.getLogger()
+            logger=logging.getLogger('logProcessor')
 
             logFileFormatter=logging.Formatter('%(asctime)s:[%(name)s]:%(levelname)s:%(message)s')
             logFileHandler=logging.FileHandler(filename=self.logFile,mode='w',encoding='utf-8')
@@ -64,6 +65,6 @@ class LogManager:
         logger = logging.getLogger(name)
         logger.setLevel(logConfig['level'])
         if not logger.handlers:
-            logger.addHandler(logging.handlers.QueueHandler(logConfig['q']))
+            logger.addHandler(QueueHandler(logConfig['q']))
         logger.propagate = False
         return logger

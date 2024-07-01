@@ -1,9 +1,5 @@
 import pathlib
-from logging.handlers import QueueHandler
-import logging
-import sys
-import threading
-from queue import Queue, Empty
+from queue import Empty
 import multiprocessing as mp
     
 
@@ -17,15 +13,13 @@ except ModuleNotFoundError:
 
 from piidigger import classes
 from piidigger import console
-
-logger = logging.getLogger(__name__)
-
+from piidigger.logmanager import LogManager
 
 def findDirsWorker(config: classes.Config, 
                    queues: dict, 
                    totals: dict,
                    stopEvent: mp.Event,
-                  ) -> list:
+                   logConfig: dict,) -> list:
     '''
     Expects a config object to start from (to get the startDirs paths)
 
@@ -35,10 +29,8 @@ def findDirsWorker(config: classes.Config,
     
     try:
         ctrlc=False
-        logger=logging.getLogger('findDirsWorker')
-        logger.addHandler(QueueHandler(queues['logQ']))
-        logger.setLevel(config.getLogLevel())
-        logger.propagate=False
+        logger=LogManager.getLogger('findDirsWorker',
+                                    logConfig=logConfig)
         
         logger.info('Starting findDirsWorker')
 
@@ -100,7 +92,7 @@ def findFilesWorker(config: classes.Config,
                     queues: dict, 
                     totals: dict,
                     stopEvent: mp.Event,
-                   ) -> list:
+                    logConfig: dict,) -> list:
     '''
     Inputs: Config(config), dirsQ as consumer, filesQ as producer
 
@@ -109,12 +101,10 @@ def findFilesWorker(config: classes.Config,
     
     
     try:
-        logger=logging.getLogger('findFilesWorker')
-        logger.addHandler(QueueHandler(queues['logQ']))
-        logger.setLevel(config.getLogLevel())
-        logger.propagate=False
-
-        logger.info('Starting findFilesWorker')
+        logger=LogManager.getLogger(name=mp.current_process().name,
+                                    logConfig=logConfig)
+        
+        logger.info('Starting %s', mp.current_process().name)
 
         while True:
             if stopEvent.is_set():
@@ -141,6 +131,11 @@ def findFilesWorker(config: classes.Config,
                         match=fileMatches(f, config.getFileExts(), config.getMimeTypes())
                         if match:
                             fObj=classes.File(f, mimeType)
+                            logger.debug('Initialized File object for %s, mimeType=%s, times=%s, handler=%s', 
+                                         fObj.getFullPath(), 
+                                         mimeType, 
+                                         str(fObj.getTimeStamps()), 
+                                         fObj.getFileHandlerName())
                             queues['filesQ'].put(fObj)
                             with totals['filesFound'].get_lock():
                                 totals['filesFound'].value+=1
