@@ -8,12 +8,11 @@ from openpyxl.utils.exceptions import *
 from zipfile import BadZipFile
 
 from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.globalvars import (
-    excelBlankColLimit, 
-    excelBlankRowLimit, 
-    maxChunkSize, 
-    defaultChunkCount,
-    )
+from piidigger.globalvars import excelBlankColLimit
+from piidigger.globalvars import excelBlankRowLimit
+from piidigger.globalvars import maxChunkSize
+from piidigger.globalvars import defaultChunkCount
+from piidigger.logmanager import LogManager
 
 # Ignore the UserWarning message from OpenPyXL that seem to pop up here and there
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
@@ -39,7 +38,7 @@ handles={
 }
 
 def readFile(filename: str, 
-             logConfig: dict,
+             logManager: LogManager,
              maxChunkCount: int = defaultChunkCount,
             ) -> Iterator[str]:
     ''''
@@ -47,11 +46,8 @@ def readFile(filename: str,
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
     '''
 
-    logger: logging = logging.getLogger('xlsx-handler')
-    if not logger.handlers:
-        logger.addHandler(QueueHandler(logConfig['q']))
-    logger.setLevel(logConfig['level'])
-    logger.propagate=False
+    logger = logManager.getLogger('xlsx_handler')
+
     content: str = ''
     totalBytes: int = 0
     maxContentSize = maxChunkSize * maxChunkCount

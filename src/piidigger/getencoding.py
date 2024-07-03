@@ -1,22 +1,19 @@
-import logging
-import os
-import sys
+from logging import INFO
 
 from chardet import UniversalDetector
 
-moduleName='getencoding'
+from piidigger.logmanager import LogManager
 
-logger=logging.getLogger(moduleName)
-
-def getEncoding(filename: str,) -> str:
+def getEncoding(filename: str,
+                logManager: LogManager,) -> str:
     '''
     Uses chardet to indenty the file encoding by reading MAXLINES of data.
 
     '''
 
-    logger=logging.getLogger(moduleName)
+    logger = logManager.getLogger('getEncoding')
     detector = UniversalDetector()
-    detector.logger.level=logging.INFO
+    detector.logger.level=INFO
         
     try:
         with open(filename, 'rb') as f:
@@ -34,16 +31,3 @@ def getEncoding(filename: str,) -> str:
     logger.debug('Filename %s chardet results: %s', filename, str(guess))
 
     return guess
-
-def main():
-    args=sys.argv[1:]
-    for arg in args:
-        if os.path.exists(arg):
-            print('Filename: %s\nEncoding: %s\n' % (arg, getEncoding(arg)))
-        else:
-            print('Filename not found: %s\n' % arg)
-
-
-if __name__ == "__main__":
-
-    main()

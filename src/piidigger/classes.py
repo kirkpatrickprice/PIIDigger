@@ -6,17 +6,12 @@ import pathlib
 import platform
 import string
 
-# try:
-#     # If we're on Python later than 3.11 then tomllib is included.  We'll use the "toml" namespace so that the same code will work on older Pythons where toml had to be installed.
-#     import tomllib as toml
-# except ModuleNotFoundError:
 import tomli
 
-from piidigger import globalfuncs
 from piidigger import console
+from piidigger import globalfuncs
 from piidigger.getmime import testMagic
-
-logger=logging.getLogger(__name__)
+from piidigger.logmanager import LogManager
 
 class File:
     def __init__(self, f: pathlib.Path, mimeType: str):
@@ -26,7 +21,6 @@ class File:
         self.mimeType=mimeType
         self.handler=globalfuncs.getFileHandlerName(self.ext, self.mimeType)
         self.times=(f.stat().st_atime, f.stat().st_mtime)
-        logger.debug('Initialized File object for %s, mimeType=%s, times=%s, handler=%s', self.getFullPath(), self.mimeType, str(self.times), self.handler)
         self.size=f.stat().st_size
         
     def __lt__(self, other):
@@ -198,17 +192,11 @@ class Config:
 class ProcessManager:
     def __init__(self, 
                  name: str,
-                 logQ: mp.Queue,
-                 logLevel: str):
+                 logManager: LogManager,):
         
         self.processes: list = []
         self.name = name
-        self.logger=logging.getLogger(name)
-        self.logger.addHandler(logging.handlers.QueueHandler(logQ))
-        self.logger.setLevel(logLevel)
-        self.logger.propagate=False
-        self.logger.debug(f'Initialized ProcessManager {name}.')
-        
+        self.logger = logManager.getLogger(name=name,)
         
     def register(self, 
                  *,
@@ -230,7 +218,7 @@ class ProcessManager:
             }
         
         self.processes.append(p)
-        self.logger.debug(f'{self.name}: Registered process {name} with {num_processes} processes.')
+        self.logger.info(f'{self.name}: Registered process {name} with {num_processes} processes.')
 
     def start(self):
         try:
@@ -245,7 +233,7 @@ class ProcessManager:
                         )
                         process['processes'].append(p)
                         p.start()
-                        self.logger.debug(f'Started process {p.name} (PID={p.pid}).')
+                        self.logger.info(f'Started process {p.name} (PID={p.pid}).')
                     process['started'] = True
         except KeyboardInterrupt:
             self.terminate_all_processes()
