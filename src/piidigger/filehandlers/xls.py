@@ -1,5 +1,3 @@
-import logging
-from logging.handlers import QueueHandler
 from collections.abc import Iterator
 
 import xlrd

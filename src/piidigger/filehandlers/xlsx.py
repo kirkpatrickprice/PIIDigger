@@ -1,7 +1,5 @@
-import logging
 import openpyxl
 import warnings
-from logging.handlers import QueueHandler
 from collections.abc import Iterator
 
 from openpyxl.utils.exceptions import *

@@ -1,12 +1,10 @@
 import argparse
-import logging
 import multiprocessing as mp
 import sys
 import textwrap
 import traceback
 from ctypes import c_int, c_uint64
 from datetime import datetime
-from logging.handlers import QueueHandler
 from os import makedirs, cpu_count
 from pathlib import Path
 from time import sleep

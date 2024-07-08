@@ -1,8 +1,6 @@
 '''Process DOCX files'''
 
-import logging
 import warnings
-from logging.handlers import QueueHandler
 from collections.abc import Iterator
 
 from docx2python import docx2python
