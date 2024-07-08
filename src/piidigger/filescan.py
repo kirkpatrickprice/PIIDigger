@@ -118,9 +118,6 @@ def findFilesWorker(config: classes.Config,
             if item == None:
                 continue
 
-            if item==None:
-                break
-            
             # Path-ify the directory name
             d=pathlib.Path(item)
             with totals['dirsScanned'].get_lock():
