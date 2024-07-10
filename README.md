@@ -17,6 +17,7 @@
     - See `--list-datahandlers` command line option for for currently supported document types
 - Saves output in multiple formats
     - Initial releaase provides JSON and text file outputs
+- Getting started with PIIDigger video on [YouTube](https://youtu.be/wnUNnzy1JDw)
 
 ## Errata
 Check out the [ERRATA](https://github.com/kirkpatrickprice/PIIDigger/blob/main/ERRATA.md) page for known issues, troubleshooting tips and instructions on reporting new problems.
@@ -56,6 +57,7 @@ NOTE:
 * See the [ERRATA](https://github.com/kirkpatrickprice/PIIDigger/blob/main/ERRATA.md) page for information about antivirus products and packaged Python binaries.
 
 ## Usage
+Getting started with PIIDigger video is availble on [YouTube](https://youtu.be/wnUNnzy1JDw)
 ```
 usage: piidigger [-h] [-c CREATECONFIGFILE] [-d] [-f CONFIGFILE] [-p MAXPROC] [--cpu-count] [--list-datahandlers]
                       [--list-filetypes]
