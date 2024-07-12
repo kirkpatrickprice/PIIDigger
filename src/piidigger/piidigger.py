@@ -1,32 +1,28 @@
 import argparse
-import logging
 import multiprocessing as mp
 import sys
 import textwrap
 import traceback
 from ctypes import c_int, c_uint64
 from datetime import datetime
-from logging.handlers import QueueHandler
 from os import makedirs, cpu_count
 from pathlib import Path
 from time import sleep
 
 
 import json
-# Removed temporarily as it was having trouble with PyInstaller
 from wakepy import keep
 
 
 import piidigger.classes as classes
-from piidigger import (
-    console,
-    filescan,
-    globalfuncs,
-    __version__,
-    )
-from piidigger.globalvars import (
-    errorCodes,
-    )
+from piidigger import console
+from piidigger import filescan
+from piidigger import globalfuncs
+from piidigger import queuefuncs
+from piidigger import __version__
+from piidigger.globalvars import errorCodes
+from piidigger.globalvars import SENTINEL
+from piidigger.logmanager import LogManager
 
 
 def cleanup(queues: dict,):
@@ -36,8 +32,7 @@ def cleanup(queues: dict,):
     print()
     for q in queues:
         if not queues[q].empty():
-            console.normal('Cleaning up queue: %s' % q)
-            globalfuncs.clearQ(queues[q])
+            queuefuncs.clearQ(queues[q])
 
 def commandLineParser() -> argparse.ArgumentParser:
     '''Handles the command line options'''
@@ -109,51 +104,12 @@ def commandLineParser() -> argparse.ArgumentParser:
     return parser.parse_args()
 
 
-def logProcessor(config: classes.Config, 
-                 queue: mp.Queue,
-                 stopEvent: mp.Event):
-    try:
-        logger=logging.getLogger()
-
-        logFileFormatter=logging.Formatter('%(asctime)s:[%(name)s]:%(levelname)s:%(message)s')
-        logFileHandler=logging.FileHandler(filename=config.getLogFile(),mode='w',encoding='utf-8')
-        logFileHandler.setFormatter(logFileFormatter)
-
-        logger.setLevel(config.getLogLevel())
-        logger.addHandler(logFileHandler)
-
-        logger.info('Starting logProcessor (%s)', mp.current_process().pid)
-        stopCause=None
-
-        while True:
-            if stopEvent.is_set():
-                stopCause = 'stopEvent'
-                break
-
-            message = queue.get(1)
-
-            if message == None:
-                stopCause = 'endQueue'
-                break
-
-            logger.handle(message)
-    except KeyboardInterrupt:
-        console.normal('\n')
-        console.warn('User terminated scan.  Shutting down.')
-
-        # Give other processes a chance to write their final messages to the queue
-        sleep(2)
-        globalfuncs.clearQ(queue)
-        stopCause='ctrlc'
-    finally:
-        logger.info('[logProcessor]Stopping logProcessor (%s)', str(stopCause))
-        
-
 def fileHandlerDispatcher(config: classes.Config,
                           queues: dict,
                           totals: dict,
                           stopEvent: mp.Event,
                           activeFilesQProcesses: mp.Value,
+                          logManager: LogManager,
                          ):
 
     try:
@@ -161,25 +117,18 @@ def fileHandlerDispatcher(config: classes.Config,
             activeFilesQProcesses.value+=1
         dataHandlerModules=globalfuncs.getEnabledDataHandlerModules(config.getDataHandlers())
 
-        logger=logging.getLogger('fileHandlerDispatch')
-        if not logger.handlers:
-            logger.addHandler(QueueHandler(queues['logQ']))
-        logger.setLevel(config.getLogLevel())
-        logger.propagate=False
+        logger = logManager.getLogger(name=mp.current_process().name)
         logger.debug('Process %s (%s) started (Active=%d)', mp.current_process().name, mp.current_process().pid, activeFilesQProcesses.value)
         resultsQs = [qName for qName in queues.keys() if qName.endswith('_resultsQ')]
         
-        logConfig={'q': queues['logQ'],
-                'level': config.getLogLevel(),
-                }
-
         while True:
             if stopEvent.is_set():
                 break
-            item=queues['filesQ'].get()
-            if item == None:
-                queues['filesQ'].put(item)
+            item=queuefuncs.getItem(queues['filesQ'])
+            if item == SENTINEL:
                 break
+            if item == None:
+                continue
 
             # Set some variables for this item
             filename=item.getFullPath()
@@ -191,7 +140,7 @@ def fileHandlerDispatcher(config: classes.Config,
             
             logger.info('[%s]Processing %s with %s', mp.current_process().name, filename, fileHandlerModule.__name__)
             
-            for content in fileHandlerModule.readFile(filename, logConfig):
+            for content in fileHandlerModule.readFile(filename, logManager):
                 logger.debug('%s: Received %d bytes from file hander', filename, len(content))
 
                 if content == '':
@@ -238,24 +187,29 @@ def fileHandlerDispatcher(config: classes.Config,
     except KeyboardInterrupt:
         pass
     finally:
-        logger.info('[%s]FileWorkerProcess terminated', mp.current_process().name)
+        logger.info('Stopping %s (PID=%d)', mp.current_process().name, mp.current_process().pid)
         with activeFilesQProcesses.get_lock():
             activeFilesQProcesses.value-=1
-            logger.info('FileWorkerProcesses remaining: %d', activeFilesQProcesses.value)
+            logger.info('FileHandler processes remaining: %d', activeFilesQProcesses.value)
         if activeFilesQProcesses.value==0:
             # Put the sentinel on the results queues
             for q in [qName for qName in queues.keys() if qName.endswith('_resultsQ')]:
-                queues[q].put(None)
+                queues[q].put(SENTINEL)
             
             # To allow the queue to shutdown properly, remove the last item from the filesQ if we're the last filesQ processor still running
-            logger.debug('[%s]Last FileWorkerProcess terminated.  Clearing filesQ.', mp.current_process().name)
-            queues['filesQ'].get()
+            logger.info('[%s]Last FileHandler process terminated.  Clearing filesQ.', mp.current_process().name)
+            queuefuncs.clearQ(queues['filesQ'])
+        else:
+            logger.info('[%s]FileHandler process terminated.  %d FileHandler processes remaining.', mp.current_process().name, activeFilesQProcesses.value)
+            # Put another sentinel on the filesQ to signal the next fileHandler process to terminate
+            queues['filesQ'].put(SENTINEL)
         del logger
 
 
 def getOutputHandlers(config: classes.Config,
                       queues: dict,
-                      stopEvent: mp.Event):
+                      stopEvent: mp.Event,
+                      logManager: LogManager,):
 
     '''Setup the results queue handlers for the enabled output types.
     
@@ -274,16 +228,17 @@ def getOutputHandlers(config: classes.Config,
                     'num_processes': 1,
                     'args': (config.getOutputFile(resultsType), 
                              queues[resultsType+'_resultsQ'], 
-                             stopEvent),
+                             stopEvent,
+                             logManager,),
                   }
     except KeyboardInterrupt:
         pass
 
 
 def progressLineWorker(totals: dict, 
-                       logQ: mp.Queue, 
                        startTime: datetime,
                        stopEvent: mp.Event,
+                       logManager: LogManager,
                       ):
 
     def _printProgressLine():
@@ -310,9 +265,7 @@ def progressLineWorker(totals: dict,
             sleep(INTERVAL)
 
     try:
-        logger=logging.getLogger('progressLineWorker')
-        logger.addHandler(QueueHandler(logQ))
-        logger.propagate=False
+        logger = logManager.getLogger('progressLineWorker')
         logger.info('progressLineWorker started')
 
         console.normal('If needed, press CTRL-C to terminate scan')
@@ -332,7 +285,7 @@ def progressLineWorker(totals: dict,
     except KeyboardInterrupt:
         pass
     finally:
-        logger.info('progressLineWorker stopped')
+        logger.info('Stopping %s (PID=%d)', mp.current_process().name, mp.current_process().pid)
 
 def main():
     start=datetime.now()
@@ -390,24 +343,23 @@ def main():
             queues.update({name: mp.Queue()})
         stopEvent=mp.Event()
         stopEvent.clear()
+        logManager=LogManager(
+            logFile=config.getLogFile(), 
+            logLevel=config.getLogLevel(), 
+            logQueue=queues['logQ'],)
         
         # Configure logging / the logger process should be managed separately from all of the others.
         loggerPM=classes.ProcessManager(name='loggerPM', 
-                                        logQ=queues['logQ'],
-                                        logLevel=config.getLogLevel(),
-                                        )
+                                        logManager=logManager,)
         makedirs(str(Path(config.getLogFile()).absolute().parent), exist_ok=True)
-        loggerPM.register(target=logProcessor, 
+        loggerPM.register(target=logManager.logProcessor, 
                     name='logProcessor',
                     num_processes=1, 
-                    args=(config, queues['logQ'], stopEvent))
+                    args=(stopEvent,))
         
         # We need to start the logProcessor process before we can start the other processes
         loggerPM.start()
-        logger=logging.getLogger()
-        logger.setLevel(config.getLogLevel())
-        logger.addHandler(QueueHandler(queues['logQ']))
-        logger=logging.getLogger('main')
+        logger = logManager.getLogger('main')
             
         logger.info('Command line arguments: %s', sys.argv[1:])
         logger.info('Starting PIIDigger version %s', __version__)
@@ -431,43 +383,35 @@ def main():
         #####################################
             
         # Setup each of the subprocesses that are needed
-        mainPM=classes.ProcessManager(name='mainPM', 
-                                logQ=queues['logQ'],
-                                logLevel=config.getLogLevel(),
-                                )
-        for outputHandler in getOutputHandlers(config, queues, stopEvent):
+        mainPM=classes.ProcessManager(name='mainPM',
+                                      logManager=logManager,)
+        for outputHandler in getOutputHandlers(config, queues, stopEvent, logManager):
             mainPM.register(target=outputHandler['target'],
                         name=outputHandler['name'],
                         num_processes=outputHandler['num_processes'],
-                        args=outputHandler['args'],
-                        )
+                        args=outputHandler['args'],)
         mainPM.register(target=filescan.findFilesWorker, 
                     name='findFilesWorker',
                     num_processes=config.getMaxFilesScanProcs(), 
-                    args=(config, queues, totals, stopEvent,),
-                    )
+                    args=(config, queues, totals, stopEvent, logManager,),)
         mainPM.register(target=fileHandlerDispatcher, 
                     name='fileHandler',
                     num_processes=config.getMaxProcs(),
-                    args=(config, queues, totals, stopEvent, activeFilesQProcesses),)
+                    args=(config, queues, totals, stopEvent, activeFilesQProcesses, logManager,),)
         mainPM.register(target=filescan.findDirsWorker, 
                     name='findDirsWorker',
                     num_processes=1,
-                    args=(config, queues, totals, stopEvent,),
-                    )
+                    args=(config, queues, totals, stopEvent, logManager,),)
         console.normal('Starting %d file scanner processes' % (config.getMaxFilesScanProcs()))
         console.normal('Starting %d file handler processes' % (config.getMaxProcs()))
 
         # Start the progress line worker in a separate process manager
-        progressPM=classes.ProcessManager(name='progressPM', 
-                                        logQ=queues['logQ'],
-                                        logLevel=config.getLogLevel(),
-                                        )
+        progressPM=classes.ProcessManager(name='progressPM',
+                                          logManager=logManager,)
         progressPM.register(target=progressLineWorker, 
                     name='progressLineWorker',
                     num_processes=1, 
-                    args=(totals,queues['logQ'], start, stopEvent),
-                    )
+                    args=(totals, start, stopEvent, logManager,),)
         
         # Start the processes
         progressPM.start()
@@ -491,7 +435,7 @@ def main():
         console.error('An unknown error was encountered.  Error message was captured in %s.' % config.getLogFile())
         logger.error(traceback.print_exc())
     else:
-        queues['logQ'].put(None)
+        queues['logQ'].put(SENTINEL)
         # If the logger hasn't already been shutdown by a KeyboardInterrupt or other event
         stopEvent.set()
         progressPM.wait_for_processes()

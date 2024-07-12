@@ -9,3 +9,4 @@ defaultChunkCount=100_000
 excelBlankRowLimit=250
 excelBlankColLimit=500
 maxChunkSize = 650
+SENTINEL = '!!!STOPQUEUE!!!'

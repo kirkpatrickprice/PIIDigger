@@ -1,18 +1,15 @@
 '''Process DOCX files'''
 
-import logging
 import warnings
-from logging.handlers import QueueHandler
 from collections.abc import Iterator
 
 from docx2python import docx2python
 from docx2python.iterators import iter_paragraphs
 
 from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.globalvars import (
-    maxChunkSize,
-    defaultChunkCount,
-    )
+from piidigger.globalvars import maxChunkSize
+from piidigger.globalvars import defaultChunkCount
+from piidigger.logmanager import LogManager
 
 warnings.filterwarnings('ignore', category=UserWarning, module='docx2python')
 
@@ -32,19 +29,14 @@ handles={
 }
 
 def readFile(filename: str, 
-             logConfig: dict,
+             logManager: LogManager,
              maxChunkCount = defaultChunkCount) -> Iterator[str]:
     ''''
     Handle all file IO and text extraction operations for this file type.  Returns a list of results that have been validated by each datahandler.  
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
     '''
 
-    logger=logging.getLogger('docx-handler')
-    if not logger.handlers:
-        logger.addHandler(QueueHandler(logConfig['q']))
-    logger.setLevel(logConfig['level'])
-    logger.propagate=False
-    
+    logger = logManager.getLogger('docx_handler')
     
     try:
         # Read in all of the docx content and close the file
@@ -61,7 +53,7 @@ def readFile(filename: str,
             if not comment is None:
                 handler.appendContent(comment[3])
                 if handler.contentBufferFull():
-                    yield content.strip()
+                    yield handler.strip()
 
         # No size check -- we'll just append the properties to the end of the content and send it
         handler.appendContent(str(docxContent.core_properties))

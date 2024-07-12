@@ -1,13 +1,11 @@
-import codecs, logging
-from logging.handlers import QueueHandler
+import codecs
 from collections.abc import Iterator
 
 from piidigger.getencoding import getEncoding
 from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.globalvars import (
-    maxChunkSize,
-    defaultChunkCount,
-    )
+from piidigger.globalvars import maxChunkSize
+from piidigger.globalvars import defaultChunkCount
+from piidigger.logmanager import LogManager
 
 # Each filehandler must have the following:
 #   "handles" -     dictionary to identify lists of file extensions and mime types that the handler will manage.
@@ -45,22 +43,17 @@ handles={
 
 
 def readFile(filename: str, 
-            logConfig: dict,
+            logManager: LogManager,
             maxChunkCount: int = defaultChunkCount,
             ) -> Iterator[str]:
     ''''
     Handle all file IO and text extraction operations for this file type.  Returns a generator object tied to maxChunkSize (650) * maxChunkCount bytes of text.  
-    "filename" is a string of the path and filename to process.  logConfig is a two-key dictionary consisting of 'q' and 'level' for logging.
+    "filename" is a string of the path and filename to process.
     '''
 
-    logger = logging.getLogger('plaintext_handler')
-    if not logger.handlers:
-        logger.addHandler(QueueHandler(logConfig['q']))
-    logger.setLevel(logConfig['level'])
-    logger.propagate=False
+    logger = logManager.getLogger('plaintext_handler')
     
-    
-    enc = getEncoding(filename)
+    enc = getEncoding(filename=filename, logManager=logManager)
 
     if enc == None:
         logger.info('%s: Unknown encoding type', filename)
@@ -105,4 +98,3 @@ def readFile(filename: str,
         logger.error('Codec lookup error processing file %s (enc=%s)', filename, enc)
     except Exception as e:
         logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
-

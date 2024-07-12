@@ -72,23 +72,6 @@ fileHandlers={ handler: getattr(getattr(fh, handler), 'handles') for handler in 
 ############### Global functions #####################
 ######################################################
 
-
-def clearQ(q: Queue):
-    '''Clears a queue of all contents'''
-    while True:
-        try:
-            _=q.get(block=False)
-        except Empty:
-            break
-        except KeyboardInterrupt:
-            continue 
-    
-
-def waitOnQ(q: Queue):
-    while not q.empty():
-        sleep(.01)
-    
-
 def countResults(results: dict) -> int:
     '''Receives a dictionary of results and returns the total match count across all match sets in the dictionary'''
 

@@ -3,7 +3,8 @@ from queue import Queue
 import pytest
 
 from piidigger.filehandlers import docx
-from piidigger.globalfuncs import clearQ
+from piidigger.queuefuncs import clearQ
+from piidigger.logmanager import LogManager
 
 @pytest.mark.filehandlers
 @pytest.mark.parametrize('filename, expected_result', [
@@ -52,14 +53,11 @@ def test_read_docx_file(filename, expected_result):
     # Cut back from the default of 100,000 to make testing a bit easier on super-large files.  This is based on the premise that if it can handle 2 chunks (1300 bytes), it can handle 100,000 (61MB).
     maxChunkCount=2
     logQ = Queue()
-    logConfig = {
-        'q': logQ,
-        'level': "DEBUG",
-    }
+    logManager=LogManager(logFile='test.log', logLevel='INFO', logQueue=logQ)
 
     result: list = []
 
-    for content in docx.readFile(filename, logConfig, maxChunkCount):
+    for content in docx.readFile(filename, logManager, maxChunkCount):
         result.append((content, len(content)))
 
     print(f'Result: "{result}"')

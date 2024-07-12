@@ -122,7 +122,7 @@ def status(s: str):
     sys.stdout.flush()
 
 def warn(s: str):
-    print(WARN + '[warn ] ' + s + NORMAL)
+    print(WARN + '[warn] ' + s + NORMAL)
 
 def error(s: str):
     print(ERROR + '[error] ' + s + NORMAL)
