@@ -15,12 +15,21 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: 3.12
-      - name: Build bootloader for Windows
+      - name: Build bootloader for Windows and install PyInstaller
         run: |
-            cd bootloader
-            python waf --target-arch=64bit all
-      - name: Save bootloader
+          cd bootloader
+          python waf --target-arch=64bit all
+          cd ..
+          python setup.py install
+      - name : Checkout the repository
+        uses: actions/checkout@v4
+      - name: Install and Build
+        run: |
+          pip install -e .[win,build]
+          mkdir -p dist\windows
+          .\build_windows_exe.ps1 -NoCodeSign
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bootloader
-          path: bootloader
+          name: windows
+          path: dist\windows\piidigger.zip
