@@ -11,20 +11,32 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: 'pyinstaller/pyinstaller'
+          path: 'pyinstaller'
+          ref: refs/tags/v6.10.0
+      - name : Checkout PIIDigger
+        uses: actions/checkout@v4
+        with:
+          path: PIIDigger
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: 3.12
+      - name: Activate Python environment
+        run: |
+          python -m venv .
       - name: Build bootloader for Windows and install PyInstaller
         run: |
-          cd bootloader
+          .\Scripts\activate
+          pip -V
+          cd pyinstaller/bootloader
           python waf --target-arch=64bit all
           cd ..
-          python setup.py install
-      - name : Checkout the repository
-        uses: actions/checkout@v4
+          pip install .
       - name: Install and Build
         run: |
+          .\Scripts\activate
+          pip -V
+          cd piidigger
           pip install -e .[win,build]
           mkdir -p dist\windows
           .\build_windows_exe.ps1 -NoCodeSign
@@ -32,4 +44,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: dist\windows\piidigger.zip
+          path: piidigger\dist\windows\piidigger.zip
