@@ -1,0 +1,25 @@
+name: Build PyInstaller
+on:
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+        repository: 'pyinstaller/pyinstaller'
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+      - name: Build bootloader for Windows
+        run: |
+            cd bootloader
+            python waf --target-arch=64bit all
+      - name: Save bootloader
+        uses: actions/upload-artifact@v2
+        with:
+          name: bootloader
