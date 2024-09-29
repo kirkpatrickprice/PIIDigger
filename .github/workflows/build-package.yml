@@ -5,25 +5,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  # 9/29/2024: Uncommented the Windows EXE build in favor the embedded build method
-  # build-windows:
-  #   runs-on: windows-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Set up Python
-  #       uses: actions/setup-python@v5
-  #     - name: Install and Build
-  #       run: |
-  #         python -m venv .
-  #         .\Scripts\activate
-  #         pip install -e .[win,build]
-  #         mkdir -p dist\windows
-  #         .\build_windows_exe.ps1 -NoCodeSign
-  #     - name: Upload build artifact
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: windows
-  #         path: dist\windows\piidigger.zip
   build-ubuntu:
     runs-on: ubuntu-20.04
     steps:
