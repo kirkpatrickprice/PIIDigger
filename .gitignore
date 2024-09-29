@@ -197,3 +197,4 @@ piidigger-logs/
 
 # Ignore macOS system files
 .DS_Store
+python.zip
