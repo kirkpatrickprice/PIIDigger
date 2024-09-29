@@ -2,15 +2,8 @@
 ## Known Issues and Limitations
 A few items worth noting about PIIDigger:
 
-### Antivirus Alerts
-Building a binary/executable file in Python seems to trigger something in anti-virus software.  This problem seems to be alleviated by a different packaging method, but just in case Microsoft Defender warns reports that PIIDigger has a virus -- THE FILE IS SAFE. If your A/V triggers on PIIDigger, consider one of the following solutions:
-#### A/V Folder Exclusion
-1. Create an exception for the folder where you will dowload the PIIDigger executable binaries (e.g. `C:\Users\<username>\Downloads\Temp`).
-2. Save `piidigger.zip` to this folder and extract it
-3. Run it from there
-#### Install Python
-1. Install from the [Python Official Source](https://www.python.org/downloads/)
-2. Use the "Python Available" installation method included on the main PIIDigger page.  
+### Antivirus Alerts on Windows
+As we are now using Embedded Python directly from Python Software Foundation, virus detection problems should be a thing of the past.  Addtionally, we test all releases against VirusTotal to identify any potential issues.  However, if you receive a virus alert, please let us know through the Issues page on GitHub.
 
 NOTES:
 * For Windows users: There is also a Python download available in the Microsoft Store, but PIIDigger was not tested against this version.  #YMMV.
