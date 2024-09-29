@@ -3,6 +3,11 @@ on:
   push:
   workflow_dispatch:
 
+env:
+  py_version: "3.12.6"
+  arch: "amd64"
+  venv: ".venv"
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -12,12 +17,12 @@ jobs:
         uses: actions/setup-python@v5
       - name: Install and Build
         run: |
-          python -m venv .venv
-          .venv\Scripts\activate
+          python -m venv $venv
+          $venv\Scripts\activate
           pip install -e .[win]
-          .\build_windows_embedded.ps1 -arch amd64 -pyVersion 3.12.6 -venv .venv
+          .\build_windows_embedded.ps1 -arch $arch -pyVersion $py_version -venv $venv
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-amd64
-          path: dist\
+          name: piidigger-$arch
+          path: dist\piidigger-$arch
