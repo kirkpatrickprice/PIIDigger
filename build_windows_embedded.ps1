@@ -43,13 +43,22 @@ param(
     [string]$venv
 )
 
+#Python Embedded download URL
+$url = "https://www.python.org/ftp/python/$PyVersion/python-$PyVersion-embed-$arch.zip"
+
+# Root directory (current working directory)
 $base_dir=(Get-Location).Path
+
+# Destination directories used for copying files
+$build_dir = $base_dir + "\dist\piidigger-"+$arch
+$bin_dir = $build_dir + "\bin"
+
+# Source directories to copy files from 
 $src_dir=$base_dir+"\src"
 $venv_dir=$base_dir+"\"+$venv
 $site_packages_dir=$venv_dir+"\lib\site-packages\*"
-$build_dir = $base_dir + "\dist\"+$arch
-$bin_dir = $build_dir + "\bin"
-$url = "https://www.python.org/ftp/python/$PyVersion/python-$PyVersion-embed-$arch.zip"
+
+# Additional wrapper files needed to run PIIDigger using embedded Python
 $cmd_path = $base_dir + "\piidigger.cmd"
 $py_wrapper_path = $base_dir + "\piidigger.py"
 
@@ -87,10 +96,10 @@ write-host "Copying wrapper files: $cmd_path $cmd_path"
     Copy-Item -Path $py_wrapper_path, $cmd_path -Destination $build_dir
 
 # SIG # Begin signature block
-# MIIfYwYJKoZIhvcNAQcCoIIfVDCCH1ACAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# MIIfYQYJKoZIhvcNAQcCoIIfUjCCH04CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDERMERkEzaNap2
-# 1uVXKKpYtQ2ZuGSa2mQoXPlizDTWqKCCDOgwggZuMIIEVqADAgECAhAtYLGndXgb
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCfsg95AuMG3U+v
+# CNiuagDWWktxivNUUNd4AGdTg/AdLaCCDOgwggZuMIIEVqADAgECAhAtYLGndXgb
 # zFvzMEdBS+SKMA0GCSqGSIb3DQEBCwUAMHgxCzAJBgNVBAYTAlVTMQ4wDAYDVQQI
 # DAVUZXhhczEQMA4GA1UEBwwHSG91c3RvbjERMA8GA1UECgwIU1NMIENvcnAxNDAy
 # BgNVBAMMK1NTTC5jb20gQ29kZSBTaWduaW5nIEludGVybWVkaWF0ZSBDQSBSU0Eg
@@ -159,25 +168,25 @@ write-host "Copying wrapper files: $cmd_path $cmd_path"
 # up516eDap8nMLDt7TAp4z5T3NmC2gzyKVMtODWgqlBF1JhTqIDfM63kXdlV4cW3i
 # STgzN9vkbFnHI2LmvM4uVEv9XgMqyN0eS3FE0HU+MWJliymm7STheh2ENH+kF3y0
 # rH0/NVjLw78a3Z9UVm1F5VPziIorMaPKPlDRADTsJwjDZ8Zc6Gi/zy4WZbg8Zv87
-# spWrmo2dzJTw7XhQf+xkR6OdMYIR0TCCEc0CAQEwgYwweDELMAkGA1UEBhMCVVMx
+# spWrmo2dzJTw7XhQf+xkR6OdMYIRzzCCEcsCAQEwgYwweDELMAkGA1UEBhMCVVMx
 # DjAMBgNVBAgMBVRleGFzMRAwDgYDVQQHDAdIb3VzdG9uMREwDwYDVQQKDAhTU0wg
 # Q29ycDE0MDIGA1UEAwwrU1NMLmNvbSBDb2RlIFNpZ25pbmcgSW50ZXJtZWRpYXRl
 # IENBIFJTQSBSMQIQLWCxp3V4G8xb8zBHQUvkijANBglghkgBZQMEAgEFAKB8MBAG
 # CisGAQQBgjcCAQwxAjAAMBkGCSqGSIb3DQEJAzEMBgorBgEEAYI3AgEEMBwGCisG
-# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqGSIb3DQEJBDEiBCCnHL/Gnbf7
-# my8jtmu8iMoKl+S5k6ZhST16GN6pfFLkADANBgkqhkiG9w0BAQEFAASCAYBmsuiT
-# WZL3Omvfw+Bt+gZsp51/CfVbI6ZSDRTeN3fYDey82iIcTpRtnrHtnsv6ZPPQqj6X
-# 2h9UNOI5qQjxxptnFj6HM6SBryck4iHYV9pcB/GH2BFC6AekTLBfwqJE/cLZI0i/
-# 1oWbJUx+D0p1h8F3fejafvvs8Cvq+QnKEXy5dkdvw3YPW5N90oSNtY7mnW95GWBV
-# cnc3Et34zK1x3uR3g+qICynIC+eHbfhRUqRt8LBCEbZJ0nPpYH09uz+wCj4sfwJC
-# JM0k6V/3xBilYyf5sDm8Jy4pNEz3x761KzKvrDa0ICapTZgrHBgTKSTcJ0fhQItE
-# DD8smb4dqCDfUlxrxWMSxjeF5LeCqef64H7DE33ACcSRe8cBrspSbBOl9R/Sf7/P
-# 3ryWP0iIgbBjoC5zwGzuYgfQqIjr8MKuaOiccs6C2p46t9fw3U7/cmiLcHueCxU1
-# eWrpXNd/FOTZB6mkaO4cwoPH/M01oc9Mim1Aaiu++YfKfeqFiam51Wi5cRqhgg8X
-# MIIPEwYKKwYBBAGCNwMDATGCDwMwgg7/BgkqhkiG9w0BBwKggg7wMIIO7AIBAzEN
+# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqGSIb3DQEJBDEiBCDnepYO2ZLi
+# +JMfCLjJGl1LQ9aFjLsLVa5iE6GfvSoWjTANBgkqhkiG9w0BAQEFAASCAYA6tR8t
+# RXElP3H1C4SjslyiOBnnKAHVN8LTqYtdCoiRNYppswIqDUNmKx2ZhgC1CODJxazj
+# Y0mauXWRFmAb3teEInbJQAWeZst4ckvUomAgBRyel47rDweivuD5BH6t+o/tyqJM
+# d0D3KupttUN6yMqcpWuM9t4GBK8ruMysHE0AXjv2E5caZvVpRY6orV2qsGUiPVra
+# UbtkpXds8Cp2HFXT/NewuI9yUQ8+ZGCg0zOJK84Jq4b5fRsXbcLT+T4qFvQGs/4o
+# Y830TDaUZe6pq9XBqsrJ9YQUNLhb3NTJWSl1KdTXn9h+2gvP+wyZoI6w3cS7ObQn
+# cPoK3t1J7BPxq7wdWaYcn2iey7rImff0nd7ZNQeyyBA4d9QGAvOEfe421VVs9aPQ
+# xXRiJV5B66BDelw+xUfPOtK045BnCpfLuiIEtwRY1gARfGQx1wjCgDR2AMQQPnMU
+# hQ03rtK1DDvhY7x0YKkoqwZZGccbLgxKk4Y8EJu6bHapnqb9zddC77dZko6hgg8V
+# MIIPEQYKKwYBBAGCNwMDATGCDwEwgg79BgkqhkiG9w0BBwKggg7uMIIO6gIBAzEN
 # MAsGCWCGSAFlAwQCATB3BgsqhkiG9w0BCRABBKBoBGYwZAIBAQYMKwYBBAGCqTAB
-# AwYBMDEwDQYJYIZIAWUDBAIBBQAEIEGg7yhDCSfJQsktihM2ZZCuYo+/21riyUxD
-# qPbcRWSHAgh/yW/45bl7EBgPMjAyNDA5MjkxNjAwMjFaMAMCAQGgggwAMIIE/DCC
+# AwYBMDEwDQYJYIZIAWUDBAIBBQAEIOaJ/VuFU9oIaWYowPjT3HiT0/3tVqKb17I7
+# 4FZs9H7qAggEHw3xeSfWLhgPMjAyNDA5MjkxNzEwNDVaMAMCAQGgggwAMIIE/DCC
 # AuSgAwIBAgIQWlqs6Bo1brRiho1XfeA9xzANBgkqhkiG9w0BAQsFADBzMQswCQYD
 # VQQGEwJVUzEOMAwGA1UECAwFVGV4YXMxEDAOBgNVBAcMB0hvdXN0b24xETAPBgNV
 # BAoMCFNTTCBDb3JwMS8wLQYDVQQDDCZTU0wuY29tIFRpbWVzdGFtcGluZyBJc3N1
@@ -241,18 +250,18 @@ write-host "Copying wrapper files: $cmd_path $cmd_path"
 # 0BaMqTa6LWzWItgBjGcObXeMxmbQqlEz2YtAcErkZvh0WABDDE4U8GyV/32FdaAv
 # JgTfe9MiL2nSBioYe/g5mHUSWAay/Ip1RQmQCvmF9sNfqlhJwkjy/1U1ibUkTIUB
 # X3HgymyQvqQTZLLys6pL2tCdWcjI9YuLw30rgZm8+K387L7ycUvqrmQ3ZJlujHl3
-# r1hgV76s3WwMPgKk1bAEFMj+rRXimSC+Ev30hXZdqyMdl/il5Ksd0vhGMYICWTCC
-# AlUCAQEwgYcwczELMAkGA1UEBhMCVVMxDjAMBgNVBAgMBVRleGFzMRAwDgYDVQQH
+# r1hgV76s3WwMPgKk1bAEFMj+rRXimSC+Ev30hXZdqyMdl/il5Ksd0vhGMYICVzCC
+# AlMCAQEwgYcwczELMAkGA1UEBhMCVVMxDjAMBgNVBAgMBVRleGFzMRAwDgYDVQQH
 # DAdIb3VzdG9uMREwDwYDVQQKDAhTU0wgQ29ycDEvMC0GA1UEAwwmU1NMLmNvbSBU
 # aW1lc3RhbXBpbmcgSXNzdWluZyBSU0EgQ0EgUjECEFparOgaNW60YoaNV33gPccw
 # CwYJYIZIAWUDBAIBoIIBYTAaBgkqhkiG9w0BCQMxDQYLKoZIhvcNAQkQAQQwHAYJ
-# KoZIhvcNAQkFMQ8XDTI0MDkyOTE2MDAyMVowKAYJKoZIhvcNAQk0MRswGTALBglg
-# hkgBZQMEAgGhCgYIKoZIzj0EAwIwLwYJKoZIhvcNAQkEMSIEIPNsDb0DUqVlKGrN
-# EcI28s8jm6HUhRghoQ+2fZ9x7/ILMIHJBgsqhkiG9w0BCRACLzGBuTCBtjCBszCB
+# KoZIhvcNAQkFMQ8XDTI0MDkyOTE3MTA0NVowKAYJKoZIhvcNAQk0MRswGTALBglg
+# hkgBZQMEAgGhCgYIKoZIzj0EAwIwLwYJKoZIhvcNAQkEMSIEIGZ/XNVFIxnw4fMr
+# BELRCYiq+nzBj3XC6piK9xbqFdfhMIHJBgsqhkiG9w0BCRACLzGBuTCBtjCBszCB
 # sAQgnXF/jcI3ZarOXkqw4fV115oX1Bzu2P2v7wP9Pb2JR+cwgYswd6R1MHMxCzAJ
 # BgNVBAYTAlVTMQ4wDAYDVQQIDAVUZXhhczEQMA4GA1UEBwwHSG91c3RvbjERMA8G
 # A1UECgwIU1NMIENvcnAxLzAtBgNVBAMMJlNTTC5jb20gVGltZXN0YW1waW5nIElz
-# c3VpbmcgUlNBIENBIFIxAhBaWqzoGjVutGKGjVd94D3HMAoGCCqGSM49BAMCBEgw
-# RgIhAMupnPFGAejHO5cWqGyHAm+wglJb4zJqGF2FSr+KGZ4fAiEAgBV8gXF0++iC
-# X2mKR+smVKwjEm8/IGbd2si7yVrmaNI=
+# c3VpbmcgUlNBIENBIFIxAhBaWqzoGjVutGKGjVd94D3HMAoGCCqGSM49BAMCBEYw
+# RAIgYsefqHWJU7qZ9G17RluxnFuG7e8qommRpGiAsXFsaCwCIChbzLZnMq1g/Gih
+# zZM5v2NYsqtKiT4fMH3QCPyrgXOn
 # SIG # End signature block
