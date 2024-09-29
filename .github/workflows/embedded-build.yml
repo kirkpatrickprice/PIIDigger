@@ -1,0 +1,23 @@
+name: Build Embedded
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+      - name: Install and Build
+        run: |
+          python -m venv .venv
+          .\Scripts\activate
+          pip install -e .[win]
+          build_windows_embedded.ps1 -arch amd64 -pyVersion 3.12.6 -venv .venv
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-amd64
+          path: dist\
