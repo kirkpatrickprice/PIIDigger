@@ -1,7 +1,7 @@
 name: Build Windows Embedded
 on:
   push:
-    #branches: [main]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
