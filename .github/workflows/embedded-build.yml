@@ -1,4 +1,4 @@
-name: Build Embedded
+name: Build Windows Embedded
 on:
   push:
   workflow_dispatch:
@@ -13,7 +13,7 @@ jobs:
       - name: Install and Build
         run: |
           python -m venv .venv
-          .\Scripts\activate
+          .venv\Scripts\activate
           pip install -e .[win]
           build_windows_embedded.ps1 -arch amd64 -pyVersion 3.12.6 -venv .venv
       - name: Upload build artifact
