@@ -52,15 +52,15 @@ PIIDigger will now be available as a program.  Run it with `piddigger` on the te
 
 PIIDigger will now be available as a program.  Run it with `piddigger.exe` in your PowerShell prompt.
 
-NOTE:
-* Update 26-MAR 2024: I'm trying a new packaging method that should avoid virus warnings from Defender and others.
+NOTES:
+* Update 29-SEP-2024: I've switched over to delivering PIIDigger using Embedded Python directly from Python Software Foundation.  This should avoid the usual anti-virus problems with Windows .EXE packaging methods such as PyInstaller or Py2Exe.
 * See the [ERRATA](https://github.com/kirkpatrickprice/PIIDigger/blob/main/ERRATA.md) page for information about antivirus products and packaged Python binaries.
 
 ## Usage
 Getting started with PIIDigger video is availble on [YouTube](https://youtu.be/wnUNnzy1JDw)
 ```
-usage: piidigger [-h] [-c CREATECONFIGFILE] [-d] [-f CONFIGFILE] [-p MAXPROC] [--cpu-count] [--list-datahandlers]
-                      [--list-filetypes]
+usage: piidigger.py [-h] [-c CREATECONFIGFILE] [-d] [-f CONFIGFILE] [-p MAXPROC] [--cpu-count] [--list-datahandlers]
+                    [--list-filetypes] [--version]
 
 Search the file system for Personally Identifiable Information
 
@@ -88,6 +88,7 @@ Misc. Info:
                         process' above.
   --list-datahandlers   Display the list of data handlers and exit
   --list-filetypes      Display the list of file types and exit
+  --version, -v         Display the version number and exit
 ```
 
 If a configuration file doesn't exist, PIIDigger will use a default configuration as shown below.

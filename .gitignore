@@ -12,9 +12,9 @@ __pycache__/
 
 # Distribution / packaging
 .Python
-build/
+*build/
 develop-eggs/
-dist/
+*dist/
 downloads/
 eggs/
 .eggs/
@@ -29,6 +29,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+compilation-report*.xml
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -196,3 +197,4 @@ piidigger-logs/
 
 # Ignore macOS system files
 .DS_Store
+python.zip

@@ -1,23 +1,23 @@
 # Windows Releases
 ## Some general notes
 Each release consists of a standalone, 64-bit version of PIIDigger delivered as a ZIP file:
+* The file name is `piidigger-<architecture>.zip` where the only `architecture` currently supported `amd64` (testing on `win32` is forthcoming).
 * It does not require any installation.  Just download and unzip it.
-* There will be a `piddigger.exe` and an `_internal` folder.  Both the EXE and the folder are required to run. 
+* There will be `piddigger.cmd` and `piidigger.py` files and `src` and `bin` folders.  All of them are required to run. 
+* Either double-click or use PowerShell to run `piidigger.cmd`.
 * If using PIIDigger on multiple systems
     * You can create a `piidigger.toml` file with your own configuration, for instance, maybe for writing results files to a shared network folder.  See "Advanced Configuration" on the main [readme](https:\\github.com\kirkpatrickprice\PIIDigger) file for additional information.
     * You could then repackage PIIDigger into a new ZIP file
     * This configuration file will be used automatically if it exists.
 
 ## File Integrity
-* Use the Powershell command `Get-FileHash .\PIIDigger.zip` on the downloaded ZIP file to confirm the integrity of the file against the hashes listed above.
-* `piidigger.exe` in the ZIP file has also been signed by a code-signing certificate issued by SSL.Com to KirkpatrickPrice.  You can verify this signature by selecting `Properties -> Digital Signatures -> Details" and verifying it reports that "This digital signature is OK."
-* DLLs in the `_internal` folder are signed by either Microsoft or Python Software Foundation, which can be verified in the same manner as `piddigger.exe` above.
+* Use the Powershell command `Get-FileHash .\piidigger-<architecture>.zip` on the downloaded ZIP file to confirm the integrity of the file against the hashes listed on the Releases page.
+* Binary and DLL files in the `bin` folder have been signed by either Python Software Foundation or Microsoft.
 
 ## Windows Anti-Virus
-Defender and other A/V may warn that PIIDigger contains a virus.  Occasionally packaging a Python program results in this false positive.  I've taken steps to avoid this, but if you receive such a warning see the [ERRATA](https://github.com/kirkpatrickprice/PIIDigger/blob/main/ERRATA.md) for workarounds.
+Compiled Python programs are frequently treated by anti-virus vendors as suspicious.  However, by using Embedded Python directly from Python Software Foundation, we are able to avoid these detections.  Each release of PIIDigger is tested against VirusTotal, but feel free to upload it for yourself.  Be sure to report any negative findings so we can chase them down.
 
 ## Building PIIDigger from Source
-
 If you require a 32-bit version or would like to build your own executable version, the following steps will create a fresh package PIIDigger:
 
 ### TL/DR
@@ -37,7 +37,7 @@ All `typed commands` assume use of Powershell...
     cd PIIDigger
     py -m venv .venv
     .\.venv\Scripts\activate
-    pip install -e .[win,dev]
+    pip install -e .[win]
     ```
 4. Test that PIIDigger runs correctly from native Python before attempting to package an EXE
     ```
@@ -47,14 +47,13 @@ All `typed commands` assume use of Powershell...
 
     The first command should display the help content. The second command should create a file called `testfile.toml` containing a default configuration.  It can be deleted.
 
-3. Install PyInstaller to create the EXE
+3. Run the `build_windows_embedded.ps1` script.
     ```
-    pip install pyinstaller
+    .\build_windows_embedded -py_version 3.12.6 -arch win32 -venv .venv
     ```
-4. Run the build script without the Code Signing option:
-    ```
-    .\build_windows_exe.ps1 -NoCodeSign
-    ```
-    This process should take less than a minute and display several status messages.
+
+    `py_version` should match the version of Python you downloaded in step 1
+    `arch` should match of the version of Python you download (e.g. amd64 or win32)
+    `venv` should match the folder you created for your Python Virtual Environment in step 3
     
-5. `PIIDigger.zip` should be in the `dist\windows` folder.
+4. PIIDigger will be ready to run in the should be in the `dist\piidigger-<arch>` folder.  You can ZIP it, copy it, etc. for distribution to as many computers as you'd like to run it on.
