@@ -89,8 +89,11 @@ class Config:
         
         # We don't need this item now and it'll mess up the output file function if we leave it in.
         del self.config['results']['path']
-        fileTypes=[('json', '.json'), 
-                   ('text', '.txt')]
+        fileTypes=[
+            ('csv', '.csv'),
+            ('json', '.json'), 
+            ('text', '.txt')
+            ]
 
         for resultType, ext in fileTypes:
             filename=f"{outpath}{hostname}-{timeStamp}{ext}"
