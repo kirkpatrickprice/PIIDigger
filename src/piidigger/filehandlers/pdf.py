@@ -1,5 +1,9 @@
 import warnings
 from pypdf import PdfReader
+from pypdf.errors import (
+    PdfReadError, 
+    EmptyFileError,
+    )
 from collections.abc import Iterator
 
 from piidigger.filehandlers._sharedfuncs import ContentHandler
@@ -46,9 +50,9 @@ def readFile(filename: str,
         # NOTE: PDF files are optimized for printing, not for text extraction.  This is a best-effort attempt to extract text from the PDF.
         #       It is not guaranteed to be accurate or complete.
 
-        reader=PdfReader(filename)
-        logger.debug('%s: Found %d pages', filename, len(reader.pages))
-        for i, page in enumerate(reader.pages):
+        document=PdfReader(filename)
+        logger.debug('%s: Found %d pages', filename, len(document.pages))
+        for i, page in enumerate(document.pages):
             bytes_read = 0
             logger.debug('%s: Processing page: %s', filename, str(i))
             handler: ContentHandler = ContentHandler(maxContentSize = maxChunkSize * maxChunkCount)
@@ -60,9 +64,20 @@ def readFile(filename: str,
                 bytes_read += len(line)
                 if handler.contentBufferFull():
                     yield handler.getContent()
-                    
-            logger.debug('%s[Page %s]: Read content (%d bytes)', filename, i, bytes_read)
-            yield handler.finalizeContent()
+
+        # Read the metadata from the PDF file
+        # NOTE: This is not guaranteed to be accurate or complete.        
+        metadata = document.metadata
+        for key in metadata.keys():
+            metadata_content: str = metadata.get(key)
+            bytes_read += len(metadata_content)
+            handler.appendContent(metadata_content)
+            if handler.contentBufferFull():
+                yield handler.getContent()
+
+        # Log the details and flush the handler buffer
+        logger.debug('%s[Page %s]: Read content (%d bytes)', filename, i, bytes_read)
+        yield handler.finalizeContent()
             
     except FileNotFoundError:
         logger.error('Previously discovered file no longer exists: %s. File skipped', filename)
@@ -72,10 +87,14 @@ def readFile(filename: str,
         logger.error('OSError adding %s.  File skipped.  Error message: %s', filename, str(e))
     except UserWarning as e:
         logger.error('%s: %s', filename, e)
+    except EmptyFileError as e:
+        logger.error('EmptyFileError adding %s.  File skipped.  Error message: %s', filename, str(e))
+    except PdfReadError as e:
+        logger.error('PdfReadError adding %s.  File skipped.  Error message: %s', filename, str(e))
     except Exception as e:
         logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
     else:
-        reader.close()
+        document.close()
 
 
 
