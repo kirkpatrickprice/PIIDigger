@@ -115,6 +115,7 @@ def getDefaultConfig() -> dict:
         ],
         'localFilesOnly': True,
         'results': {'path': "piidigger-results/",
+                    'csv': True,
                     'json': True,
                     'text': True,}, 
         'includeFiles': {'ext': 'all', 
