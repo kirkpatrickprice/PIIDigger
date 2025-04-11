@@ -111,7 +111,7 @@ def getDefaultConfig() -> dict:
 
     return {
         'dataHandlers': [
-            'pan',
+            'pan', 'email',
         ],
         'localFilesOnly': True,
         'results': {'path': "piidigger-results/",
