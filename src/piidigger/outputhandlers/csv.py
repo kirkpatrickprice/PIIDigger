@@ -55,7 +55,7 @@ def flatten_matches(matches: dict, filename: str) -> list[dict]:
             raise TypeError(f"Unsupported type: {type(value)} in {value}")
     return items
 
-def flatten_value(dict: dict, filename: str, datatype: str, sep: str = '_') -> list[dict]:
+def flatten_value(dict: dict, filename: str, datatype: str, sep: str = ': ') -> list[dict]:
     items = []
     for key, value in dict.items():
         if isinstance(value, list):
