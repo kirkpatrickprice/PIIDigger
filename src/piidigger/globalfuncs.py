@@ -313,7 +313,7 @@ def writeDefaultConfig(tomlFile: str):
     
     lines.append('')
     lines.append('[results]')
-    for key in ['path', 'json', 'text']:
+    for key in defaultConfig['results'].keys():
         lines.append(_tomlfy(key, defaultConfig['results'][key]))
         
     lines.append('')
