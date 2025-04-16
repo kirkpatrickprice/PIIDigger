@@ -106,6 +106,7 @@ localFilesOnly = true
 
 [results]
 path = "piidigger-results/"
+csv = true
 json = true
 text = true
 
