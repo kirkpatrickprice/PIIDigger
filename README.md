@@ -10,13 +10,12 @@
 - Aware of OneDrive and Dropbox "cloud-only files" (see [ERRATA](https://github.com/kirkpatrickprice/PIIDigger/blob/main/ERRATA.md))
 - Tunable [PERFORMANCE](https://github.com/kirkpatrickprice/PIIDigger/blob/main/PERFORMANCE.md) - especially useful for production servers
 - Extensible file handlers to read any type of file
-    - Initial release supports plain text files, Word Documents and Excel spreadsheets
+    - Current release supports plain text files, Word Documents, Excel spreadsheets, and PDF files
     - See `--list-filetypes` command line option for currently supported file types
 - Extensible data handlers to identify any type of data
-    - Initial release supports primary account numbers for credit card data
+    - Current release supports primary account numbers for credit card data and email addresses
     - See `--list-datahandlers` command line option for for currently supported document types
-- Saves output in multiple formats
-    - Initial releaase provides JSON and text file outputs
+- Saves output in multiple formats in JSON, plaintext and CSV formats
 - Getting started with PIIDigger video on [YouTube](https://youtu.be/wnUNnzy1JDw)
 
 ## Errata
@@ -101,7 +100,7 @@ An explanation of the configuration file options follows:
 
 
 ```
-dataHandlers = ["pan"]
+dataHandlers = ["pan", "email"]
 
 localFilesOnly = true
 
@@ -131,7 +130,7 @@ logFile = "logs/piidigger.log"
 
 | Option                                | Description  |
 | ------                                | ----------   |
-| `dataHandlers`                        | Default = `"pan"`.  Provides a list of the datahandlers that should be used.  "All" will load all data handlers currently defined in the datahandlers module.  To limit the selection, use a `[bracket-list]`, such as `['pan', 'ssn']`. |
+| `dataHandlers`                        | Default = `"pan", "email"`.  Provides a list of the datahandlers that should be used.  "All" will load all data handlers currently defined in the datahandlers module.  To limit the selection, use a `[bracket-list]`, such as `['pan',]`. |
 | `localFilesOnly`                      | Default True.  For OneDrive and Dropbox files on Windows, only scan files which are already on the local disk.
 | `[results]path`                       | Where to save the results to.  Current output formats are JSON and text files.  A folder name can be included and PIIDigger will create any missing folders in the path. |
 | `[results]json`                       | Default True.  Whether to create a JSON output file |
@@ -144,5 +143,5 @@ logFile = "logs/piidigger.log"
 | `...[startDirs\]linux` and `darwin`   | Default = `["/"]`, or scan the entire file system.  If there are network-mounted paths, you can exclude those with the `excludeDirs` option below.
 | `[excludeDirs]`                       | For each operating system, a `[bracket-list]` of the folders/directories to exclude.  The defaults exclude operating system-specific directories such as `C:\Windows` and `/usr/bin`.  Additional patterns can be supplied and will match as a simple string (no wildcards, regex or glob patterns) from the beginning of the path.  `[results]` and `[logFile]` folders will always be excluded  |
 | `[logging]`                           | Define the logging level and log file destination.  The defaults should always be fine, unless directed to create a DEBUG-level log file for troubleshooting |
-| `[logging]logLevel`                   | Default = `"INFO"`, can be overridden using  Python logging levels (https://docs.python.org/3/howto/logging.html).  Must be in ALL CAPS and enclosed in quotes.  Would normally be either "INFO" (default) or, if advised for troubleshooting purposes, "DEBUG" |
-| `[logging]logFile`                    | Default = "logs/piidigger.log" which should be just fine. |
+| `[logging]logLevel`                   | Default = `"INFO"`, can be overridden using Python logging levels (https://docs.python.org/3/howto/logging.html).  Must be in ALL CAPS and enclosed in quotes.  Would normally be either "INFO" (default) or, if advised for troubleshooting purposes, "DEBUG" |
+| `[logging]logFile`                    | Default = `"logs/piidigger.log"` which should be just fine. |
