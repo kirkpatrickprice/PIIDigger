@@ -52,6 +52,8 @@ def readFile(filename: str,
 
         document=PdfReader(filename)
         logger.debug('%s: Found %d pages', filename, len(document.pages))
+        i: int = 0
+        bytes_read: int = 0
         for i, page in enumerate(document.pages):
             bytes_read = 0
             logger.debug('%s: Processing page: %s', filename, str(i))

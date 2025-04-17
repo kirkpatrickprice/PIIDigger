@@ -1,9 +1,5 @@
 import re
 
-dhName='Primary Account Number'
-
-import re
-
 dhName='Email Address'
 
 def findMatch(line: str) -> dict:
