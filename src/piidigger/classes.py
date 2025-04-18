@@ -230,7 +230,7 @@ class ProcessManager:
                     process['shutdown_order'] = len(self.processes) - i
                     for j in range(process['num_processes']):
                         p = mp.Process(target=process['target'], 
-                                    name=f'{process['name']}_{j}',
+                                    name=f'{process["name"]}_{j}',
                                     args=process['args'],
                         )
                         process['processes'].append(p)
