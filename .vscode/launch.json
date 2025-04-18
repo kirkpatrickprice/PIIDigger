@@ -149,6 +149,7 @@
             "justMyCode": true,
             "cwd": "${workspaceFolder}",
             "args": [
+                "-p 1",
                 "-d",
             ]
         },
