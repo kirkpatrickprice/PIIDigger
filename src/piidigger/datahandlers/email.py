@@ -30,11 +30,32 @@ def findMatch(line: str) -> dict:
 def _isValid(text: str) -> bool:
     """
     Validate if the text is a valid email address
-    Basic validation - a more thorough validation was done in the regex
+    Additional validations to test edge cases that might get past the regex
     """
-    # Simple check if there is an @ symbol with text before and after it
-    return '@' in text and text.count('@') == 1 and len(text.split('@')[0]) > 0 and len(text.split('@')[1]) > 0
 
+    is_valid = dict()
+    try:
+        local_part, domain_part = text.split('@', 1)
+    except ValueError:                              # If the cannot be split at an @ symbol (this should only happen during unit testing, but added just in case)
+        return False
+
+    # Check if the text contains an @ symbol and is not empty
+    is_valid['contains_at'] = '@' in text and len(text) > 0
+    # Check if the text contains only one @ symbol
+    is_valid['single_at'] = text.count('@') == 1
+    # Check if there is text before and after the @ symbol
+    is_valid['text_before_after_at'] = len(local_part) > 0 and len(domain_part) > 0
+    # Check if the local part is not too long
+    is_valid['local_part_length'] = len(local_part) <= 64
+    # Check if the domain part is not too long
+    is_valid['domain_part_length'] = len(domain_part) <= 253
+    # Check if any domain labels are too long
+    is_valid['domain_labels_length'] = all(len(label) <= 63 for label in domain_part.split('.'))
+    # Check if the text contains a valid TLD (e.g., .com, .org, .net)
+    is_valid['valid_tld'] = bool(re.search(r'\.[a-zA-Z]{2,63}$', domain_part))
+        
+    return all(is_valid.values())
+    
 def _redact(text: str, replaceWith: str = '*') -> str:
     '''
     Redacts email address according to this rule:

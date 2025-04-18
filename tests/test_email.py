@@ -26,7 +26,9 @@ from piidigger.datahandlers import email
     # Non-matching cases
     ('This text contains no email addresses at all.', {}),
     ('Invalid emails: a@, @example.com, plaintext', {}),
-    ('4012001037140001514E100010003220121800000011150', {}),  # Not an email
+    ('invalid local and domain: &ap123456789012345678f@0.33', {}),  # Invalid email format
+    ('invalid domain: ron@0.67', {}),                                # Invalid domain format
+    ('4012001037140001514E100010003220121800000011150', {}),        # Not an email
 ])
 def test_email_match_and_redaction(data, expected_result):
     """Test email detection and redaction rules"""
@@ -46,7 +48,14 @@ class TestEmailFunctions:
         assert email._isValid('@missing_local_part.com') is False
         assert email._isValid('missing_domain@') is False
         assert email._isValid('multiple@@at.symbols') is False
+        assert email._isValid('user@example@example.com') is False  # Invalid due to multiple @ symbols
         assert email._isValid('') is False
+        assert email._isValid('invalid local and domain: &ap123456789012345678f@0.33') is False
+        assert email._isValid('invalid domain: ron@0.67') is False
+        assert email._isValid('user@thisisasuperlongdomainlabelofexactlysixtysevencharactersinlengthxxx.com') is False  # Invalid domain label length
+        assert email._isValid('user@invalid.0tld') is False  # Invalid TLD
+        assert email._isValid('user@example.thisisaverylongdomainnamethatexceedsthemaximumallowedlengthforadomainpartof253charactersandshouldbeusedtotestemailvalidationroutines.com') is False  # Domain part too long
+    
 
     def test_redact_rule1(self):
         """Test redaction rule 1: 10+ characters before @ - retain first 3 and last 1"""
