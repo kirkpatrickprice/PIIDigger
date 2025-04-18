@@ -1,4 +1,6 @@
+import logging
 import warnings
+
 from pypdf import PdfReader
 from pypdf.errors import (
     PdfReadError, 
@@ -11,8 +13,6 @@ from piidigger.globalvars import maxChunkSize
 from piidigger.globalvars import defaultChunkCount
 from piidigger.logmanager import LogManager
 
-# Ignore the UserWarning message from OpenPyXL that seem to pop up here and there
-warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
 # Each filehandler must have the following:
 #   "handles" -     dictionary to identify lists of file extensions and mime types that the handler will manage.
@@ -38,8 +38,9 @@ def readFile(filename: str,
     "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
     '''
 
-    logger = logManager.getLogger('pdf_handler')
-
+    
+    pd_logger = logManager.getLogger('pdf_handler')
+    
     content: str = ''
     totalBytes: int = 0
     maxContentSize = maxChunkSize * maxChunkCount
@@ -50,13 +51,18 @@ def readFile(filename: str,
         # NOTE: PDF files are optimized for printing, not for text extraction.  This is a best-effort attempt to extract text from the PDF.
         #       It is not guaranteed to be accurate or complete.
 
-        document=PdfReader(filename)
-        logger.debug('%s: Found %d pages', filename, len(document.pages))
+        # the main pd_logger disables propogation to avoid duplicate message, which affects how PyPDF handles logging.
+        # This is a workaround for the PyPDF library to avoid printing PyPDF warnings to the console.
+        # All meaningful messages are logged to the central logger through pd_logger.
+        _pypdf_logger=logging.getLogger("pypdf").setLevel(logging.ERROR)
+
+        document=PdfReader(filename, strict=False)
+        pd_logger.debug('%s: Found %d pages', filename, len(document.pages))
         i: int = 0
         bytes_read: int = 0
         for i, page in enumerate(document.pages):
             bytes_read = 0
-            logger.debug('%s: Processing page: %s', filename, str(i))
+            pd_logger.debug('%s: Processing page: %s', filename, str(i))
             handler: ContentHandler = ContentHandler(maxContentSize = maxChunkSize * maxChunkCount)
             # create a string with all of the content of this page
             page_content = page.extract_text()
@@ -78,23 +84,23 @@ def readFile(filename: str,
                 yield handler.getContent()
 
         # Log the details and flush the handler buffer
-        logger.debug('%s[Page %s]: Read content (%d bytes)', filename, i, bytes_read)
+        pd_logger.debug('%s[Page %s]: Read content (%d bytes)', filename, i, bytes_read)
         yield handler.finalizeContent()
             
     except FileNotFoundError:
-        logger.error('Previously discovered file no longer exists: %s. File skipped', filename)
+        pd_logger.error('Previously discovered file no longer exists: %s. File skipped', filename)
     except PermissionError as e:
-        logger.error('PermissionError adding %s.  File skipped.  Error message: %s', filename, str(e))
+        pd_logger.error('PermissionError adding %s.  File skipped.  Error message: %s', filename, str(e))
     except OSError as e:
-        logger.error('OSError adding %s.  File skipped.  Error message: %s', filename, str(e))
-    except UserWarning as e:
-        logger.error('%s: %s', filename, e)
+        pd_logger.error('OSError adding %s.  File skipped.  Error message: %s', filename, str(e))
+    except Warning as e:
+        pd_logger.error('%s: %s', filename, e)
     except EmptyFileError as e:
-        logger.error('EmptyFileError adding %s.  File skipped.  Error message: %s', filename, str(e))
+        pd_logger.error('EmptyFileError adding %s.  File skipped.  Error message: %s', filename, str(e))
     except PdfReadError as e:
-        logger.error('PdfReadError adding %s.  File skipped.  Error message: %s', filename, str(e))
+        pd_logger.error('PdfReadError adding %s.  File skipped.  Error message: %s', filename, str(e))
     except Exception as e:
-        logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
+        pd_logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
     else:
         document.close()
 
