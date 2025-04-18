@@ -11,8 +11,12 @@ from time import sleep
 
 
 import json
-from wakepy import keep
-
+try:
+    from wakepy import keep
+    WAKEPY = True
+except ImportError:
+    WAKEPY = False
+    pass
 
 import piidigger.classes as classes
 from piidigger import console
@@ -276,11 +280,15 @@ def progressLineWorker(totals: dict,
         if globalfuncs.getOSType()=='linux':
             _printProgressLine()
         else:
-            with keep.presenting() as k:
-                if k.success:
-                    console.normal('Sleep prevention enabled.')
-                else:
-                    console.warn('Sleep prevention was unsuccessful.  System may go to sleep during scan.')
+            if WAKEPY:
+                with keep.presenting() as k:
+                    if k.success:
+                        console.normal('Sleep prevention enabled.')
+                    else:
+                        console.warn('Sleep prevention was unsuccessful.  System may go to sleep during scan.')
+                    _printProgressLine()
+            else:
+                console.warn('Sleep prevention not available.  System may go to sleep during scan.')
                 _printProgressLine()
     except KeyboardInterrupt:
         pass

@@ -111,10 +111,11 @@ def getDefaultConfig() -> dict:
 
     return {
         'dataHandlers': [
-            'pan',
+            'pan', 'email',
         ],
         'localFilesOnly': True,
         'results': {'path': "piidigger-results/",
+                    'csv': True,
                     'json': True,
                     'text': True,}, 
         'includeFiles': {'ext': 'all', 
@@ -312,7 +313,7 @@ def writeDefaultConfig(tomlFile: str):
     
     lines.append('')
     lines.append('[results]')
-    for key in ['path', 'json', 'text']:
+    for key in defaultConfig['results'].keys():
         lines.append(_tomlfy(key, defaultConfig['results'][key]))
         
     lines.append('')
