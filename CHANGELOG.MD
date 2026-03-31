@@ -1,3 +1,7 @@
+# Version 1.2.1 -- 31-MAR-2026
+- Fix
+    - Added a pre-filter for email address processing to skip any text that does not have an "@" symbol.
+
 # Version 1.2 -- 04-APR-2025
 - New features
     - Add a PDF file handler
