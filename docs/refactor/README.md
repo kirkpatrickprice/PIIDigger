@@ -39,6 +39,13 @@ This directory contains comprehensive documentation for the PIIDigger architectu
 - Coverage requirements (≥80%)
 - Known test challenges and solutions
 
+### For Future ZIP Archive Support
+→ **[ZIP_HANDLING_PLAN.md](./ZIP_HANDLING_PLAN.md)**
+- ZIP scope and non-goals for the refactor timeline
+- Task queue model additions and payload definitions
+- Safety limits and rejection rules (bomb/path traversal)
+- Implementation phases and test fixture plan
+
 ---
 
 ## Architecture at a Glance
@@ -199,6 +206,7 @@ If resuming this work, consider:
 | [CURRENT_ISSUES.md](./CURRENT_ISSUES.md) | Problem catalog | Developers, code reviewers |
 | [IMPLEMENTATION_CHECKLIST.md](./IMPLEMENTATION_CHECKLIST.md) | Task tracking | Developers (during implementation) |
 | [TESTING_STRATEGY.md](./TESTING_STRATEGY.md) | Test plan | QA, developers |
+| [ZIP_HANDLING_PLAN.md](./ZIP_HANDLING_PLAN.md) | ZIP design and execution notes | Developers (future implementation) |
 | **README.md** (this file) | Navigation & overview | Everyone |
 
 ---

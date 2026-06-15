@@ -1,657 +1,599 @@
 # PIIDigger Architecture Redesign
 
-**Branch**: `refactor`  
-**Status**: Design Phase  
-**Last Updated**: 2026-03-06
+**Branch**: `refactor`
+**Status**: Design Locked — Ready to Implement Phase 0
+**Last Updated**: 2026-06-15
+**Target release**: 2.0.0
 
 ## Table of Contents
-1. [Executive Summary](#executive-summary)
-2. [Problem Statement](#problem-statement)
-3. [Current Architecture Analysis](#current-architecture-analysis)
-4. [Proposed Architecture](#proposed-architecture)
-5. [Design Patterns](#design-patterns)
-6. [Implementation Strategy](#implementation-strategy)
-7. [Code Quality Standards](#code-quality-standards)
-8. [Testing Strategy](#testing-strategy)
-9. [Known Edge Cases](#known-edge-cases)
+1. [Goals & Non-Goals](#goals--non-goals)
+2. [Scope: What Is Discarded vs. Kept](#scope-what-is-discarded-vs-kept)
+3. [Architecture Overview](#architecture-overview)
+4. [The Task Model](#the-task-model)
+5. [Lite Dependency Injection: WorkerContext](#lite-dependency-injection-workercontext)
+6. [The Generic Worker](#the-generic-worker)
+7. [The Coordinator: Fan-out, Termination, Progress](#the-coordinator-fan-out-termination-progress)
+8. [Logging Architecture](#logging-architecture)
+9. [Progress Reporting](#progress-reporting)
+10. [Reliability: Timeouts & Worker Restart](#reliability-timeouts--worker-restart)
+11. [New Business-Logic Protocols](#new-business-logic-protocols)
+12. [The ScannableItem Abstraction (ZIP Seam)](#the-scannableitem-abstraction-zip-seam)
+13. [Result & Output Schema (with Lineage)](#result--output-schema-with-lineage)
+14. [Configuration Model](#configuration-model)
+15. [Code Standards](#code-standards)
+16. [Module Layout](#module-layout)
+17. [Implementation Phases](#implementation-phases)
+18. [Open Decisions](#open-decisions)
 
 ---
 
-## Executive Summary
+## Goals & Non-Goals
 
-PIIDigger currently uses a **tightly-coupled, SENTINEL-based multiprocessing architecture** that:
-- Breaks when new process types are introduced (attempted fileScanner parallelization failed)
-- Causes cascading failures and occasional hangs due to manual queue coordination
-- Cannot be easily tested, extended, or maintained
-- Does not meet modern Python standards (naming conventions, type hints, documentation, linting)
+The 1.x architecture was an honest first attempt that has been outgrown. This refactor optimizes for four explicit goals, in priority order:
 
-**Proposed Solution**: Replace with a **Task Queue + Worker Pool pattern** using:
-- Polymorphic task objects (single source of truth for work)
-- Generic worker pool (no role specialization)
-- Clean message-passing IPC (no SENTINEL hacks)
-- Configurable timeouts and retry logic
-- Full Ruff compliance and comprehensive Pytest coverage
+1. **Reliability** — no hangs, no deadlocks, no lost results. A pathological file (e.g. catastrophic regex backtracking) must never stall or freeze the run.
+2. **Extensibility** — adding a feature should mean adding a task type and a handler, not re-choreographing process coordination. **ZIP archive support is the first such feature and the acceptance test for this goal** (see [ZIP_HANDLING_PLAN.md](./ZIP_HANDLING_PLAN.md)).
+3. **Maintainability** — one obvious way to wire dependencies, consistent naming, typed interfaces, no clever cross-process coordination tricks.
+4. **Testability** — business logic and orchestration are both unit-testable without spinning up the whole process tree.
 
-**Scope**: Complete architectural refactor touching all multiprocessing infrastructure, achieving production-ready code quality in the process.
+**Non-goals for 2.0:** changing what counts as PII, async/await rewrite, distributed/multi-host scanning, or supporting archive formats beyond ZIP (ZIP is the pattern; others follow later).
 
 ---
 
-## Problem Statement
+## Scope: What Is Discarded vs. Kept
 
-### Root Cause Analysis
+This is a clean-slate rewrite of the orchestration layer. There is **no incremental migration of the process code** — it is replaced wholesale.
 
-The current `ProcessManager` class implements a **rigid, role-specialized process orchestration**:
+### Discarded entirely
+- `ProcessManager` and all `*PM` instances.
+- `find_dirs_worker` / `find_files_worker` / `file_handler_dispatcher` / `progress_line_worker`.
+- The `SENTINEL` protocol, `queuefuncs`, the `active_files_q_processes` counter, and the named-queue dict (`dirsQ`, `filesQ`, `*_resultsQ`).
+- The shared `mp.Value` `totals` dict and its lock-guarded increments.
+- The subprocess-based progress line.
 
-```
-findDirsWorker(1)  →  dirsQ  →  findFilesWorker(1)  →  filesQ  →  fileHandlers(N)  →  resultsQ  →  OutputHandlers
-```
+### Kept, but re-contracted
+The three business-logic layers survive because the PII-matching and file-reading logic is correct. Every layer gets a new, narrower interface (details in [New Business-Logic Protocols](#new-business-logic-contracts)):
+- **Data handlers** (`datahandlers/`): the PII matchers (pan, email, phonenum, trackdata).
+- **File handlers** (`filehandlers/`): readers that turn a file into text chunks (plaintext, pdf, docx, xlsx, xls).
+- **Output handlers** (`outputhandlers/`): the CSV/JSON/text writers, recast as **sinks** that no longer own a queue loop.
 
-**Problems with this design:**
-
-1. **SENTINEL-Based Coordination Brittleness**
-   - Manual `put(SENTINEL)` signals between processes
-   - If any process exits early, chain breaks (deadlock or cascade failure)
-   - `activeFilesQProcesses` counter has race conditions on decrement logic
-   - No automatic retry mechanism - lost signals = hung system
-
-2. **Inability to Extend**
-   - Attempted to add parallel fileScanner (rebalance idle workers) → **FAILED**
-   - New process type requires modifying:
-     - ProcessManager registration
-     - Queue creation
-     - SENTINEL coordination logic
-     - Counter management
-     - Shutdown choreography
-   - Every change risks breaking the fragile handoff chain
-
-3. **Load Imbalance**
-   - Fixed role specialization: 1 dir scanner → 1 file scanner → N file processors
-   - If dir enumerating is slow, filesQ starves while N processors idle
-   - If file processing is slow, filesQ fills while scanner blocks
-   - No dynamic rebalancing or task redistribution
-
-4. **Timeout Mechanism Failure**
-   - Attempted threading-based timeout → blocked by GIL
-   - Attempted multiprocessing timeout → IPC complexity (pickling, file passing)
-   - Root cause: Single fileHandler process hanging → blocks next SENTINEL signal → cascade failure
-   - Timeout enforcement isolated to single queue while others use SENTINEL hacks
-
-5. **Code Quality**
-   - Naming: `dirsQ`, `filesQ` (abbrev) instead of `dirs_queue`, `files_queue` (PEP8)
-   - No type hints, minimal docstrings
-   - Process functions scattered across modules with no clear interface
-   - No async context managers or resource cleanup
-   - Inadequate test coverage (integration tests only, no unit tests for process logic)
+### Net effect
+After the refactor the only multiprocessing-aware code lives in `orchestration/`. Business logic becomes pure, synchronous, and trivially unit-testable.
 
 ---
 
-## Current Architecture Analysis
+## Architecture Overview
 
-### Process Hierarchy
+The pattern is a **single coordinator feeding a pool of identical workers through one task queue, collecting results from one result queue, and fanning discovered work back into new tasks until the work set is empty.**
 
 ```
-ProcessManager (custom class)
-├── LoggerPM
-│   └── logProcessor (1)
-├── MainPM
-│   ├── findDirsWorker (1)
-│   ├── findFilesWorker (1)
-│   ├── fileHandler (cpu_count)
-│   └── OutputHandlers (1+ per type)
-└── progressPM
-    └── progressLineWorker (1)
+                  ┌─────────────────────────────────────────────┐
+                  │            Coordinator (main process)        │
+                  │  • seeds initial tasks (start dirs)          │
+                  │  • drains result_queue                       │
+                  │  • turns results into follow-up tasks        │
+                  │  • owns progress display (rich.Live)         │
+                  │  • owns and flushes output sinks             │
+                  │  • detects run completion (no pending tasks) │
+                  │  • monitors worker deadlines; restarts hung  │
+                  └──────────┬──────────────▲──────────┬────────┘
+             task_queue ─────┘              │          │ log records
+                                     result_queue      │
+                  ┌──────────────────────── │ ─────────┼────────┐
+                  │   Worker pool — N identical workers          │
+                  │   get(task) → dispatch → put(result)         │
+                  │                                    │ log rec │
+                  └────────────────────────────────────┼────────┘
+                                                        │
+                                             ┌──────────▼──────────┐
+                                             │   Logging listener   │
+                                             │ (drains log_queue →  │
+                                             │  FileHandler)        │
+                                             └─────────────────────┘
 ```
 
-### Queue System
+**All processes — coordinator and workers alike — send log records on `log_queue`.** Operational events like "starting N worker processes", "restarting hung worker", and "beginning scan of path X" originate in the coordinator. Worker events like "processing file Y" or "timeout on Z" originate in workers. One listener drains all of it.
 
-| Queue | Source | Consumer | Coordination |
-|-------|--------|----------|---------------|
-| `logQ` | All workers | logProcessor | Direct put() |
-| `dirsQ` | findDirsWorker | findFilesWorker | SENTINEL on empty |
-| `filesQ` | findFilesWorker | fileHandler | SENTINEL + activeFilesQProcesses counter |
-| `totalsQ` | All workers | Statistics aggregator | Direct put() |
-| `{output}_resultsQ` | fileHandler | OutputHandlers | SENTINEL per output type |
+Key invariants that deliver the goals:
 
-### Fragile Handoff (fileHandler Example)
+- **Single task source.** Only the coordinator enqueues tasks. Workers never enqueue; they report *discovered work* in their results, and the coordinator decides what becomes a new task. This makes recursive fan-out (dirs→files→scans, and later archive→members) uniform, and ZIP is a drop-in.
+- **Workers are stateless and identical.** No roles, no per-type process counts, automatic load balancing. Adding a task type never changes the pool.
+- **Termination is a property of the work set, not a signal.** The run is done when there are zero outstanding tasks and the result queue is drained. There is no SENTINEL chain to break.
+- **One way to get dependencies.** Everything a worker needs arrives in a single `WorkerContext` (see below).
+
+---
+
+## The Task Model
+
+Pydantic v2, frozen, validated at the IPC boundary so a malformed task can never reach a handler. Payloads are typed per task type rather than a bare `dict`.
+
+> Illustrative, not final — field names settle during Phase 1.
 
 ```python
-# lines ~210-229 in piidigger.py
-while True:
-    item = getItem(queues['filesQ'])  # Wait for work
-    if item is SENTINEL:
-        # Check counter and decide if last worker
-        with activeFilesQProcesses.get_lock():
-            activeFilesQProcesses.value -= 1
-            if activeFilesQProcesses.value == 0:
-                clearQ(queues['filesQ'])
-            else:
-                queues['filesQ'].put(SENTINEL)  # Pass signal to next worker
-        break
-    # Process item...
-```
+from __future__ import annotations
 
-**Why this fails:**
-- If file processing hangs (e.g., email regex on base64-xml-test.xml), worker never reaches the decrement
-- Counter gets out of sync
-- Next worker waiting on filesQ.get() never receives SENTINEL
-- Entire pipeline deadlocks while hung worker consumes CPU
-
----
-
-## Proposed Architecture
-
-### Core Pattern: Task Queue + Worker Pool
-
-**Central Concept**: Work is represented as **immutable task messages** consumed by **generic workers**.
-
-### Task Model (Pydantic v2)
-
-```python
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+import uuid
 from enum import Enum
-from datetime import datetime
 from typing import Literal
 
+from pydantic import BaseModel, ConfigDict, Field
+
+
 class TaskType(str, Enum):
-    """Valid task types for worker dispatch."""
-    ENUM_DIRS = "enum_dirs"
-    ENUM_FILES = "enum_files"
-    SCAN_FILE = "scan_file"
-    WRITE_RESULTS = "write_results"
+    ENUM_DIR = "enum_dir"           # list one directory → child dirs + scannable files
+    SCAN_FILE = "scan_file"         # read + match one scannable item
+    # Archive types arrive with ZIP (Phase 5), no orchestration change required:
+    ENUM_ARCHIVE_MEMBERS = "enum_archive_members"
+    SCAN_ARCHIVE_MEMBER = "scan_archive_member"
+
 
 class Task(BaseModel):
-    """Immutable task definition for worker consumption.
-    
-    Pydantic v2 validation ensures tasks deserialized from multiprocessing
-    queues are valid before processing. Frozen=True prevents accidental mutation.
-    """
-    
     model_config = ConfigDict(frozen=True)
-    
-    task_id: str
-    task_type: TaskType  # Enum validation
-    payload: dict
-    timeout_seconds: int = Field(default=30, ge=1, le=300)  # Range validation
-    priority: int = Field(default=0, ge=0, le=10)
-    created_at: datetime = Field(default_factory=datetime.now)
-    
-    @field_validator("task_id")
-    @classmethod
-    def validate_task_id(cls, v: str) -> str:
-        """Ensure task_id is non-empty UUID-like string."""
-        if not v or len(v) < 8:
-            raise ValueError("task_id must be non-empty, UUID-like string (min 8 chars)")
-        return v
+
+    task_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    task_type: TaskType
+    payload: dict                       # validated per-type by the handler on entry
+    timeout_seconds: int = Field(default=30, ge=1, le=600)
+
 
 class TaskResult(BaseModel):
-    """Result of task execution.
-    
-    Pydantic validation ensures result data is structurally sound
-    before aggregation or output processing.
-    """
-    
     task_id: str
     task_type: TaskType
-    status: Literal["success", "timeout", "error"]
-    result_data: dict | None = None
+    status: Literal["ok", "timeout", "error"]
+    # Work this task discovered that the coordinator should enqueue as new tasks:
+    new_tasks: list[dict] = Field(default_factory=list)
+    # PII findings to be routed to output sinks (see Result & Output Schema):
+    findings: list[dict] = Field(default_factory=list)
+    # Per-counter increments for the progress display (e.g. {"files_scanned": 1}):
+    counters: dict[str, int] = Field(default_factory=dict)
     error_message: str | None = None
-    duration_seconds: float = Field(ge=0.0)
+    duration_seconds: float = Field(default=0.0, ge=0.0)
     worker_pid: int | None = None
 ```
 
-### Worker Function
+`new_tasks` + `counters` are what let the coordinator drive fan-out and progress without any shared mutable state. A lightweight `TaskStarted` heartbeat message (not a `TaskResult`) is also put on the result queue when a worker picks up a task, to support deadline monitoring (see [Reliability](#reliability-timeouts--worker-restart)).
 
-Single polymorphic worker handles all task types:
+---
 
-```python
-def worker_process(
-    task_queue: mp.Queue,
-    result_queue: mp.Queue,
-    config: Config,
-    logger: Logger
-):
-    """
-    Generic worker: polls task queue, routes by task_type, executes with timeout.
-    
-    Handles:
-    - Invalid tasks (log and continue)
-    - Timeouts (log and mark as timeout, continue)
-    - Exceptions (log, mark as error, continue)
-    - Worker lifecycle cleanup on exit
-    """
-    while True:
-        task = task_queue.get()
-        if task is SENTINEL:
-            break
-        
-        try:
-            result = execute_task(task, config, logger)
-            result_queue.put(result)
-        except Exception as e:
-            result_queue.put(TaskResult(
-                task_id=task.task_id,
-                task_type=task.task_type,
-                status="error",
-                error_message=str(e),
-                worker_pid=os.getpid()
-            ))
-```
+## Lite Dependency Injection: WorkerContext
 
-### Orchestrator: Task Coordinator
+Every 1.x process target took a long positional tuple (`config, queues, totals, stop_event, log_manager, ...`). That tuple was the extensibility problem — adding a process type meant touching every call site. The replacement is a single context object passed to every worker and handler.
 
-Single coordinator process generates tasks for workers:
+**Pydantic is the project standard for all models. `WorkerContext` is the named exception:** it holds `mp.Queue`, `mp.Event`, and `mp.Value` — opaque OS-level objects with no meaningful schema that Pydantic could validate. For these, a frozen `dataclass` is correct; Pydantic's value is at data validation boundaries, and these aren't boundaries.
 
 ```python
-def task_coordinator(
-    task_queue: mp.Queue,
-    result_queue: mp.Queue,
-    config: Config,
-    logger: Logger,
+from __future__ import annotations
+
+import multiprocessing as mp
+from dataclasses import dataclass
+
+from piidigger.models.config import Config
+
+
+@dataclass(frozen=True)
+class WorkerContext:
+    """All shared state a worker needs. Must contain only pickle-safe members
+    because it crosses the spawn boundary on Windows/macOS.
+
+    mp.Queue, mp.Event: picklable (they are proxy objects to shared OS resources).
+    Config: picklable (plain validated Pydantic model with no open handles).
+    logging.Logger: NOT allowed here — build it inside each process from log_queue.
+    rich.Console: NOT allowed here — owns the terminal, must stay in the coordinator.
+    """
+    config: Config
+    task_queue: mp.Queue
+    result_queue: mp.Queue
+    log_queue: mp.Queue
     stop_event: mp.Event
-):
-    """
-    Single coordinator: generates scanning tasks, feeds worker pool, collects results.
-    
-    Flow:
-    1. Generate "enum_dirs" tasks (directory paths)
-    2. Track results, generate "enum_files" tasks when dirs complete
-    3. Generate "scan_file" tasks when files discovered
-    4. Feed results to output processors
-    5. Graceful shutdown on stop_event
-    """
 ```
 
-### Worker Pool & Configuration
+Handlers take the context, not a grab-bag of args:
 
 ```python
-# config.toml
-[multiprocessing]
-file_handler_workers = 8        # cpu_count() by default
-coordinator_workers = 1         # Fixed (single coordinator)
-output_workers = 2              # Configurable per output type
-
-# Runtime
-pool = WorkerPool(
-    pool_size=config.file_handler_workers,
-    task_queue=task_queue,
-    result_queue=result_queue,
-    config=config,
-    logger=logger
-)
-pool.start_workers()
+def handle_scan_file(task: Task, ctx: WorkerContext) -> TaskResult: ...
 ```
+
+Testing benefit: a unit test builds a `WorkerContext` with `queue.SimpleQueue()` fakes and calls a handler directly. No process tree required.
 
 ---
 
-## Design Patterns
+## The Generic Worker
 
-### 1. Polymorphic Task Dispatch
-
-**Pattern**: Single worker function with if/elif routing.
+One function, one loop, one dispatch table. Adding a task type adds one entry to the table.
 
 ```python
-def execute_task(task: Task, config: Config, logger: Logger) -> TaskResult:
-    """Route task to handler. Single point of extension."""
-    
-    if task.task_type == "enum_dirs":
-        return handle_enum_dirs(task, config, logger)
-    
-    elif task.task_type == "enum_files":
-        return handle_enum_files(task, config, logger)
-    
-    elif task.task_type == "scan_file":
-        return handle_scan_file(task, config, logger)
-    
-    elif task.task_type == "write_results":
-        return handle_write_results(task, config, logger)
-    
-    else:
-        raise ValueError(f"Unknown task type: {task.task_type}")
-```
+DISPATCH: dict[TaskType, Callable[[Task, WorkerContext, Logger], TaskResult]] = {
+    TaskType.ENUM_DIR:   handle_enum_dir,
+    TaskType.SCAN_FILE:  handle_scan_file,
+    # ENUM_ARCHIVE_MEMBERS / SCAN_ARCHIVE_MEMBER added in Phase 5 — no other change needed
+}
 
-**Advantage**: Adding new task type = add elif branch + handler function. No ProcessManager changes.
-
-### 2. Timeout Enforcement
-
-**Pattern**: Subprocess isolation with process-level termination.
-
-```python
-def execute_with_timeout(
-    target_func,
-    args: tuple,
-    timeout_seconds: int,
-    logger: Logger
-) -> tuple[bool, object]:
-    """
-    Execute function in subprocess, enforce hard timeout via process termination.
-    
-    Returns: (success: bool, result: object | Exception)
-    """
-    with mp.Pool(1) as pool:
+def worker_loop(ctx: WorkerContext) -> None:
+    logger = _build_logger(ctx.log_queue)           # built in-process, not passed in
+    while not ctx.stop_event.is_set():
+        task = ctx.task_queue.get()
+        if task is SHUTDOWN:
+            break
+        ctx.result_queue.put(TaskStarted(task.task_id, os.getpid()))  # heartbeat
         try:
-            result = pool.apply_async(target_func, args)
-            return True, result.get(timeout=timeout_seconds)
-        except mp.TimeoutError:
-            logger.warning(f"Task timeout after {timeout_seconds}s")
-            return False, TimeoutError(f"Exceeded {timeout_seconds}s")
-        except Exception as e:
-            logger.error(f"Task failed: {e}")
-            return False, e
+            result = _dispatch(task, ctx, logger)   # never raises; errors → TaskResult
+        finally:
+            _cleanup_temp_workspace()               # guaranteed, even on error
+        ctx.result_queue.put(result)
 ```
 
-**Advantage**: GIL not involved. Process can be forcefully terminated. No blocking in main thread.
+`_dispatch` wraps handlers in `try/except` so a handler bug becomes a `status="error"` result, never a dead worker. Per-task temp workspace creation and guaranteed cleanup lives here (see [ScannableItem](#the-scannableitem-abstraction-zip-seam) for the security consideration around temp files).
 
-### 3. Result Tracking
+---
 
-**Pattern**: Task ID → Task, Task → Result correlation.
+## The Coordinator: Fan-out, Termination, Progress
+
+The coordinator runs in the main process. Its loop drains results and re-seeds the task queue until no work remains.
+
+**In plain terms:** the coordinator tracks a count of outstanding tasks. Every time it enqueues a task, the count goes up. Every time it processes a result, the count goes down — then immediately goes back up for any new tasks that result produced. When the count reaches zero, every task that was ever created has been accounted for, and the run is done.
 
 ```python
-# Coordinator maintains in-memory tracking during scan
-pending_tasks: dict[str, Task] = {}
-completed_tasks: dict[str, TaskResult] = {}
+for start_dir in config.start_dirs:
+    task_queue.put(Task(task_type=TaskType.ENUM_DIR, payload={"path": start_dir}))
+pending = len(config.start_dirs)
 
-# Collect results
-while True:
-    result = result_queue.get_nowait()
-    completed_tasks[result.task_id] = result
-    logger.info(f"Task {result.task_id} ({result.task_type}) completed in {result.duration_seconds}s")
+while pending > 0:
+    try:
+        msg = result_queue.get(timeout=HEARTBEAT_CHECK_INTERVAL)
+    except queue.Empty:
+        _check_worker_deadlines(...)    # detect hung/crashed workers; synthesize result if needed
+        continue
+
+    if isinstance(msg, TaskStarted):
+        _record_heartbeat(msg)          # does not change pending
+        continue
+
+    # msg is a TaskResult
+    pending -= 1
+    for new_task_payload in msg.new_tasks:
+        task_queue.put(Task(**new_task_payload))
+        pending += 1
+    for finding in msg.findings:
+        _route_to_sinks(finding)
+    progress.update(msg.counters)
+
+# pending == 0: all work accounted for
+_broadcast_shutdown()
+_join_workers()
+_flush_sinks()
+_stop_log_listener()
 ```
 
-**Advantage**: Can correlate work → output, detect lost tasks, implement retry logic.
+**Why `pending == 0` cannot be premature:** the coordinator is single-threaded. The sequence `pending -= 1 → enqueue new_tasks → pending += len(new_tasks)` happens in one iteration, never interrupted. `pending` is only tested at the `while` guard, which runs after all new tasks from the current result have already been counted. A genuine zero means every task ever enqueued has produced exactly one result — true termination.
 
-### 4. Graceful Shutdown
+**The crash-before-heartbeat gap:** if a worker crashes after dequeuing a task but before sending its heartbeat, the coordinator has no record the task was taken. This edge case is handled in Phase 4 (hardening) by tracking task dispatch times and counting live workers; tasks orphaned by a crash are re-queued. It is noted here so the Phase 1 worker design leaves room for it.
 
-**Pattern**: Stop event + SENTINEL cascade.
+**Keyboard interrupt / graceful stop:** `Ctrl+C` raises `KeyboardInterrupt` in the coordinator (main process). Workers receive `SIGINT` automatically. The coordinator's `except KeyboardInterrupt` block calls `_broadcast_shutdown()`, joins workers with a timeout, flushes any partial findings to sinks, and exits. Workers catch `KeyboardInterrupt` in their own loop and exit cleanly after finishing their current task.
+
+---
+
+## Logging Architecture
+
+The queue-based model is correct for multiprocessing and is kept, with lifecycle fixes:
+
+- Every process — coordinator and workers — logs via `logging.handlers.QueueHandler(ctx.log_queue)`. The `Logger` is **built inside each process**; it is never passed across the spawn boundary.
+- A single **`logging.handlers.QueueListener`** (running as a thread in the coordinator) drains `log_queue` to the `FileHandler`. This replaces the hand-rolled `log_processor` subprocess and its `sleep(2)` shutdown.
+- The listener starts **before** any worker and stops **after** all workers have joined, so final log records are never lost.
+- Log records (diagnostics) flow on `log_queue`. Findings, counters, and task status flow on `result_queue`. They are never mixed.
+
+---
+
+## Progress Reporting
+
+Progress moves entirely into the coordinator, which already sees every result. No shared `mp.Value` counters, no locks, no separate progress process.
+
+The coordinator maintains plain in-process integer counters, updated from `TaskResult.counters`. Single writer, no races.
+
+**Display:** a two-panel `rich.Live` layout owned by the coordinator in the main process (the only correct place to control the terminal):
+
+- **Top panel — counters/progress bars:** `rich.Progress` bars for dirs found/scanned, files found/scanned, bytes processed, and results found. Matches the current progress line layout but rendered graphically.
+- **Bottom panel — events log:** a scrolling window (fixed height, circular buffer) showing warnings, errors, and notable events in real time — e.g. timeout on a file, a skipped archive member, a permission error. Populated from a secondary in-memory queue that the coordinator also writes to when routing error/warning results.
+
+This uses `rich.Layout`, `rich.Live`, and `rich.Table` (for the scrolling events panel). Rich handles terminal width and graceful degradation when stdout is not a TTY (e.g. CI, piped output) — in non-TTY mode, progress output is suppressed and only final summary is printed.
+
+---
+
+## Reliability: Timeouts & Worker Restart
+
+The headline reliability problem — a 1.5 MB base64 XML file hanging for minutes on catastrophic regex backtracking — is solved at the process level.
+
+**Chosen strategy: heartbeat + targeted restart.**
+
+1. Before executing a task, the worker puts a lightweight `TaskStarted(task_id, pid)` heartbeat on the result queue.
+2. The coordinator records the dispatch time and owning pid for every in-flight task.
+3. On each `result_queue.get(timeout=...)` expiry, the coordinator scans in-flight tasks for any whose deadline (`2 × timeout_seconds`) has passed.
+4. For an expired task: the coordinator calls `worker_process.terminate()`, spawns a replacement worker, and synthesizes a `status="timeout"` `TaskResult` for the task (decrementing `pending` correctly).
+5. The run continues; the offending file is reported as a timeout in logs and output, never silently dropped, never blocking the pool.
+
+Steady-state cost is zero extra processes. The cost is paid only on an actual hang.
+
+> **Alternative considered and rejected:** `mp.Pool(1)` per task. Reliable but spawns a process per file — unacceptable overhead on Windows `spawn`. Recorded here in case profiling changes the trade-off on a future platform.
+
+---
+
+## New Business-Logic Protocols
+
+The retained logic gets narrow, synchronous, dependency-free interfaces. None of them import `multiprocessing`, queues, or loggers directly. All protocols live in `protocols.py`.
+
+**Data handler** — a PII matcher. Stateless and pure:
+```python
+class DataHandler(Protocol):
+    name: str
+    def find_matches(self, text: str) -> dict[str, set[str]]: ...
+```
+
+**File handler** — reads a source item and yields text chunks. Takes an abstract `ScannableItem`, not a path string:
+```python
+class FileHandler(Protocol):
+    def read(self, source: ScannableItem) -> Iterator[str]: ...
+```
+
+**Output sink** — receives findings from the coordinator and writes them. No queue loop:
+```python
+class OutputSink(Protocol):
+    def open(self) -> None: ...
+    def write(self, record: ResultRecord) -> None: ...
+    def close(self) -> None: ...
+```
+
+Sinks are opened before the coordinator loop starts, receive `write()` calls per finding, and are closed after the loop ends. Trivially testable with a `tmp_path`.
+
+---
+
+## The ScannableItem Abstraction (ZIP Seam)
+
+The 1.x `classes.File` assumes a real `pathlib.Path` with `stat()`, `parent`, and `suffix`. ZIP members have none of those. The abstraction is introduced in the core so that ZIP simply adds a new *producer* of it, not a new code path through every handler.
 
 ```python
-def shutdown_sequence(pool: WorkerPool, coordinator: mp.Process, stop_event: mp.Event):
-    """
-    1. Signal stop event (no new tasks)
-    2. Wait for coordinator to finish current batch
-    3. Send SENTINEL to all workers
-    4. Join workers
-    5. Cleanup
-    """
-    stop_event.set()
-    coordinator.join(timeout=10)
-    
-    for _ in range(pool.worker_count):
-        pool.task_queue.put(SENTINEL)
-    
-    pool.join_all(timeout=30)
+class ScannableItem(Protocol):
+    display_path: str        # see archive path notation below
+    ext: str
+    mime: str | None
+    size: int
+    depth: int               # 0 for on-disk files, ≥1 inside archives
+    def open_stream(self) -> IO[bytes]: ...
+    def materialize(self) -> Path: ...
 ```
 
----
+**Concrete implementations:**
+- `FilesystemItem` (Phase 3): wraps a real `pathlib.Path`. `open_stream()` opens it; `materialize()` returns the path itself (no copy).
+- `ArchiveMemberItem` (Phase 5): wraps a `zipfile` member. `open_stream()` reads the compressed member directly. `materialize()` extracts to a temp file.
 
-## Implementation Strategy
+**File handlers consume `ScannableItem`**, so they are agnostic to where the bytes come from. Handlers that can operate on a stream call `open_stream()`. Handlers that require a real path (currently xlsx/xls via openpyxl/xlrd) call `materialize()`.
 
-### Phase 1: Core Infrastructure (Foundation)
+**Security note on `materialize()`:** extracting an archive member to a temp file creates a second copy of potentially sensitive data (PII, card numbers) on disk. This is a known trade-off, mitigated as follows:
+- `materialize()` is called only by handlers that provably cannot accept a stream — it is not a convenience fallback.
+- The temp file lives in a per-task workspace directory, created and cleaned up inside the worker's `try/finally` block.
+- Cleanup uses **secure deletion** (overwrite with random or zero bytes, then delete) via a stdlib or well-maintained PyPI package. Standard `os.unlink` leaves data recoverable; we must not use it for temp files that may contain PII. The specific package is selected in Open Decision 6 before Phase 5 implementation.
+- Future refactors of xlsx/xls handlers to accept streams would eliminate this trade-off entirely.
 
-**Deliverables**:
-- `Task` and `TaskResult` Pydantic v2 models
-- `WorkerPool` class (spawn/manage workers)
-- `task_executor.execute_with_timeout()` function
-- Initial worker function skeleton
-
-**Files to Create**:
-- `src/piidigger/orchestration/tasks.py` (Task definitions)
-- `src/piidigger/orchestration/worker_pool.py` (Worker management)
-- `src/piidigger/orchestration/executor.py` (Timeout enforcement)
-
-**Files to Modify**:
-- `src/piidigger/__init__.py` (exports)
-
-**Testing**:
-- Unit tests for Task creation and serialization
-- Unit tests for timeout enforcement
-- Integration test: spin up pool, send 10 tasks, verify results
+**Archive member path notation:** there is no universally standardized format for displaying a path inside an archive. We adopt `::` as the separator (e.g. `archive.zip::path/inside/member.txt`) because it is unambiguous, avoids conflicts with Windows drive letter syntax (`C:\`), forward slashes, and backslashes, and is the convention used by several security scanning tools. This notation appears in `display_path`, logs, and output `source_member_path` fields.
 
 ---
 
-### Phase 2: Task Handlers (Business Logic)
+## Result & Output Schema (with Lineage)
 
-**Deliverables**:
-- `handle_enum_dirs()` - migrate findDirsWorker logic
-- `handle_enum_files()` - migrate findFilesWorker logic
-- `handle_scan_file()` - migrate fileHandlerDispatcher logic (with timeout)
-- `handle_write_results()` - migrate OutputHandler logic
-
-**Files to Create**:
-- `src/piidigger/orchestration/handlers.py`
-- `src/piidigger/orchestration/__init__.py`
-
-**Testing**:
-- Unit test each handler with mock task payloads
-- Integration test: full scan on small test directory
-
----
-
-### Phase 3: Orchestrator & Coordinator
-
-**Deliverables**:
-- `TaskCoordinator` class - generates tasks from scan config
-- Main orchestration loop in `main()`
-- Shutdown handling
-
-**Files to Modify**:
-- `src/piidigger/piidigger.py` (replace main orchestration)
-
-**Testing**:
-- Integration test: coordinator generates tasks, workers execute, results collected
-- Edge case: directory with 0 files
-- Edge case: timeout on scan_file task
-
----
-
-### Phase 4: Code Quality & Testing
-
-**Deliverables**:
-- Full Ruff compliance (linting, formatting)
-- Type hints on all functions
-- Docstrings (module, class, function)
-- Pytest coverage ≥ 80%
-- Remove old ProcessManager class (if no longer used)
-
-**Files to Review**:
-- All modified files for naming (real_names_with_underbars)
-- All handlers for type hints and docstrings
-- Test structure (unit/integration/e2e clear separation)
-
-**Testing**:
-- `pytest --cov=src/piidigger tests/`
-- `ruff check .`
-- `ruff format --check .`
-
----
-
-### Phase 5: Backward Compatibility Validation
-
-**Deliverables**:
-- Run on existing test datasets
-- Verify output formats match (CSV, JSON, TXT)
-- Compare results against baseline scans
-
-**Files to Modify**:
-- (none - output format preserved)
-
-**Testing**:
-- Integration test: scan with all output types enabled
-- Compare file-by-file with previous runs
-- Edge case: base64-xml-test.xml (previously caused hangs)
-
----
-
-## Code Quality Standards
-
-### Naming Conventions
-
-- **Variables/Functions**: `real_names_with_underbars` (PEP8)
-  - ✗ `dirsQ`, `filesQ`, `resultQ`
-  - ✓ `dirs_queue`, `files_queue`, `result_queue`
-  
-- **Classes**: `PascalCase`
-  - ✗ `config`, `processor`
-  - ✓ `Config`, `TaskCoordinator`
-
-- **Constants**: `UPPER_CASE`
-  - ✗ `SENTINEL`, `TIMEOUT_DEFAULT`
-  - ✓ `QUEUE_SENTINEL`, `TIMEOUT_DEFAULT_SECONDS`
-
-### Type Hints
-
-**Required everywhere** (except simple test functions):
+The 2.0 output baseline is set once and not changed. Because ZIP needs lineage fields in output, those fields are present from day one — as empty/null for on-disk files — so adding ZIP does not break baseline comparison.
 
 ```python
-def scan_file(
-    filepath: Path,
-    handlers: list[DataHandler],
-    timeout_seconds: int = 30,
-    logger: Logger | None = None
-) -> dict[str, list[Match]]:
-    """Scan file with handlers, return matches by handler name."""
+class ResultRecord(BaseModel):
+    source_path: str                        # host file path (or the archive path for members)
+    source_member_path: str | None = None   # member path within archive; None for on-disk
+    source_depth: int = 0                   # 0 for on-disk, ≥1 for archive members
+    source_container_type: str | None = None  # "zip" for members; None for on-disk
+    handler: str                            # data handler name (e.g. "pan", "email")
+    matches: dict[str, list[str]]           # match type → list of matched values
 ```
 
-### Documentation
-
-**Required**:
-- Module docstring (purpose, key exports)
-- Class docstring (purpose, usage example if complex)
-- Function docstring (Args, Returns, Raises, Examples where appropriate)
-- Inline comments for non-obvious logic
-
-### Linting
-
-**Target**: 100% Ruff compliance
-
-```bash
-ruff check . --select E,W,F,I,UP,RUF
-ruff format .
-```
+On-disk findings leave the member/container fields null. ZIP findings populate them. Same schema, same CSV columns, same JSON keys across the entire 2.0 lifetime.
 
 ---
 
-## Testing Strategy
+## Configuration Model
 
-### Unit Tests
-
-**Coverage Target**: ≥ 80%
-
-**Structure**:
-```
-tests/
-├── unit/
-│   ├── test_tasks.py (Task creation, validation)
-│   ├── test_worker_pool.py (Pool lifecycle)
-│   ├── test_executor.py (Timeout enforcement)
-│   ├── test_handlers.py (Each handler in isolation)
-│   └── test_config.py (Config parsing, validation)
-├── integration/
-│   ├── test_scan_small_directory.py
-│   ├── test_timeout_enforcement.py
-│   ├── test_output_formats.py
-│   └── test_shutdown_graceful.py
-└── e2e/
-    ├── test_scan_full_testdata.py
-    └── test_baseline_comparison.py
-```
-
-### Test Fixtures
-
-```python
-@pytest.fixture
-def task_queue():
-    """mp.Queue for testing."""
-    q = mp.Queue()
-    yield q
-    while not q.empty():
-        q.get()
-
-@pytest.fixture
-def sample_config():
-    """Config with test defaults."""
-    return Config.from_dict({
-        "start_dirs": ["testdata/"],
-        "file_handlers": ["pan", "email"],
-        "output_formats": ["csv"],
-    })
-```
-
-### Edge Case Tests
-
-- Empty directory scan
-- File with no matches
-- File with 1000+ matches (memory pressure)
-- Binary file (encoding edge cases)
-- base64-xml-test.xml (previously hung system)
-- Very deep directory structure (stack depth?)
-- File access denied (permission handling)
-- Timeout mid-scan (graceful exit)
-- Worker crash (error handling)
+The 1.x `Config` getter-soup (`getMaxProcs()`, `getDataHandlers()`, ...) is replaced by a validated Pydantic model with nested sections. Reasons:
+- ZIP adds ~6 new settings; the getter pattern does not scale.
+- Tasks already depend on Pydantic; no new dependency.
+- Config errors (typos, wrong types, missing required fields) should fail at load with a clear message, not crash at runtime deep in a worker.
+- Two existing bugs are closed by this rewrite: `classes.py:66` and `:110` reference `globalfuncs.errorCodes` (wrong module; `errorCodes` lives in `globalvars`), and `piidigger.py:288` references the non-existent key `errorCodes['unknown']` (correct key is `'unknownError'`). Both crash on the exact error path they were meant to handle.
 
 ---
 
-## Known Edge Cases
+## Code Standards
 
-### 1. base64-xml-test.xml Catastrophic Backtracking
+### snake_case — mandatory everywhere
 
-**Current Problem**: Email regex hangs for 2-4 minutes on this 1.5MB file with embedded base64 data.
+Every identifier in the codebase moves to PEP 8. This applies to retained business logic, not just new code:
 
-**Root Cause**: Regex catastrophic backtracking in RFC5322 pattern when matching partial email-like strings in base64 payload.
+| Category | Convention | Examples |
+|---|---|---|
+| Functions, methods, variables, modules | `snake_case` | `find_files_worker`, `files_queue`, `handle_scan_file` |
+| Classes | `PascalCase` | `WorkerContext`, `ScannableItem`, `Config` |
+| Constants | `UPPER_CASE` | `SHUTDOWN`, `DEFAULT_TIMEOUT_SECONDS` |
 
-**Solution**:
-- Timeout per task: if email handler takes >30s, terminate and continue
-- Log timeout (not silent failure)
-- Process continues (no cascade failure)
+Enforced by adding ruff's **`N` (pep8-naming)** ruleset to the existing `E,W,F,I,UP,RUF` selection, plus mypy `--strict`. The rename of retained handlers is a mechanical, zero-behavior-change commit that lands in **Phase 0**, so all new orchestration code is born snake_case from the start.
 
-**Validation**: base64-xml-test.xml should complete in <5 minutes with email timeout=30s.
+### Pydantic everywhere
 
-### 2. Process Pool Worker Crashes
-
-**Risk**: Worker process crashes → task lost → queue blocks waiting for result.
-
-**Solution**:
-- TaskResult timestamp + timeout monitoring
-- If result_queue empty for X seconds, assume worker crashed
-- Resend SENTINEL or restart worker
-- Log incident with task_id for tracing
-
-**Validation**: Inject synthetic crash, verify recovery.
-
-### 3. Shutdown Deadlock
-
-**Risk**: Coordinator waiting for result_queue while workers blocked on task_queue (circular wait).
-
-**Solution**:
-- stop_event checked in coordinator loop (unblock gather phase)
-- All workers receive SENTINEL (unblock consumption)
-- Timeout on final joins (don't hang forever on cleanup)
-
-**Validation**: Graceful shutdown tests with partial task completion.
+All data models — tasks, results, payloads, config, `ResultRecord` — use Pydantic v2. Use plain `dataclass` only when holding types that Pydantic cannot meaningfully validate (currently: `WorkerContext` with its `mp.Queue`/`mp.Event` members). Document the reason at the class definition.
 
 ---
 
-## Implementation Roadmap
+## Module Layout
 
-| Phase | Priority | Effort | Risk | Timeline |
-|-------|----------|--------|------|----------|
-| 1: Core Infrastructure | P0 | 2-3 days | Low | Week 1 |
-| 2: Task Handlers | P0 | 3-4 days | Medium | Week 2 |
-| 3: Orchestrator | P0 | 2-3 days | High | Week 2-3 |
-| 4: Code Quality | P0 | 2-3 days | Low | Week 3 |
-| 5: Validation | P1 | 1-2 days | Medium | Week 3-4 |
+```
+src/piidigger/
+│
+├── cli/                          # Click CLI layer only; no business logic
+│   ├── __init__.py
+│   ├── main.py                   # Click group entry point; click.group()
+│   └── commands/
+│       ├── __init__.py
+│       ├── scan.py               # `piidigger scan` (default command)
+│       └── config.py             # `piidigger config` (generate, validate)
+│
+├── models/                       # All Pydantic data models
+│   ├── __init__.py
+│   ├── config.py                 # Config (replaces getter-soup in classes.py)
+│   ├── tasks.py                  # Task, TaskResult, TaskType
+│   ├── payloads.py               # Typed per-task-type payload models
+│   └── results.py                # ResultRecord (with lineage fields)
+│
+├── protocols.py                  # Protocols: DataHandler, FileHandler,
+│                                 #   OutputSink, ScannableItem
+│
+├── orchestration/                # All multiprocessing-aware code
+│   ├── __init__.py
+│   ├── context.py                # WorkerContext (dataclass — see note)
+│   ├── worker.py                 # worker_loop + DISPATCH table
+│   ├── coordinator.py            # fan-out loop, termination, deadline monitor
+│   ├── logging_setup.py          # QueueHandler / QueueListener helpers
+│   ├── progress.py               # rich.Live two-panel display
+│   └── sources.py                # FilesystemItem; ArchiveMemberItem in Phase 5
+│
+├── datahandlers/                 # PII matchers (implement DataHandler)
+│   ├── __init__.py
+│   ├── pan.py
+│   ├── email.py
+│   ├── phonenum.py
+│   └── trackdata.py
+│
+├── filehandlers/                 # File readers (implement FileHandler)
+│   ├── __init__.py
+│   ├── plaintext.py
+│   ├── pdf.py
+│   ├── docx.py
+│   ├── xlsx.py
+│   └── xls.py
+│
+├── outputhandlers/               # Output sinks (implement OutputSink)
+│   ├── __init__.py
+│   ├── csv.py
+│   ├── json.py
+│   └── text.py
+│
+└── run.py                        # run_scan(config: Config) -> int
+                                  # The testable core; cli/commands/scan.py calls this
+```
 
-**Total Estimate**: 3-4 weeks for full refactor + validation.
+**Why `datahandlers/` / `filehandlers/` / `outputhandlers/` stay as flat directories:** each name is self-describing and maps directly to the contracts in `protocols.py`. A `services/` wrapper would add a directory level without adding clarity. The grouping is already implicit in the naming.
+
+**Why `cli/` is a package:** a future `piidigger config generate` or `piidigger config validate` command is a natural addition. Starting with a Click group in `cli/main.py` costs nothing now and avoids a structural refactor later.
+
+---
+
+## Implementation Phases
+
+Phases are natural, independently-testable breaks. Each leaves the tree in a known-good state and is a candidate standalone PR.
+
+### Phase 0 — Standards & Scaffolding
+*No behavior changes. Sets the baseline for all new code.*
+
+- Global snake_case rename of all retained code (data handlers, file handlers, output handlers, remaining `classes.py` helpers).
+- Enable ruff `N` ruleset; fix all violations; CI green.
+- Extract `run_scan(config)` out of the Click `main()` into `run.py` so it is testable.
+- Fix both `errorCodes` bugs (wrong module reference + wrong key) as part of the config cleanup.
+- Scaffold empty module stubs for `orchestration/`, `models/`, `cli/`, `protocols.py`.
+
+**Exit criteria:** ruff + mypy clean; existing test suite still passes; `run_scan` is callable in a test without Click.
+
+---
+
+### Phase 1 — Core Infrastructure
+*Orchestration machinery with a trivial no-op task. No business logic attached yet.*
+
+- `models/tasks.py`: `Task`, `TaskResult`, `TaskType`, heartbeat message.
+- `orchestration/context.py`: `WorkerContext`.
+- `orchestration/logging_setup.py`: `build_worker_logger()`, `start_listener()`, `stop_listener()`.
+- `orchestration/worker.py`: `worker_loop` with dispatch table; handles `SHUTDOWN` and a `NOOP` task type for testing.
+- Spin up a pool, dispatch 10 `NOOP` tasks, collect results, shut down cleanly — verified on Windows spawn.
+
+**Exit criteria:** pool start/dispatch/result/shutdown proven on Windows; in-worker logging reaches the file; unit tests for `Task` validation.
+
+---
+
+### Phase 2 — Coordinator & Control Flow
+*The riskiest piece: termination logic and graceful shutdown. Still no real scan logic.*
+
+- `orchestration/coordinator.py`: fan-out loop; `pending` counter; heartbeat tracking; `_check_worker_deadlines()`; keyboard interrupt handling.
+- `orchestration/progress.py`: two-panel `rich.Live` display wired to coordinator counters.
+- Simulated task chain: `ENUM_DIR` stub returns synthetic `new_tasks` of `SCAN_FILE`; `SCAN_FILE` stub returns synthetic counters. End-to-end fan-out verified without real file I/O.
+- Graceful `Ctrl+C` tested: partial results flushed, workers joined, no orphan processes.
+
+**Exit criteria:** coordinator reaches `pending == 0` correctly on simulated tree; Ctrl+C exits cleanly within 5 seconds.
+
+---
+
+### Phase 3 — Re-contract & Wire Business Logic
+*First real scan. Business logic re-contracted and re-attached under the new interfaces.*
+
+- `protocols.py`: `DataHandler`, `FileHandler`, `OutputSink`, `ScannableItem` protocols.
+- `orchestration/sources.py`: `FilesystemItem`.
+- `models/config.py`: validated `Config` (replaces `classes.py` getter-soup).
+- `models/results.py`: `ResultRecord` with lineage fields.
+- Real `handle_enum_dir` (walks a directory, produces `ENUM_DIR` + `SCAN_FILE` tasks).
+- Real `handle_scan_file` (uses `FileHandler` + `DataHandler` chain, returns findings).
+- All `outputhandlers/` re-implemented as `OutputSink`s.
+- Re-contracted `datahandlers/` and `filehandlers/` (snake_case, `ScannableItem`-based).
+- `cli/` scaffolding wired to `run_scan()`.
+- End-to-end directory scan produces correct CSV/JSON/text output.
+
+**Exit criteria:** full scan of `testdata/` produces correct output; unit tests for each handler in isolation (no process tree).
+
+---
+
+### Phase 4 — Hardening & Parity
+*Reliability, the output baseline, and coverage floor.*
+
+- Heartbeat deadline monitoring and targeted worker restart.
+- `base64-xml-test.xml` completes in < 5 minutes with timeout logged.
+- Crash-before-heartbeat re-queue logic.
+- Baseline comparison: 2.0 output vs. 1.x baseline (CSV, JSON, text).
+- Old `ProcessManager`, `queuefuncs`, `filescan`, `classes.ProcessManager`, `SENTINEL` deleted.
+- Test coverage ≥ 80%; ruff + mypy fully clean.
+
+**Exit criteria:** all reliability tests pass; baseline comparison clean; no old orchestration code remains.
+
+---
+
+### Phase 5 — ZIP Support (First Feature)
+*Proves Goal 2: ZIP adds a task type and a ScannableItem producer with zero changes to worker or coordinator.*
+
+- `orchestration/sources.py`: `ArchiveMemberItem`.
+- `TaskType.ENUM_ARCHIVE_MEMBERS` + `TaskType.SCAN_ARCHIVE_MEMBER` added to dispatch table.
+- `handle_enum_archive_members` and `handle_scan_archive_member` handlers.
+- Archive config section, CLI flags, safety limits.
+- All requirements from [ZIP_HANDLING_PLAN.md](./ZIP_HANDLING_PLAN.md).
+
+**Exit criteria:** ZIP enumeration and member scanning run under the task queue architecture with no changes to `coordinator.py` or `worker.py`.
+
+---
+
+## Open Decisions
+
+| # | Decision | Status |
+|---|---|---|
+| 1 | Coordinator in main process vs. its own process | **Decided: main process.** Simplicity is its own benefit; revisit only if result-drain loop provably becomes a bottleneck. |
+| 2 | Timeout mechanism | **Decided: heartbeat + targeted worker restart.** Per-task `mp.Pool(1)` rejected for Windows spawn overhead. |
+| 3 | Config/model library | **Decided: Pydantic v2 throughout.** Only `WorkerContext` uses `dataclass` (documented exception). |
+| 4 | Temp workspace scope | **Decided: per-task, always cleaned in `try/finally`.** Streaming via `open_stream()` is the preferred path; `materialize()` to a temp file is a named fallback only for handlers that provably cannot accept a stream. The security trade-off (temp PII copy) is documented and the footprint is minimized. |
+| 5 | Log listener implementation | **Decided: `QueueListener` thread in coordinator.** Simpler than a dedicated process; revisit if file I/O contends with the result-drain loop. |
+| 6 | Secure deletion library for temp files | **Open.** stdlib has no secure-delete primitive. A well-maintained cross-platform PyPI package is required (overwrite-then-delete); selection needs research before Phase 5. Candidates to evaluate: maintenance status, Windows/macOS/Linux coverage, SSD vs. HDD behavior, license. |
 
 ---
 
 ## Success Criteria
 
-- [ ] All tests pass (unit, integration, e2e)
-- [ ] Ruff linting: 0 violations
-- [ ] Type hint coverage: 100%
-- [ ] Test coverage: ≥ 80%
-- [ ] base64-xml-test.xml completes in <5 minutes
-- [ ] Output formats match baseline (CSV, JSON, TXT identical)
-- [ ] No SENTINEL timeout errors in logs
-- [ ] Graceful shutdown on Ctrl+C
-- [ ] Code review: approved by project maintainer
+- [ ] Entire orchestration layer is new code under `orchestration/`; old process code deleted.
+- [ ] All identifiers snake_case / PascalCase / UPPER_CASE; ruff `N` + mypy clean.
+- [ ] Business logic unit-testable with no process tree.
+- [ ] `base64-xml-test.xml` completes < 5 minutes; timeout logged; run never hangs.
+- [ ] Graceful `Ctrl+C` with full cleanup (no temp files, no orphan processes).
+- [ ] 2.0 output baseline set with lineage fields present; baseline comparison passes.
+- [ ] ZIP support (Phase 5) adds task types and a `ScannableItem` producer with zero changes to `coordinator.py` or `worker.py`.
+- [ ] Test coverage ≥ 80%.
