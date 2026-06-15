@@ -12,6 +12,7 @@ class TaskType(StrEnum):
     ENUM_DIR = "enum_dir"
     SCAN_FILE = "scan_file"
     NOOP = "noop"
+    SLOW_TEST = "slow_test"  # test-only: handler sleeps 120s to trigger deadline detection; remove in Phase 3
     # Archive types arrive with ZIP (Phase 5) — no orchestration change required:
     # ENUM_ARCHIVE_MEMBERS = "enum_archive_members"
     # SCAN_ARCHIVE_MEMBER = "scan_archive_member"

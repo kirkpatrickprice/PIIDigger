@@ -29,8 +29,84 @@ def _handle_noop(task: Task, ctx: WorkerContext, logger: logging.Logger) -> Task
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 2 stubs — replace with real filesystem handlers in Phase 3
+# ---------------------------------------------------------------------------
+
+
+def _handle_enum_dir_stub(task: Task, _ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
+    """Synthetic directory enumeration — no filesystem I/O.
+
+    depth == 0: fans out to 2 child ENUM_DIR tasks (depth=1) + 3 SCAN_FILE tasks.
+    depth >= 1: leaf node; returns only a dirs_scanned counter.
+    Replace with handle_enum_dir() in Phase 3.
+    """
+    depth: int = int(task.payload.get("depth", 0))
+    logger.debug("enum_dir stub depth=%d task=%s", depth, task.task_id)
+
+    if depth >= 1:
+        return TaskResult(
+            task_id=task.task_id,
+            task_type=task.task_type,
+            status="ok",
+            counters={"dirs_scanned": 1},
+            worker_pid=os.getpid(),
+        )
+
+    new_tasks: list[dict[str, Any]] = [
+        {"task_type": TaskType.ENUM_DIR, "payload": {"path": "/synthetic/child/1", "depth": 1}},
+        {"task_type": TaskType.ENUM_DIR, "payload": {"path": "/synthetic/child/2", "depth": 1}},
+        {"task_type": TaskType.SCAN_FILE, "payload": {"path": "/synthetic/file1.txt"}},
+        {"task_type": TaskType.SCAN_FILE, "payload": {"path": "/synthetic/file2.txt"}},
+        {"task_type": TaskType.SCAN_FILE, "payload": {"path": "/synthetic/file3.txt"}},
+    ]
+    return TaskResult(
+        task_id=task.task_id,
+        task_type=task.task_type,
+        status="ok",
+        new_tasks=new_tasks,
+        counters={"dirs_found": 2, "files_found": 3, "dirs_scanned": 1},
+        worker_pid=os.getpid(),
+    )
+
+
+def _handle_scan_file_stub(task: Task, _ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
+    """Synthetic file scan — no filesystem I/O.
+
+    Returns fixed counters only.  Replace with handle_scan_file() in Phase 3.
+    """
+    logger.debug("scan_file stub task=%s", task.task_id)
+    return TaskResult(
+        task_id=task.task_id,
+        task_type=task.task_type,
+        status="ok",
+        counters={"files_scanned": 1, "bytes_scanned": 1024},
+        worker_pid=os.getpid(),
+    )
+
+
+def _handle_slow_test(task: Task, _ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
+    """Sleep for 120 seconds to trigger coordinator deadline detection.
+
+    TEST-ONLY — used exclusively by test_deadline_detection_terminates_hung_worker.
+    Remove from DISPATCH in Phase 3 when real handlers replace all stubs.
+    """
+    logger.debug("slow_test sleeping task=%s", task.task_id)
+    time.sleep(120)
+    return TaskResult(
+        task_id=task.task_id,
+        task_type=task.task_type,
+        status="ok",
+        worker_pid=os.getpid(),
+    )
+
+
+# Phase 2 stubs in DISPATCH — ENUM_DIR/SCAN_FILE/SLOW_TEST replaced by real handlers in Phase 3
 DISPATCH: dict[TaskType, _HandlerFn] = {
     TaskType.NOOP: _handle_noop,
+    TaskType.ENUM_DIR: _handle_enum_dir_stub,
+    TaskType.SCAN_FILE: _handle_scan_file_stub,
+    TaskType.SLOW_TEST: _handle_slow_test,  # test-only; remove in Phase 3
 }
 
 # ---------------------------------------------------------------------------

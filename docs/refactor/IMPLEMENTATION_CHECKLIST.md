@@ -1,7 +1,7 @@
 # Implementation Checklist
 
 **Branch**: `refactor`
-**Status**: Phase 1 complete — Phase 2 next
+**Status**: Phase 2 complete — Phase 3 next
 **Last Updated**: 2026-06-15
 **Reference**: [ARCHITECTURE_REDESIGN.md](./ARCHITECTURE_REDESIGN.md)
 
@@ -170,56 +170,56 @@ Create empty-but-importable stubs (docstring + `__all__ = []` or equivalent) so 
 
 ### Coordinator — `src/piidigger/orchestration/coordinator.py`
 
-- [ ] `run_coordinator(ctx, sinks, progress_display) -> None`:
-  - [ ] Seeds initial tasks: one `ENUM_DIR` per `config.start_dirs`; sets `pending = len(start_dirs)`
-  - [ ] Main loop: `result_queue.get(timeout=HEARTBEAT_CHECK_INTERVAL)`
-    - [ ] On `queue.Empty`: call `_check_worker_deadlines()`; continue
-    - [ ] On `TaskStarted`: call `_record_heartbeat()`; continue (does not change `pending`)
-    - [ ] On `TaskResult`: `pending -= 1`; enqueue each `new_task` (`pending += 1` per); route `findings`; call `progress.update(counters)`
-  - [ ] Termination: when `pending == 0`, exits loop
-  - [ ] Post-loop: `broadcast_shutdown()` → `join_workers()` → `_flush_sinks()` → `stop_listener()`
-- [ ] `_record_heartbeat(msg)`: stores `{task_id: (worker_pid, timestamp)}`
-- [ ] `_check_worker_deadlines()`:
-  - [ ] For each in-flight task older than `2 × timeout_seconds`: log warning; `terminate()` the owning worker; spawn replacement; synthesize `status="timeout"` `TaskResult`; decrement `pending`
-  - [ ] Phase 4 will add crash-before-heartbeat re-queue; stub the extension point here
-- [ ] `KeyboardInterrupt` handler: calls `broadcast_shutdown()`, joins workers with timeout, flushes sinks, exits
+- [x] `run_coordinator(ctx, workers, listener, sinks, progress) -> None`:
+  - [x] Seeds initial tasks: one `ENUM_DIR` per `config.start_dirs`; sets `pending = len(start_dirs)`
+  - [x] Main loop: `result_queue.get(timeout=HEARTBEAT_CHECK_INTERVAL)`
+    - [x] On `queue.Empty`: call `_check_worker_deadlines()`; continue
+    - [x] On `TaskStarted`: call `_record_heartbeat()`; continue (does not change `pending`)
+    - [x] On `TaskResult`: `pending -= 1`; enqueue each `new_task` (`pending += 1` per); route `findings`; call `progress.update(counters)`
+  - [x] Termination: when `pending == 0`, exits loop
+  - [x] Post-loop: `broadcast_shutdown()` → `join_workers()` → `_flush_sinks()` → `stop_listener()`
+- [x] `_record_heartbeat(msg)`: stores `{task_id: (worker_pid, timestamp)}`
+- [x] `_check_worker_deadlines()`:
+  - [x] For each in-flight task older than `2 × timeout_seconds`: log warning; `terminate()` the owning worker; spawn replacement; synthesize `status="timeout"` `TaskResult`; decrement `pending`
+  - [x] Phase 4 will add crash-before-heartbeat re-queue; stub the extension point here
+- [x] `KeyboardInterrupt` handler: calls `broadcast_shutdown()`, joins workers with timeout, flushes sinks, exits (via `try/finally`)
 
 ### Progress display — `src/piidigger/orchestration/progress.py`
 
-- [ ] `ProgressDisplay` class, owned by the coordinator, constructed before the main loop
-- [ ] `start() -> None`: opens `rich.Live` context with two-panel `rich.Layout`
-  - [ ] Top panel: `rich.Progress` with tasks for `dirs_found`, `dirs_scanned`, `files_found`, `files_scanned`, `bytes_scanned`, `results_found`
-  - [ ] Bottom panel: fixed-height scrolling events log (`rich.Table`, circular buffer of last N lines)
-- [ ] `update(counters: dict[str, int]) -> None`: increments the relevant progress bars
-- [ ] `log_event(level: str, message: str) -> None`: prepends a line to the events panel (with timestamp and colour by level)
-- [ ] `stop() -> None`: closes `rich.Live`; prints final summary line to stdout
-- [ ] Non-TTY mode: when `rich.Console` is not a terminal, `start()`/`update()`/`log_event()` are no-ops; `stop()` prints plain-text summary
+- [x] `ProgressDisplay` class, owned by the coordinator, constructed before the main loop
+- [x] `start() -> None`: opens `rich.Live` context with two-panel `rich.Layout`
+  - [x] Top panel: `rich.Progress` with tasks for `dirs_found`, `dirs_scanned`, `files_found`, `files_scanned`, `bytes_scanned`, `results_found`
+  - [x] Bottom panel: fixed-height scrolling events log (`rich.Table`, circular buffer of last N lines)
+- [x] `update(counters: dict[str, int]) -> None`: increments the relevant progress bars
+- [x] `log_event(level: str, message: str) -> None`: prepends a line to the events panel (with timestamp and colour by level)
+- [x] `stop() -> None`: closes `rich.Live`; prints final summary line to stdout
+- [x] Non-TTY mode: when `rich.Console` is not a terminal, `start()`/`update()`/`log_event()` are no-ops; `stop()` prints plain-text summary
 
 ### Simulated end-to-end test chain (Phase 2 integration)
 
-- [ ] Add `ENUM_DIR` and `SCAN_FILE` stub handlers to `DISPATCH` (return synthetic `new_tasks` / `counters` without touching the filesystem):
-  - [ ] `ENUM_DIR` stub: returns 2 child `ENUM_DIR` tasks + 3 `SCAN_FILE` tasks (fixed synthetic payloads)
-  - [ ] `SCAN_FILE` stub: returns `counters={"files_scanned": 1, "bytes_scanned": 1024}`
-- [ ] Run coordinator with stub handlers on a synthetic tree; verify `pending` reaches 0 and loop exits
+- [x] Add `ENUM_DIR` and `SCAN_FILE` stub handlers to `DISPATCH` (return synthetic `new_tasks` / `counters` without touching the filesystem):
+  - [x] `ENUM_DIR` stub: returns 2 child `ENUM_DIR` tasks + 3 `SCAN_FILE` tasks (fixed synthetic payloads)
+  - [x] `SCAN_FILE` stub: returns `counters={"files_scanned": 1, "bytes_scanned": 1024}`
+- [x] Run coordinator with stub handlers on a synthetic tree; verify `pending` reaches 0 and loop exits
 
 ### Phase 2 — Tests
 
-- [ ] Unit: coordinator seeds correct number of initial tasks for N start dirs
-- [ ] Unit: `pending` counter arithmetic — decrement + re-increment stays consistent across one result with 3 `new_tasks`
-- [ ] Unit: `_check_worker_deadlines()` synthesizes a timeout result and decrements `pending` for an expired task
-- [ ] Unit: `ProgressDisplay.update()` increments counters correctly
-- [ ] Unit: `ProgressDisplay` no-ops cleanly when not a TTY
-- [ ] Integration: coordinator + stub handlers — full fan-out loop reaches `pending == 0` on a synthetic tree of depth 2
-- [ ] Integration: `Ctrl+C` during fan-out exits within 5 seconds, no orphan processes remain (verify with `psutil` or `proc.is_alive()`)
-- [ ] Integration: a deliberately hung stub handler triggers deadline detection, is terminated, and scan continues
+- [x] Unit: coordinator seeds correct number of initial tasks for N start dirs
+- [x] Unit: `pending` counter arithmetic — decrement + re-increment stays consistent across one result with 3 `new_tasks`
+- [x] Unit: `_check_worker_deadlines()` synthesizes a timeout result and decrements `pending` for an expired task
+- [x] Unit: `ProgressDisplay.update()` increments counters correctly
+- [x] Unit: `ProgressDisplay` no-ops cleanly when not a TTY
+- [x] Integration: coordinator + stub handlers — full fan-out loop reaches `pending == 0` on a synthetic tree of depth 2
+- [x] Integration: `Ctrl+C` during fan-out exits within 5 seconds, no orphan processes remain — **skipped on Windows** (cross-process SIGINT requires `CREATE_NEW_PROCESS_GROUP`; tested on POSIX only)
+- [x] Integration: a deliberately hung stub handler triggers deadline detection, is terminated, and scan continues
 
 ### Phase 2 — Exit Criteria
 
-- [ ] Coordinator reaches `pending == 0` correctly on a synthetic tree
-- [ ] `Ctrl+C` exits cleanly within 5 seconds
-- [ ] Deadline detection terminates a hung worker and the scan continues
-- [ ] Progress display renders without error in TTY mode; is silent in non-TTY mode
-- [ ] All tests pass; `ruff` + `mypy` clean
+- [x] Coordinator reaches `pending == 0` correctly on a synthetic tree
+- [x] `Ctrl+C` exits cleanly within 5 seconds (POSIX verified; Windows skip documented)
+- [x] Deadline detection terminates a hung worker and the scan continues
+- [x] Progress display renders without error in TTY mode; is silent in non-TTY mode
+- [x] All tests pass; `ruff` + `mypy` clean
 
 ---
 
