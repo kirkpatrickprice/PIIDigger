@@ -288,4 +288,4 @@ Use this checklist to track progress through each phase of the refactor.
 
 - [ARCHITECTURE_REDESIGN.md](./ARCHITECTURE_REDESIGN.md) - Full design rationale
 - [docs/CURRENT_ISSUES.md](./CURRENT_ISSUES.md) - Detailed problem analysis
-- [docs/TESTING_PLAN.md](./TESTING_PLAN.md) - Comprehensive test strategy
+- [docs/TESTING_STRATEGY.md](./TESTING_STRATEGY.md) - Comprehensive test strategy
