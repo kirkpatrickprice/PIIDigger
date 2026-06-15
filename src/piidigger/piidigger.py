@@ -1,16 +1,15 @@
-import argparse
+import json
 import multiprocessing as mp
 import sys
-import textwrap
 import traceback
 from ctypes import c_int, c_uint64
 from datetime import datetime
-from os import makedirs, cpu_count
+from os import cpu_count, makedirs
 from pathlib import Path
 from time import sleep
 
+import click
 
-import json
 try:
     from wakepy import keep
     WAKEPY = True
@@ -19,13 +18,8 @@ except ImportError:
     pass
 
 import piidigger.classes as classes
-from piidigger import console
-from piidigger import filescan
-from piidigger import globalfuncs
-from piidigger import queuefuncs
-from piidigger import __version__
-from piidigger.globalvars import errorCodes
-from piidigger.globalvars import SENTINEL
+from piidigger import __version__, console, filescan, globalfuncs, queuefuncs
+from piidigger.globalvars import SENTINEL, errorCodes
 from piidigger.logmanager import LogManager
 
 
@@ -37,76 +31,6 @@ def cleanup(queues: dict,):
     for q in queues:
         if not queues[q].empty():
             queuefuncs.clearQ(queues[q])
-
-def commandLineParser() -> argparse.ArgumentParser:
-    '''Handles the command line options'''
-    parser = argparse.ArgumentParser(
-    prog=sys.argv[0].split('/')[-1],
-    formatter_class=argparse.RawDescriptionHelpFormatter,
-    description=textwrap.dedent('''
-        Search the file system for Personally Identifiable Information
-
-        NOTES:
-            * All program configuration is kept in \'piidigger.toml\' -- a TOML-formatted configuration file
-            * A default configuration will be used if the default 'piidigger.toml' file doesn't exist
-        ''')
-    )
-
-    configControl = parser.add_argument_group(title='Configuration')
-    configControl.add_argument(
-        '-c', '--create-conf',
-        dest='createConfigFile',
-        default='',
-        help='Create a default configuration file for editing/reuse.',
-        )
-    configControl.add_argument(
-        '-d', '--default-conf',
-        dest='defaultConfig',
-        action='store_true',
-        help='Use the default, internal config.'
-        )
-    configControl.add_argument(
-        '-f', '--conf-file', 
-        dest='configFile', 
-        default='piidigger.toml', 
-        help='path/to/configfile.toml configuration file (Default = "piidigger.toml").  If the file is not found, the default, internal configuration will be used.'
-        )
-    configControl.add_argument(
-        '-p', '--max-process',
-        dest='maxProc',
-        default=0,
-        type=int,
-        help='Override the number processes to use for searching files.  Will use the lesser of CPU cores or this value.  On production servers, consider setting this to less than the number of physical CPUs.  See \'--cpu-count\' below.',
-        )
-    
-    miscInfoControl = parser.add_argument_group(title='Misc. Info')
-    miscInfoControl.add_argument(
-        '--cpu-count',
-        dest='cpuCount',
-        action='store_true',
-        help='Show the number of logical CPUs provided by the OS.  Use this to tune performance.  See \'--max-process\' above.'
-    )
-    miscInfoControl.add_argument(
-        '--list-datahandlers',
-        dest='listDH',
-        action='store_true',
-        help='Display the list of data handlers and exit'
-    )
-    miscInfoControl.add_argument(
-        '--list-filetypes',
-        dest='listFT',
-        action='store_true',
-        help='Display the list of file types and exit'
-    )
-    miscInfoControl.add_argument(
-        '--version', '-v',
-        dest='version',
-        action='store_true',
-        help='Display the version number and exit'
-    )
-    
-    return parser.parse_args()
-
 
 def fileHandlerDispatcher(config: classes.Config,
                           queues: dict,
@@ -131,7 +55,7 @@ def fileHandlerDispatcher(config: classes.Config,
             item=queuefuncs.getItem(queues['filesQ'])
             if item == SENTINEL:
                 break
-            if item == None:
+            if item is None:
                 continue
 
             # Set some variables for this item
@@ -177,8 +101,8 @@ def fileHandlerDispatcher(config: classes.Config,
                 logger.debug('%s: Rebuilding result sets into lists', filename)
                 for handler in results['matches']:
                     for key in results['matches'][handler]:
-                        l=list(results['matches'][handler][key])
-                        results['matches'][handler][key]=l
+                        matchList=list(results['matches'][handler][key])
+                        results['matches'][handler][key]=matchList
 
                 # Update the results totals
                 with totals['totalResults'].get_lock():
@@ -282,7 +206,7 @@ def progressLineWorker(totals: dict,
         else:
             if WAKEPY:
                 with keep.presenting() as k:
-                    if k.success:
+                    if k.active:
                         console.normal('Sleep prevention enabled.')
                     else:
                         console.warn('Sleep prevention was unsuccessful.  System may go to sleep during scan.')
@@ -295,44 +219,81 @@ def progressLineWorker(totals: dict,
     finally:
         logger.info('Stopping %s (PID=%d)', mp.current_process().name, mp.current_process().pid)
 
-def main():
+@click.command(
+    context_settings={'help_option_names': ['-h', '--help']},
+    epilog=(
+        'NOTES:\n\n'
+        '  * All program configuration is kept in "piidigger.toml" -- a TOML-formatted configuration file.\n\n'
+        '  * A default configuration will be used if the default "piidigger.toml" file does not exist.'
+    ),
+)
+@click.option(
+    '-c', '--create-conf', 'createConfigFile', default='', metavar='FILE',
+    help='Create a default configuration file for editing/reuse.',
+)
+@click.option(
+    '-d', '--default-conf', 'defaultConfig', is_flag=True,
+    help='Use the default, internal config.',
+)
+@click.option(
+    '-f', '--conf-file', 'configFile', default='piidigger.toml',
+    type=click.Path(), show_default=True,
+    help='path/to/configfile.toml configuration file.  If the file is not found, the default, internal configuration will be used.',
+)
+@click.option(
+    '-p', '--max-process', 'maxProc', default=0, type=int,
+    help='Override the number of processes to use for searching files.  Will use the lesser of CPU cores or this value.  On production servers, consider setting this to less than the number of physical CPUs.  See "--cpu-count" below.',
+)
+@click.option(
+    '--cpu-count', 'cpuCount', is_flag=True,
+    help='Show the number of logical CPUs provided by the OS.  Use this to tune performance.  See "--max-process" above.',
+)
+@click.option(
+    '--list-datahandlers', 'listDH', is_flag=True,
+    help='Display the list of data handlers and exit.',
+)
+@click.option(
+    '--list-filetypes', 'listFT', is_flag=True,
+    help='Display the list of file types and exit.',
+)
+@click.version_option(
+    __version__, '-v', '--version',
+    prog_name='PIIDigger', message='PIIDigger version: %(version)s',
+)
+def main(createConfigFile, defaultConfig, configFile, maxProc, cpuCount, listDH, listFT):
+    '''Search the file system for Personally Identifiable Information.'''
     start=datetime.now()
-    args=commandLineParser()
-    if args.cpuCount:
-        print('CPU cores:', cpu_count())
+    if cpuCount:
+        click.echo(f'CPU cores: {cpu_count()}')
         sys.exit(errorCodes['ok'])
 
-    if args.listDH:
-        print('Data handler modules: ', globalfuncs.getSupportedDataHandlerNames())
+    if listDH:
+        click.echo(f'Data handler modules:  {globalfuncs.getSupportedDataHandlerNames()}')
         sys.exit(errorCodes['ok'])
 
-    if args.listFT:
-        print('File extns: ', globalfuncs.getSupportedFileExts())
-        print('MIME types: ', globalfuncs.getSupportedFileMimes())
+    if listFT:
+        click.echo(f'File extns:  {globalfuncs.getSupportedFileExts()}')
+        click.echo(f'MIME types:  {globalfuncs.getSupportedFileMimes()}')
         sys.exit(errorCodes['ok'])
 
-    if args.version:
-        print('PIIDigger version:', __version__)
-        sys.exit(errorCodes['ok'])
-
-    if len(args.createConfigFile) >0:
-        tomlFile = str(args.createConfigFile) if str(args.createConfigFile).endswith('.toml') else str(args.createConfigFile)+'.toml'
+    if len(createConfigFile) >0:
+        tomlFile = str(createConfigFile) if str(createConfigFile).endswith('.toml') else str(createConfigFile)+'.toml'
         configFileWritten=globalfuncs.writeDefaultConfig(tomlFile)
 
         if configFileWritten=='Success':
-            console.normal('Default configuration written to '+args.createConfigFile)
+            console.normal('Default configuration written to '+createConfigFile)
             sys.exit(errorCodes['ok'])
         else:
-            console.error('Config file not written: %s' % (configFileWritten))
+            console.error(f'Config file not written: {configFileWritten}')
             sys.exit(errorCodes['unknown'])
 
-    if args.defaultConfig:
+    if defaultConfig:
         config=classes.Config(configFile='', useDefault=True)
     else:
-        config=classes.Config(configFile=args.configFile)
+        config=classes.Config(configFile=configFile)
 
-    if args.maxProc>0:
-        config.setMaxProcs(min(cpu_count(), args.maxProc))
+    if maxProc>0:
+        config.setMaxProcs(min(cpu_count(), maxProc))
 
     try:
         # Create queues and other structures needed for asynchronous implementation
@@ -384,7 +345,7 @@ def main():
         if globalfuncs.getOSType() == 'linux':
             console.warn('Sleep prevention disabled on Linux. Consider using \'screen\' or \'tmux\' to ensure that PIIDigger survives an SSH disconnect.')
         
-        console.normal('Scanning %s for files matching %s' % (config.getStartDirs(), config.getDataHandlers()))
+        console.normal(f'Scanning {config.getStartDirs()} for files matching {config.getDataHandlers()}')
         
         #####################################
         # Bring up the pipe line in reverse order -- starting with results and working back to scanning for directories
@@ -410,8 +371,8 @@ def main():
                     name='findDirsWorker',
                     num_processes=1,
                     args=(config, queues, totals, stopEvent, logManager,),)
-        console.normal('Starting %d file scanner processes' % (config.getMaxFilesScanProcs()))
-        console.normal('Starting %d file handler processes' % (config.getMaxProcs()))
+        console.normal(f'Starting {config.getMaxFilesScanProcs()} file scanner processes')
+        console.normal(f'Starting {config.getMaxProcs()} file handler processes')
 
         # Start the progress line worker in a separate process manager
         progressPM=classes.ProcessManager(name='progressPM',
@@ -440,7 +401,7 @@ def main():
         except UnboundLocalError:
             pass
     except Exception:
-        console.error('An unknown error was encountered.  Error message was captured in %s.' % config.getLogFile())
+        console.error(f'An unknown error was encountered.  Error message was captured in {config.getLogFile()}.')
         logger.error(traceback.print_exc())
     else:
         queues['logQ'].put(SENTINEL)
