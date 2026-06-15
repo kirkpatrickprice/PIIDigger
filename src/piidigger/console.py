@@ -1,135 +1,69 @@
-""" getTerminalSize()
- - get width and height of console
- - works on linux,os x,windows,cygwin(windows)
- 
- http://code.activestate.com/recipes/440694-determine-size-of-console-window-on-windows/
+"""Console output helpers backed by Rich.
+
+This module replaces the previous hand-rolled cross-platform terminal code
+(colorama + ctypes/ioctl/tput terminal sizing).  Rich handles ANSI colour,
+Windows consoles, terminal width detection, and graceful degradation when
+output is not a TTY (e.g. piped to a file or running in CI).
+
+Public API is unchanged: ``normal``, ``warn``, ``error``, ``status`` and
+``getTerminalSize``.
+
+Stream convention: informational/list output goes to stdout so it can be piped;
+warnings, errors and the live progress line go to stderr so they never pollute
+piped stdout.
+
+The live ``status`` line stays a simple carriage-return write for now.  Wiring a
+multiprocess-safe ``rich.progress`` display owned by the scan coordinator is part
+of the task-queue refactor, not this module.
 """
 
-import platform
 import sys
 
-try:
-    from colorama import Fore, Back, Style, just_fix_windows_console
-    colorize=True
-except Exception as e:
-    print('Colorama module failed to load.  Colorized output will be disabled.')
-    colorize=False
+from rich.console import Console
 
-current_os = platform.system()
-if current_os == "Windows":
-    just_fix_windows_console()
+# Two consoles so data (stdout) and diagnostics/progress (stderr) stay separate.
+_out = Console(highlight=False)
+_err = Console(stderr=True, highlight=False)
 
-if colorize:
-    WARN=Fore.YELLOW
-    ERROR=Fore.RED
-    NORMAL=Fore.RESET
-else:
-    WARN=''
-    ERROR=''
-    NORMAL=''
-
-__all__=['getTerminalSize', 'warn', 'error', 'normal']
+__all__ = ['getTerminalSize', 'warn', 'error', 'normal', 'status']
 
 
-def getTerminalSize():
+def getTerminalSize() -> tuple[int, int]:
+    '''Return the terminal as a (width, height) tuple (Rich falls back to 80x25).'''
+    size = _err.size
+    return (size.width, size.height)
+
+
+def normal(s: str) -> None:
+    '''Print an informational message to stdout.'''
+    _out.print(s, markup=False, highlight=False)
+
+
+def status(s: str) -> None:
+    '''Write an in-place (carriage-return) progress line to stderr.
+
+    Skipped when stderr is not a terminal so redirected logs are not spammed
+    with partial carriage-return updates.
     '''
-    Returns a tuple of (X,Y) screen dimensions
-    '''
-    tuple_xy=None
-    if current_os == 'Windows':
-        tuple_xy = _getTerminalSize_windows()
-        if tuple_xy is None:
-            tuple_xy = _getTerminalSize_tput()
-            # needed for window's python in cygwin's xterm!
-    if current_os == 'Linux' or current_os == 'Darwin' or  current_os.startswith('CYGWIN'):
-        tuple_xy = _getTerminalSize_linux()
-    if tuple_xy is None:
-        #default
-        tuple_xy = (80, 25)      # default value
-    return tuple_xy
-
-def _getTerminalSize_windows():
-    res=None
-    try:
-        from ctypes import windll, create_string_buffer
-
-        # stdin handle is -10
-        # stdout handle is -11
-        # stderr handle is -12
-
-        h = windll.kernel32.GetStdHandle(-12)
-        csbi = create_string_buffer(22)
-        res = windll.kernel32.GetConsoleScreenBufferInfo(h, csbi)
-    except:
-        return None
-    if res:
-        import struct
-        (bufx, bufy, curx, cury, wattr,
-         left, top, right, bottom, maxx, maxy) = struct.unpack("hhhhHhhhhhh", csbi.raw)
-        sizex = right - left + 1
-        sizey = bottom - top + 1
-        return sizex, sizey
-    else:
-        return None
-
-def _getTerminalSize_tput():
-    # get terminal width
-    # src: http://stackoverflow.com/questions/263890/how-do-i-find-the-width-height-of-a-terminal-window
-    try:
-        import subprocess
-        proc=subprocess.Popen(["tput", "cols"],stdin=subprocess.PIPE,stdout=subprocess.PIPE)
-        output=proc.communicate(input=None)
-        cols=int(output[0])
-        proc=subprocess.Popen(["tput", "lines"],stdin=subprocess.PIPE,stdout=subprocess.PIPE)
-        output=proc.communicate(input=None)
-        rows=int(output[0])
-        return (cols,rows)
-    except:
-        return None
+    if not _err.is_terminal:
+        return
+    sys.stderr.write('\r' + s)
+    sys.stderr.flush()
 
 
-def _getTerminalSize_linux():
-    def ioctl_GWINSZ(fd):
-        try:
-            import fcntl
-            import termios
-            import struct
-            import os
-            cr = struct.unpack('hh', fcntl.ioctl(fd, termios.TIOCGWINSZ,'1234'))
-        except:
-            return None
-        return cr
-    cr = ioctl_GWINSZ(0) or ioctl_GWINSZ(1) or ioctl_GWINSZ(2)
-    if not cr:
-        try:
-            fd = os.open(os.ctermid(), os.O_RDONLY)
-            cr = ioctl_GWINSZ(fd)
-            os.close(fd)
-        except:
-            pass
-    if not cr:
-        try:
-            cr = (env['LINES'], env['COLUMNS'])
-        except:
-            return None
-    return int(cr[1]), int(cr[0])
+def warn(s: str) -> None:
+    '''Print a warning (prefixed and yellow) to stderr.'''
+    _err.print(f'[warn] {s}', style='yellow', markup=False, highlight=False)
 
-def normal(s: str):
-    print(NORMAL + s)
 
-def status(s: str):
-    sys.stdout.write('\r'+s)
-    sys.stdout.flush()
+def error(s: str) -> None:
+    '''Print an error (prefixed and red) to stderr.'''
+    _err.print(f'[error] {s}', style='red', markup=False, highlight=False)
 
-def warn(s: str):
-    print(WARN + '[warn] ' + s + NORMAL)
-
-def error(s: str):
-    print(ERROR + '[error] ' + s + NORMAL)
 
 if __name__ == "__main__":
-    sizex,sizey=getTerminalSize()
-    print('width =',sizex,'height =',sizey)
+    sizex, sizey = getTerminalSize()
+    normal(f'width = {sizex} height = {sizey}')
     error('This is error text')
     warn('This is warning text')
-    normal('This is %s text' % ('normal'))
+    normal('This is normal text')
