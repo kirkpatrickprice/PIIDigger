@@ -110,7 +110,7 @@ ignore = [
 "src/piidigger/logmanager.py" = ["N"]
 "src/piidigger/__main__.py" = ["N"]
 "piidigger.py" = ["N"]  # legacy repo-root PyInstaller entry wrapper
-"tests/**" = ["S101", "N"]  # asserts are expected in tests
+"tests/**" = ["S101", "S108", "S301", "N"]  # asserts, /tmp strings, and pickle are expected in tests
 # Handler packages re-export submodules so the dynamic __dir__() discovery in
 # globalfuncs can find them; the imports are intentional, not dead code.
 "**/__init__.py" = ["F401"]
@@ -169,4 +169,5 @@ markers = [
     "utils: mark a test as a utility test",
     "slow: mark a test as slow (timeout/reliability tests)",
     "e2e: mark a test as an end-to-end test (full scan + baseline)",
+    "integration: mark a test as an integration test (spins up real processes)",
     ]

@@ -1,7 +1,7 @@
 # Implementation Checklist
 
 **Branch**: `refactor`
-**Status**: Ready — Phase 0 next
+**Status**: Phase 1 complete — Phase 2 next
 **Last Updated**: 2026-06-15
 **Reference**: [ARCHITECTURE_REDESIGN.md](./ARCHITECTURE_REDESIGN.md)
 
@@ -102,65 +102,65 @@ Create empty-but-importable stubs (docstring + `__all__ = []` or equivalent) so 
 
 ### Task model — `src/piidigger/models/tasks.py`
 
-- [ ] `TaskType` enum: `ENUM_DIR`, `SCAN_FILE`, `NOOP` (testing only); archive types reserved as comments
-- [ ] `Task` Pydantic model (frozen): `task_id`, `task_type`, `payload`, `timeout_seconds`
-  - [ ] `task_id` defaults to `uuid4().hex`
-  - [ ] `timeout_seconds` validated: `ge=1, le=600`
-  - [ ] Picklable: verified by round-trip test
-- [ ] `TaskResult` Pydantic model: `task_id`, `task_type`, `status`, `new_tasks`, `findings`, `counters`, `error_message`, `duration_seconds`, `worker_pid`
-  - [ ] `status` constrained to `Literal["ok", "timeout", "error"]`
-  - [ ] `duration_seconds` validated: `ge=0.0`
-- [ ] `TaskStarted` dataclass or simple namedtuple: `task_id`, `worker_pid` (heartbeat message — not a `TaskResult`)
-- [ ] `SHUTDOWN` sentinel constant (module-level; replaces 1.x `SENTINEL` string)
+- [x] `TaskType` enum: `ENUM_DIR`, `SCAN_FILE`, `NOOP` (testing only); archive types reserved as comments
+- [x] `Task` Pydantic model (frozen): `task_id`, `task_type`, `payload`, `timeout_seconds`
+  - [x] `task_id` defaults to `uuid4().hex`
+  - [x] `timeout_seconds` validated: `ge=1, le=600`
+  - [x] Picklable: verified by round-trip test
+- [x] `TaskResult` Pydantic model: `task_id`, `task_type`, `status`, `new_tasks`, `findings`, `counters`, `error_message`, `duration_seconds`, `worker_pid`
+  - [x] `status` constrained to `Literal["ok", "timeout", "error"]`
+  - [x] `duration_seconds` validated: `ge=0.0`
+- [x] `TaskStarted` dataclass: `task_id`, `worker_pid` (heartbeat message — not a `TaskResult`)
+- [x] `SHUTDOWN` sentinel constant (module-level; replaces 1.x `SENTINEL` string)
 
 ### WorkerContext — `src/piidigger/orchestration/context.py`
 
-- [ ] `WorkerContext` frozen dataclass: `config`, `task_queue`, `result_queue`, `log_queue`, `stop_event`
-- [ ] Docstring states: why `dataclass` not Pydantic; what is and is not allowed (no `Logger`, no `Console`)
-- [ ] Verified picklable across `mp.spawn` on Windows
+- [x] `WorkerContext` frozen dataclass: `config`, `task_queue`, `result_queue`, `log_queue`, `stop_event`
+- [x] Docstring states: why `dataclass` not Pydantic; what is and is not allowed (no `Logger`, no `Console`)
+- [x] Verified picklable across `mp.spawn` on Windows
 
 ### Logging setup — `src/piidigger/orchestration/logging_setup.py`
 
-- [ ] `build_worker_logger(log_queue, name) -> logging.Logger`: attaches `QueueHandler`; called inside each process
-- [ ] `start_listener(log_queue, log_file, log_level) -> QueueListener`: creates `FileHandler`, starts listener thread
-- [ ] `stop_listener(listener)`: stops the listener; called after all workers have joined
-- [ ] Verified: log records written inside a worker process appear in the log file
+- [x] `build_worker_logger(log_queue, name) -> logging.Logger`: attaches `QueueHandler`; called inside each process
+- [x] `start_listener(log_queue, log_file, log_level) -> QueueListener`: creates `FileHandler`, starts listener thread
+- [x] `stop_listener(listener)`: stops the listener; called after all workers have joined
+- [x] Verified: log records written inside a worker process appear in the log file
 
 ### Worker — `src/piidigger/orchestration/worker.py`
 
-- [ ] `DISPATCH` dict: maps `TaskType` → handler callable; initially contains only `NOOP` handler
-- [ ] `worker_loop(ctx: WorkerContext) -> None`:
-  - [ ] Builds its own logger via `build_worker_logger()`
-  - [ ] Loop: `task_queue.get()` → check `SHUTDOWN` → put `TaskStarted` heartbeat → `_dispatch()` → `try/finally _cleanup_temp_workspace()` → put `TaskResult`
-  - [ ] `_dispatch()` wraps handler in `try/except`; exceptions become `status="error"` results, never propagate
-  - [ ] `_cleanup_temp_workspace()`: no-op in Phase 1; stub with documented interface
-  - [ ] Handles `KeyboardInterrupt` cleanly: finishes current task, exits loop
-- [ ] `_handle_noop(task, ctx, logger) -> TaskResult`: returns `status="ok"` instantly; used for integration testing only
+- [x] `DISPATCH` dict: maps `TaskType` → handler callable; initially contains only `NOOP` handler
+- [x] `worker_loop(ctx: WorkerContext) -> None`:
+  - [x] Builds its own logger via `build_worker_logger()`
+  - [x] Loop: `task_queue.get()` → check `SHUTDOWN` → put `TaskStarted` heartbeat → `_dispatch()` → `try/finally _cleanup_temp_workspace()` → put `TaskResult`
+  - [x] `_dispatch()` wraps handler in `try/except`; exceptions become `status="error"` results, never propagate
+  - [x] `_cleanup_temp_workspace()`: no-op in Phase 1; stub with documented interface
+  - [x] Handles `KeyboardInterrupt` cleanly: finishes current task, exits loop
+- [x] `_handle_noop(task, ctx, logger) -> TaskResult`: returns `status="ok"` instantly; used for integration testing only
 
-### Worker pool helpers — `src/piidigger/orchestration/worker.py` (or `worker_pool.py`)
+### Worker pool helpers — `src/piidigger/orchestration/worker.py`
 
-- [ ] `start_worker_pool(ctx, n_workers) -> list[mp.Process]`: spawns N `worker_loop` processes
-- [ ] `broadcast_shutdown(task_queue, n_workers)`: puts N `SHUTDOWN` sentinels
-- [ ] `join_workers(workers, timeout)`: joins all; force-terminates any still alive after timeout; logs each outcome
+- [x] `start_worker_pool(ctx, n_workers) -> list[mp.Process]`: spawns N `worker_loop` processes
+- [x] `broadcast_shutdown(task_queue, n_workers)`: puts N `SHUTDOWN` sentinels
+- [x] `join_workers(workers, timeout)`: joins all; force-terminates any still alive after timeout; logs each outcome
 
 ### Phase 1 — Tests
 
-- [ ] Unit: `Task` creation with valid fields
-- [ ] Unit: `Task` rejects invalid `timeout_seconds` (out of range)
-- [ ] Unit: `Task` rejects unknown `task_type`
-- [ ] Unit: `Task` pickles and unpickles cleanly (`pickle.dumps` / `pickle.loads`)
-- [ ] Unit: `TaskResult` rejects invalid `status` literal
-- [ ] Unit: `build_worker_logger()` returns a logger that puts records on `log_queue`
-- [ ] Integration: start pool of 2 workers, dispatch 10 `NOOP` tasks, collect all 10 results, shut down cleanly
-- [ ] Integration: log records from workers appear in log file after `stop_listener()`
-- [ ] Integration: `WorkerContext` with real `mp.Queue` and `mp.Event` pickles across `spawn` boundary
+- [x] Unit: `Task` creation with valid fields
+- [x] Unit: `Task` rejects invalid `timeout_seconds` (out of range)
+- [x] Unit: `Task` rejects unknown `task_type`
+- [x] Unit: `Task` pickles and unpickles cleanly (`pickle.dumps` / `pickle.loads`)
+- [x] Unit: `TaskResult` rejects invalid `status` literal
+- [x] Unit: `build_worker_logger()` returns a logger that puts records on `log_queue`
+- [x] Integration: start pool of 2 workers, dispatch 10 `NOOP` tasks, collect all 10 results, shut down cleanly
+- [x] Integration: log records from workers appear in log file after `stop_listener()`
+- [x] Unit: `Config` (WorkerContext custom payload) pickles cleanly; NOOP pool integration test proves full spawn-boundary transit
 
 ### Phase 1 — Exit Criteria
 
-- [ ] Pool start → dispatch → result → shutdown cycle works on Windows `spawn`
-- [ ] Worker log records reach the file handler
-- [ ] All unit and integration tests pass
-- [ ] `ruff check` + `mypy` clean on all Phase 1 files
+- [x] Pool start → dispatch → result → shutdown cycle works on Windows `spawn`
+- [x] Worker log records reach the file handler
+- [x] All unit and integration tests pass
+- [x] `ruff check` + `mypy` clean on all Phase 1 files
 
 ---
 
