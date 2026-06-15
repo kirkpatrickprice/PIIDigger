@@ -15,8 +15,13 @@ jobs:
         with:
           cache: 'pip'
       - name: Install dependencies
-        run: python -m pip install -e .[test]
+        run: python -m pip install -e .[dev,test]
+      - name: Lint (ruff)
+        run: python -m ruff check .
+      # `ruff format --check` is intentionally deferred: the legacy tree is being
+      # reformatted module-by-module as the queue refactor rewrites it, rather
+      # than in one large churn. Re-enable once the tree is fully formatted.
+      - name: Type check (mypy)
+        run: python -m mypy src/piidigger
       - name: Run tests
         run: python -m pytest
-      # - name: Run linter
-      #   run: python -m pylint
