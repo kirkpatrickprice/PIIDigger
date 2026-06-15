@@ -4,13 +4,12 @@ import os
 import pathlib
 import platform
 import string
+import tomllib
 
-import tomli
-
-from piidigger import console
-from piidigger import globalfuncs
+from piidigger import console, globalfuncs
 from piidigger.getmime import testMagic
 from piidigger.logmanager import LogManager
+
 
 class File:
     def __init__(self, f: pathlib.Path, mimeType: str):
@@ -56,13 +55,13 @@ class Config:
         else:
             try:
                 with open(configFile, 'rb') as file:
-                    self.config = tomli.load(file)
+                    self.config = tomllib.load(file)
             except FileNotFoundError:
-                console.warn('Configuration file %s not found. Using default configuration.' % configFile)
+                console.warn(f'Configuration file {configFile} not found. Using default configuration.')
                 configFile = 'Internal Config'
                 self.config=globalfuncs.getDefaultConfig()
-            except tomli.TOMLDecodeError as e:
-                console.error('Invalid configuration (%s)' % (configFile))
+            except tomllib.TOMLDecodeError as e:
+                console.error(f'Invalid configuration ({configFile})')
                 console.error(str(e))
                 exit(globalfuncs.errorCodes['invalidConfig'])
         
@@ -76,9 +75,9 @@ class Config:
             self.config['dataHandlers'] = globalfuncs.getSupportedDataHandlerNames()
         else:
             configHandlers=self.config['dataHandlers']
-            notFound = [n for n in configHandlers if not n in globalfuncs.getSupportedDataHandlerNames()]
+            notFound = [n for n in configHandlers if n not in globalfuncs.getSupportedDataHandlerNames()]
             if notFound:
-                console.error("Unexpected data handler found in configuration file (%s)" % (configFile))
+                console.error(f"Unexpected data handler found in configuration file ({configFile})")
                 console.error("The following data handlers will be ignored: " + str(notFound))
                 self.config['dataHandlers'] = [n for n in configHandlers if n not in notFound]
         
@@ -105,9 +104,9 @@ class Config:
 
         # Fix any Windows paths replacing ALL with the actual drive letters and confirming that hard-coded starting directories exist
         if _isAll(self.config['includeFiles']['startDirs']['windows']):
-            self.config['includeFiles']['startDirs']['windows'] = ['%s:\\' % d for d in string.ascii_uppercase if os.path.exists('%s:' % d)]        
+            self.config['includeFiles']['startDirs']['windows'] = [f'{d}:\\' for d in string.ascii_uppercase if os.path.exists(f'{d}:')]        
         elif not all([os.path.isdir(d) for d in self.getStartDirs()]):
-            console.error("Starting directory does not exist (%s). Check configuration file (%s)." % (self.getStartDirs(), configFile))
+            console.error(f"Starting directory does not exist ({self.getStartDirs()}). Check configuration file ({configFile}).")
             exit(globalfuncs.errorCodes['invalidConfig'])
 
 
@@ -117,9 +116,9 @@ class Config:
         else:
             # Before comparing to the expected list, fix the YAML-provided extensions if they don't start with a period
             configExts=[c if c.startswith('.') else '.' + c for c in self.config['includeFiles']['ext']]
-            notFound = [n for n in configExts if not n in globalfuncs.getSupportedFileExts()]
+            notFound = [n for n in configExts if n not in globalfuncs.getSupportedFileExts()]
             if notFound:
-                console.error("Unexpected file extensions found in configuration file (%s)" % (configFile))
+                console.error(f"Unexpected file extensions found in configuration file ({configFile})")
                 console.error("The following file extensions will be ignored: " + str(notFound))
                 self.config['includeFiles']['ext'] = [n for n in configExts if n not in notFound]
         
@@ -129,9 +128,9 @@ class Config:
                 self.config['includeFiles']['mime'] = globalfuncs.getSupportedFileMimes()
             else:
                 configMimes=self.config['includeFiles']['mime']
-                notFound = [n for n in configMimes if not n in globalfuncs.getSupportedFileMimes()]
+                notFound = [n for n in configMimes if n not in globalfuncs.getSupportedFileMimes()]
                 if notFound:
-                    console.error("Unexpected MIME types found in configuration file (%s)" % (configFile))
+                    console.error(f"Unexpected MIME types found in configuration file ({configFile})")
                     console.error("The following MIME types will be ignored: " + str(notFound))
                     self.config['includeFiles']['mime'] = [n for n in configMimes if n not in notFound]
         else:

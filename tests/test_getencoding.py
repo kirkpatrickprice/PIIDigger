@@ -1,8 +1,10 @@
-import pytest
 from queue import Queue
+
+import pytest
 
 from piidigger.getencoding import getEncoding
 from piidigger.logmanager import LogManager
+
 
 @pytest.mark.filehandlers
 @pytest.mark.parametrize('testFile, expected_result', [

@@ -1,10 +1,8 @@
-import codecs
 from collections.abc import Iterator
 
-from piidigger.getencoding import getEncoding
 from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.globalvars import maxChunkSize
-from piidigger.globalvars import defaultChunkCount
+from piidigger.getencoding import getEncoding
+from piidigger.globalvars import defaultChunkCount, maxChunkSize
 from piidigger.logmanager import LogManager
 
 # Each filehandler must have the following:
@@ -55,7 +53,7 @@ def readFile(filename: str,
     
     enc = getEncoding(filename=filename, logManager=logManager)
 
-    if enc == None:
+    if enc is None:
         logger.info('%s: Unknown encoding type', filename)
         return ['']
     else:
@@ -73,7 +71,7 @@ def readFile(filename: str,
     # For the last line, we add one word at a time until we reach the limit.  
 
     try:
-        with codecs.open(filename, 'r', encoding=enc, errors='replace') as f:
+        with open(filename, encoding=enc, errors='replace') as f:
             handler: ContentHandler = ContentHandler(maxContentSize = maxChunkSize * maxChunkCount)
             for line in f:
                 handler.appendContent(line)
@@ -94,7 +92,7 @@ def readFile(filename: str,
         logger.error('OSError adding %s.  File skipped.  Error message: %s', f.absolute(), str(e))
     except UnicodeDecodeError as e:
         logger.error('Unicode error processing file %s (enc=%s): %s', filename, enc, e)
-    except LookupError as e:
+    except LookupError:
         logger.error('Codec lookup error processing file %s (enc=%s)', filename, enc)
     except Exception as e:
         logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))

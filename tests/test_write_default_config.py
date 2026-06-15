@@ -1,9 +1,10 @@
 import os
+import tomllib
 
 import pytest
 
-from piidigger.globalfuncs import writeDefaultConfig, getDefaultConfig
-import tomli
+from piidigger.globalfuncs import getDefaultConfig, writeDefaultConfig
+
 
 @pytest.mark.utils
 def test_write_default_config():
@@ -14,7 +15,7 @@ def test_write_default_config():
 
     if result=="Success":
         with open(testFile, 'rb') as f:
-            savedConfig=tomli.load(f)
+            savedConfig=tomllib.load(f)
     else:
         savedConfig={}
 
