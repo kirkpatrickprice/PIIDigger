@@ -1,18 +1,15 @@
 import logging
-import warnings
+from collections.abc import Iterator
 
 from pypdf import PdfReader
 from pypdf.errors import (
-    PdfReadError, 
     EmptyFileError,
-    )
-from collections.abc import Iterator
+    PdfReadError,
+)
 
 from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.globalvars import maxChunkSize
-from piidigger.globalvars import defaultChunkCount
+from piidigger.globalvars import defaultChunkCount, maxChunkSize
 from piidigger.logmanager import LogManager
-
 
 # Each filehandler must have the following:
 #   "handles" -     dictionary to identify lists of file extensions and mime types that the handler will manage.
@@ -41,9 +38,7 @@ def readFile(filename: str,
     
     pd_logger = logManager.getLogger('pdf_handler')
     
-    content: str = ''
-    totalBytes: int = 0
-    maxContentSize = maxChunkSize * maxChunkCount
+    maxChunkSize * maxChunkCount
 
     
     try:

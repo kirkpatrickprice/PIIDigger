@@ -1,9 +1,9 @@
 import sys
 import traceback
-from multiprocessing import Process, freeze_support, set_start_method
+from multiprocessing import Process, freeze_support
 
-from piidigger.piidigger import main
 from piidigger.globalvars import errorCodes
+from piidigger.piidigger import main
 
 exitCode = errorCodes['ok']
 

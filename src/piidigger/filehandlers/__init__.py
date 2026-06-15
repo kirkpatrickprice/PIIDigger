@@ -1,5 +1,1 @@
-from piidigger.filehandlers import docx
-from piidigger.filehandlers import pdf
-from piidigger.filehandlers import plaintext
-from piidigger.filehandlers import xls
-from piidigger.filehandlers import xlsx
+from piidigger.filehandlers import docx, pdf, plaintext, xls, xlsx

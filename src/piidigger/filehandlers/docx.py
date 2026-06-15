@@ -7,8 +7,7 @@ from docx2python import docx2python
 from docx2python.iterators import iter_paragraphs
 
 from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.globalvars import maxChunkSize
-from piidigger.globalvars import defaultChunkCount
+from piidigger.globalvars import defaultChunkCount, maxChunkSize
 from piidigger.logmanager import LogManager
 
 warnings.filterwarnings('ignore', category=UserWarning, module='docx2python')
@@ -50,7 +49,7 @@ def readFile(filename: str,
                 yield handler.getContent()
 
         for comment in docxContent.comments:
-            if not comment is None:
+            if comment is not None:
                 handler.appendContent(comment[3])
                 if handler.contentBufferFull():
                     yield handler.strip()

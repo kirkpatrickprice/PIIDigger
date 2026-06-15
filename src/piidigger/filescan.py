@@ -1,11 +1,7 @@
-import pathlib
-from queue import Empty
 import multiprocessing as mp
-    
+import pathlib
 
-from piidigger import classes
-from piidigger import globalfuncs
-from piidigger import queuefuncs
+from piidigger import classes, queuefuncs
 from piidigger.getmime import getMime
 from piidigger.globalvars import SENTINEL
 from piidigger.logmanager import LogManager
@@ -115,7 +111,7 @@ def findFilesWorker(config: classes.Config,
             item=queuefuncs.getItem(queues['dirsQ'])
             if item == SENTINEL:
                 break
-            if item == None:
+            if item is None:
                 continue
 
             # Path-ify the directory name

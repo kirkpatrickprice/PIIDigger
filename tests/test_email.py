@@ -2,6 +2,7 @@ import pytest
 
 from piidigger.datahandlers import email
 
+
 @pytest.mark.datahandlers
 @pytest.mark.parametrize('data, expected_result', [
     # Standard email addresses

@@ -1,11 +1,10 @@
+import csv
 import multiprocessing as mp
 
-import csv
-
-from piidigger import console
-from piidigger import queuefuncs
+from piidigger import console, queuefuncs
 from piidigger.globalvars import SENTINEL
 from piidigger.logmanager import LogManager
+
 
 def processResult(outFilename: str,
                   queue: mp.Queue,
@@ -28,7 +27,7 @@ def processResult(outFilename: str,
                 item = queuefuncs.getItem(queue)
                 if item == SENTINEL:
                     break
-                if item ==  None:
+                if item is None:
                     continue
                 filename = item['filename']
                 flattened_list: list[dict] = flatten_matches(matches = item['matches'], filename=filename,)

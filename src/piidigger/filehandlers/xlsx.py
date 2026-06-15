@@ -1,15 +1,17 @@
-import openpyxl
 import warnings
 from collections.abc import Iterator
-
-from openpyxl.utils.exceptions import *
 from zipfile import BadZipFile
 
+import openpyxl
+from openpyxl.utils.exceptions import (
+    CellCoordinatesException,
+    IllegalCharacterError,
+    InvalidFileException,
+    SheetTitleException,
+)
+
 from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.globalvars import excelBlankColLimit
-from piidigger.globalvars import excelBlankRowLimit
-from piidigger.globalvars import maxChunkSize
-from piidigger.globalvars import defaultChunkCount
+from piidigger.globalvars import defaultChunkCount, excelBlankColLimit, excelBlankRowLimit, maxChunkSize
 from piidigger.logmanager import LogManager
 
 # Ignore the UserWarning message from OpenPyXL that seem to pop up here and there
@@ -47,8 +49,7 @@ def readFile(filename: str,
     logger = logManager.getLogger('xlsx_handler')
 
     content: str = ''
-    totalBytes: int = 0
-    maxContentSize = maxChunkSize * maxChunkCount
+    maxChunkSize * maxChunkCount
 
     
     try:

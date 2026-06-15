@@ -1,10 +1,10 @@
-import multiprocessing as mp
 import json
+import multiprocessing as mp
 
-from piidigger import console
-from piidigger import queuefuncs
+from piidigger import console, queuefuncs
 from piidigger.globalvars import SENTINEL
 from piidigger.logmanager import LogManager
+
 
 def processResult(outFilename: str,
                   queue: mp.Queue,
@@ -25,7 +25,7 @@ def processResult(outFilename: str,
             item = queuefuncs.getItem(queue)
             if item == SENTINEL:
                 break
-            if item ==  None:
+            if item is None:
                 continue
             allResults.append(item)
     except KeyboardInterrupt:

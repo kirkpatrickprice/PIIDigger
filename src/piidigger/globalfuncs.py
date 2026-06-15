@@ -302,13 +302,10 @@ def progressLine(*pargs, **kwargs):
     screenWidth = console.getTerminalSize()[0]
 
     line = (
-        "Folders scanned: %d | Files identified: %d | Files scanned: %d | Results found: %d"
-        % (
-            kwargs["totalDirs"].value,
-            kwargs["totalFilesFound"].value,
-            kwargs["totalFilesScanned"].value,
-            kwargs["totalResults"].value,
-        )
+        f"Folders scanned: {kwargs['totalDirs'].value} | "
+        f"Files identified: {kwargs['totalFilesFound'].value} | "
+        f"Files scanned: {kwargs['totalFilesScanned'].value} | "
+        f"Results found: {kwargs['totalResults'].value}"
     )
 
     if len(line) > screenWidth:

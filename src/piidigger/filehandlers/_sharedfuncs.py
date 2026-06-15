@@ -4,6 +4,7 @@
 
 from collections import deque
 
+
 class ContentHandler:
     def __init__(self, 
                  maxContentSize: int

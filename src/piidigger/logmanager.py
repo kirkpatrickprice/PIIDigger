@@ -5,8 +5,10 @@ from time import sleep
 
 from piidigger import (
     console,
-    queuefuncs,)
+    queuefuncs,
+)
 from piidigger.globalvars import SENTINEL
+
 
 class LogManager:
     def __init__(self,

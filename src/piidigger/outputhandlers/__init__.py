@@ -1,3 +1,1 @@
-from piidigger.outputhandlers import csv
-from piidigger.outputhandlers import json
-from piidigger.outputhandlers import text
+from piidigger.outputhandlers import csv, json, text

@@ -3,8 +3,9 @@ from queue import Queue
 import pytest
 
 from piidigger.filehandlers import plaintext
-from piidigger.queuefuncs import clearQ
 from piidigger.logmanager import LogManager
+from piidigger.queuefuncs import clearQ
+
 
 @pytest.mark.filehandlers
 @pytest.mark.parametrize('filename, expected_result', [
