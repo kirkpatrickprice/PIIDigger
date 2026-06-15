@@ -1,20 +1,18 @@
 # Testing Strategy for Architecture Refactor
 
-**Branch**: `refactor`  
-**Status**: Planning Document  
-**Last Updated**: 2026-03-06
+**Branch**: `refactor`
+**Status**: Active Reference
+**Last Updated**: 2026-06-15
+**Reference**: [ARCHITECTURE_REDESIGN.md](./ARCHITECTURE_REDESIGN.md), [IMPLEMENTATION_CHECKLIST.md](./IMPLEMENTATION_CHECKLIST.md)
 
 ---
 
-## Overview
+## Philosophy
 
-The refactor involves rewriting the entire process orchestration system. This requires a **comprehensive, multi-layered testing approach** to ensure correctness and prevent regressions.
-
-**Testing Philosophy**:
-- **Unit Tests**: Each component in isolation
-- **Integration Tests**: Components working together
-- **E2E Tests**: Full pipeline on real data
-- **Baseline Comparison**: Output matches original implementation
+- **Unit tests**: each component in strict isolation — no process tree, no filesystem, no queues unless the component is literally a queue handler.
+- **Integration tests**: components wired together with real processes and real files, but scoped to a single phase's deliverables.
+- **E2E tests**: full `run_scan()` on real test data; output compared to baseline.
+- **Business logic is unit-testable without orchestration** — that is a hard design requirement, not a wish. If a data handler, file handler, or output sink cannot be tested without spinning up `mp.Process`, something is wrong with its contract.
 
 ---
 
@@ -22,807 +20,686 @@ The refactor involves rewriting the entire process orchestration system. This re
 
 ```
 tests/
+├── conftest.py                     # Top-level fixtures: tmp dirs, config factories
 ├── unit/
-│   ├── conftest.py (shared fixtures)
+│   ├── conftest.py
+│   ├── models/
+│   │   ├── test_tasks.py           # Task, TaskResult, TaskType validation
+│   │   ├── test_config.py          # Config.from_toml, Config.default, validation errors
+│   │   └── test_results.py         # ResultRecord, lineage fields
 │   ├── orchestration/
-│   │   ├── test_tasks.py
-│   │   ├── test_worker_pool.py
-│   │   ├── test_executor.py
-│   │   ├── test_handlers.py
-│   │   └── test_coordinator.py
-│   ├── test_datahandlers.py (existing - preserve)
-│   ├── test_filetype_handlers.py (existing - preserve)
-│   └── test_config.py
+│   │   ├── test_worker.py          # worker_loop, DISPATCH, temp workspace cleanup
+│   │   ├── test_coordinator.py     # pending counter, fan-out, deadline detection
+│   │   ├── test_logging_setup.py   # QueueHandler, QueueListener lifecycle
+│   │   └── test_progress.py        # ProgressDisplay: TTY and non-TTY modes
+│   ├── datahandlers/
+│   │   ├── test_pan.py
+│   │   ├── test_email.py
+│   │   ├── test_phonenum.py
+│   │   └── test_trackdata.py
+│   ├── filehandlers/
+│   │   ├── test_plaintext.py
+│   │   ├── test_pdf.py
+│   │   ├── test_docx.py
+│   │   ├── test_xlsx.py
+│   │   └── test_xls.py
+│   └── outputhandlers/
+│       ├── test_csv_sink.py
+│       ├── test_json_sink.py
+│       └── test_text_sink.py
 ├── integration/
-│   ├── conftest.py (shared fixtures)
-│   ├── test_full_scan_small.py (small test directory)
-│   ├── test_timeout_enforcement.py
-│   ├── test_graceful_shutdown.py
-│   ├── test_output_formats.py
-│   ├── test_edge_cases.py
-│   └── test_result_accuracy.py
+│   ├── conftest.py
+│   ├── test_worker_pool.py         # Pool lifecycle: start, dispatch, collect, shutdown
+│   ├── test_coordinator_loop.py    # Coordinator fan-out on synthetic + real task chains
+│   ├── test_full_scan.py           # run_scan() on small test directories
+│   ├── test_timeout_enforcement.py # Deadline detection terminates hung workers
+│   ├── test_graceful_shutdown.py   # Ctrl+C exits cleanly
+│   └── test_output_formats.py      # All three output formats correct
 ├── e2e/
-│   ├── conftest.py (shared fixtures)
-│   ├── test_baseline_comparison.py (compare against original)
-│   └── test_full_scan_testdata.py (complete testdata/ directory)
+│   ├── conftest.py
+│   ├── test_baseline_comparison.py # 2.0 output == 1.x baseline
+│   └── test_full_scan_testdata.py  # Full testdata/ directory scan
 └── fixtures/
-    ├── sample_config.toml
-    ├── sample_data/ (small test files)
-    └── baseline_results/ (reference output)
+    ├── sample_data/                # Small synthetic test files
+    ├── baseline_results/           # 1.x reference output (generated once)
+    └── zip/                        # ZIP test fixtures (Phase 5)
 ```
+
+---
+
+## Fixtures — `tests/conftest.py`
+
+All tests share a `Config` construction pattern. Since `Config` is a validated Pydantic model, tests use either `Config.default()` with `model_copy(update={...})` for simple overrides, or write a minimal TOML to `tmp_path` for full-load testing.
+
+```python
+import queue
+from pathlib import Path
+
+import pytest
+from click.testing import CliRunner
+
+from piidigger.models.config import Config
+from piidigger.orchestration.context import WorkerContext
+
+TEST_DATA_DIR = Path(__file__).parent.parent / "testdata"
+SMALL_TEST_DATA_DIR = Path(__file__).parent / "fixtures" / "sample_data"
+
+
+@pytest.fixture
+def default_config():
+    """Minimal default Config for unit tests."""
+    return Config.default()
+
+
+@pytest.fixture
+def scan_config(tmp_path):
+    """Config targeting the small fixture dataset, output to tmp_path."""
+    return Config.default().model_copy(update={
+        "start_dirs": [SMALL_TEST_DATA_DIR],
+        "log_file": tmp_path / "test.log",
+        "results": {"csv": tmp_path / "results.csv"},
+    })
+
+
+@pytest.fixture
+def fake_context(tmp_path):
+    """WorkerContext with in-process queues — no mp.Process needed for unit tests."""
+    return WorkerContext(
+        config=Config.default(),
+        task_queue=queue.SimpleQueue(),
+        result_queue=queue.SimpleQueue(),
+        log_queue=queue.SimpleQueue(),
+        stop_event=__import__("threading").Event(),
+    )
+
+
+@pytest.fixture
+def cli_runner():
+    return CliRunner()
+```
+
+> **Note on `fake_context`:** handler unit tests use `queue.SimpleQueue` and `threading.Event` instead of their `mp.*` equivalents. This keeps tests in-process and avoids spawn overhead. The real `WorkerContext` uses `mp.Queue`/`mp.Event` — the integration tests verify the real thing.
 
 ---
 
 ## Unit Tests
 
-### 1. Task and TaskResult Definition Tests
+### Task Model — `tests/unit/models/test_tasks.py`
 
-**File**: `tests/unit/orchestration/test_tasks.py`
-
-**Tests**:
 ```python
-def test_task_creation():
-    """Task can be created with required fields."""
-    task = Task(
-        task_id="task-123",
-        task_type="scan_file",
-        payload={"file": "test.txt"},
-        timeout_seconds=30
-    )
-    assert task.task_id == "task-123"
-    assert task.task_type == "scan_file"
+import pickle
+from pydantic import ValidationError
+import pytest
+from piidigger.models.tasks import Task, TaskResult, TaskType, SHUTDOWN
 
-def test_task_frozen():
-    """Task is immutable (Pydantic frozen model)."""
-    task = Task(task_id="t1", task_type="enum_dirs", payload={})
+def test_task_creation_valid():
+    t = Task(task_type=TaskType.SCAN_FILE, payload={"file_path": "/tmp/x.txt"})
+    assert t.task_type == TaskType.SCAN_FILE
+    assert t.task_id  # auto-generated
+
+def test_task_is_frozen():
+    t = Task(task_type=TaskType.ENUM_DIR, payload={})
+    with pytest.raises(Exception):  # ValidationError or FrozenInstanceError
+        t.task_id = "mutated"
+
+def test_task_rejects_invalid_timeout():
     with pytest.raises(ValidationError):
-        task.task_id = "t2"
+        Task(task_type=TaskType.ENUM_DIR, payload={}, timeout_seconds=0)
 
-def test_task_serialization_pickle():
-    """Task can be pickled (for multiprocessing)."""
-    task = Task(task_id="t1", task_type="scan", payload={"x": 1})
-    pickled = pickle.dumps(task)
-    restored = pickle.loads(pickled)
-    assert restored.task_id == "t1"
+def test_task_rejects_unknown_task_type():
+    with pytest.raises(ValidationError):
+        Task(task_type="not_a_type", payload={})
 
-def test_taskresult_creation():
-    """TaskResult can be created with various status values."""
-    result = TaskResult(
-        task_id="t1",
-        task_type="scan",
-        status="success",
-        result_data={"matches": []},
-        duration_seconds=1.5
-    )
-    assert result.status == "success"
-    assert result.duration_seconds == 1.5
+def test_task_pickles_cleanly():
+    t = Task(task_type=TaskType.SCAN_FILE, payload={"x": 1})
+    assert pickle.loads(pickle.dumps(t)) == t
 
-def test_taskresult_error_fields():
-    """TaskResult captures error information."""
-    result = TaskResult(
-        task_id="t1",
-        task_type="scan",
-        status="error",
-        error_message="File not found"
-    )
+def test_task_result_rejects_invalid_status():
+    with pytest.raises(ValidationError):
+        TaskResult(task_id="x", task_type=TaskType.SCAN_FILE, status="pending", duration_seconds=0)
+
+def test_shutdown_sentinel_is_not_a_task():
+    assert not isinstance(SHUTDOWN, Task)
+```
+
+---
+
+### Config Model — `tests/unit/models/test_config.py`
+
+```python
+import pytest
+from pathlib import Path
+from pydantic import ValidationError
+from piidigger.models.config import Config
+
+def test_default_config_loads():
+    c = Config.default()
+    assert c.max_workers >= 1
+    assert c.default_timeout_seconds > 0
+
+def test_from_toml_valid(tmp_path):
+    config_file = tmp_path / "test.toml"
+    config_file.write_text('[scan]\nstart_dirs = ["/tmp"]\n')
+    c = Config.from_toml(config_file)
+    assert c.start_dirs == [Path("/tmp")]
+
+def test_from_toml_missing_file(tmp_path):
+    """Missing file should raise with a clear message, not AttributeError."""
+    with pytest.raises(FileNotFoundError, match="piidigger.toml"):
+        Config.from_toml(tmp_path / "piidigger.toml")
+
+def test_from_toml_invalid_toml(tmp_path):
+    config_file = tmp_path / "bad.toml"
+    config_file.write_text("this is not toml ][")
+    with pytest.raises(Exception, match="Invalid"):
+        Config.from_toml(config_file)
+
+def test_from_toml_nonexistent_start_dir(tmp_path):
+    """start_dirs that don't exist should fail validation with a clear message."""
+    config_file = tmp_path / "test.toml"
+    config_file.write_text('[scan]\nstart_dirs = ["/no/such/path/ever"]\n')
+    with pytest.raises((ValidationError, SystemExit)):
+        Config.from_toml(config_file)
+
+def test_model_copy_override(default_config, tmp_path):
+    updated = default_config.model_copy(update={"start_dirs": [tmp_path]})
+    assert updated.start_dirs == [tmp_path]
+```
+
+---
+
+### WorkerContext — `tests/unit/orchestration/test_worker.py`
+
+```python
+import queue, threading
+from piidigger.models.tasks import Task, TaskType, TaskStarted, TaskResult, SHUTDOWN
+from piidigger.orchestration.worker import worker_loop, DISPATCH
+
+def test_dispatch_table_contains_core_types():
+    assert TaskType.ENUM_DIR in DISPATCH
+    assert TaskType.SCAN_FILE in DISPATCH
+
+def test_noop_handler_returns_ok(fake_context):
+    from piidigger.models.tasks import TaskType
+    task = Task(task_type=TaskType.NOOP, payload={})
+    result = DISPATCH[TaskType.NOOP](task, fake_context, None)
+    assert result.status == "ok"
+
+def test_worker_loop_processes_and_shuts_down(fake_context):
+    import threading
+    task = Task(task_type=TaskType.NOOP, payload={})
+    fake_context.task_queue.put(task)
+    fake_context.task_queue.put(SHUTDOWN)
+
+    t = threading.Thread(target=worker_loop, args=(fake_context,))
+    t.start()
+    t.join(timeout=5)
+    assert not t.is_alive()
+
+    # One TaskStarted + one TaskResult in result_queue
+    msgs = []
+    while not fake_context.result_queue.empty():
+        msgs.append(fake_context.result_queue.get_nowait())
+    assert any(isinstance(m, TaskStarted) for m in msgs)
+    assert any(isinstance(m, TaskResult) and m.status == "ok" for m in msgs)
+
+def test_dispatch_exception_becomes_error_result(fake_context):
+    """Handler exceptions must not propagate — they become status='error' results."""
+    def bad_handler(task, ctx, logger):
+        raise RuntimeError("boom")
+
+    from piidigger.orchestration.worker import _dispatch
+    task = Task(task_type=TaskType.NOOP, payload={})
+    result = _dispatch(task, fake_context, None, handler_override=bad_handler)
     assert result.status == "error"
-    assert result.error_message == "File not found"
-
-def test_taskresult_timeout_status():
-    """TaskResult can represent timeout."""
-    result = TaskResult(
-        task_id="t1",
-        task_type="scan_file",
-        status="timeout",
-        duration_seconds=30.0
-    )
-    assert result.status == "timeout"
-
-def test_task_validation_rejects_invalid_timeout():
-    """Pydantic validates timeout_seconds range (1-300)."""
-    with pytest.raises(ValidationError) as exc_info:
-        Task(task_id="t1", task_type="enum_dirs", payload={}, timeout_seconds=-1)
-    assert "timeout_seconds" in str(exc_info.value)
-
-def test_task_validation_rejects_invalid_task_type():
-    """Pydantic validates task_type is known enum value."""
-    with pytest.raises(ValidationError) as exc_info:
-        Task(task_id="t1", task_type="invalid_type", payload={})
-    assert "task_type" in str(exc_info.value)
-
-def test_task_validation_rejects_short_task_id():
-    """Pydantic validates task_id is UUID-like (min 8 chars)."""
-    with pytest.raises(ValidationError) as exc_info:
-        Task(task_id="short", task_type="scan_file", payload={})
-    assert "task_id" in str(exc_info.value)
-
-def test_taskresult_validation_rejects_invalid_status():
-    """Pydantic validates status is one of allowed literals."""
-    with pytest.raises(ValidationError) as exc_info:
-        TaskResult(task_id="t1", task_type="scan_file", 
-                  status="pending", duration_seconds=0)
-    assert "status" in str(exc_info.value)
-
-def test_task_model_json_schema():
-    """Pydantic can generate JSON schema for documentation."""
-    schema = Task.model_json_schema()
-    assert "properties" in schema
-    assert "task_id" in schema["properties"]
-    assert schema["properties"]["timeout_seconds"]["minimum"] == 1
-    assert schema["properties"]["timeout_seconds"]["maximum"] == 300
-```
+    assert "boom" in result.error_message
 ```
 
 ---
 
-### 2. WorkerPool Lifecycle Tests
+### Coordinator — `tests/unit/orchestration/test_coordinator.py`
 
-**File**: `tests/unit/orchestration/test_worker_pool.py`
-
-**Tests**:
 ```python
-def test_worker_pool_init():
-    """WorkerPool initializes with correct parameters."""
-    pool = WorkerPool(
-        pool_size=4,
-        task_queue=mp.Queue(),
-        result_queue=mp.Queue(),
-        config=sample_config
-    )
-    assert pool.pool_size == 4
-    assert pool.worker_count == 0  # Not started yet
+def test_pending_arithmetic_stays_consistent():
+    """pending -= 1 then += N for new_tasks is the core invariant."""
+    pending = 3
+    result_new_tasks = [{"task_type": "enum_dir", "payload": {}} for _ in range(5)]
+    pending -= 1
+    pending += len(result_new_tasks)
+    assert pending == 7  # 3 - 1 + 5
 
-def test_worker_pool_start():
-    """WorkerPool spawns workers on start()."""
-    pool = WorkerPool(pool_size=4, task_queue=..., result_queue=...)
-    pool.start_workers()
-    assert pool.worker_count == 4
-    for proc in pool.workers:
-        assert proc.is_alive()
-
-def test_worker_pool_shutdown():
-    """WorkerPool shuts down cleanly."""
-    pool = WorkerPool(pool_size=2, ...)
-    pool.start_workers()
-    pool.send_sentinel()  # Send shutdown signal
-    pool.join_all(timeout=5)
-    assert not any(p.is_alive() for p in pool.workers)
-
-def test_worker_pool_join_timeout():
-    """WorkerPool respects join timeout."""
-    pool = WorkerPool(pool_size=1, ...)
-    # Don't send sentinel (workers never exit)
-    start = time.time()
-    pool.join_all(timeout=1)
-    elapsed = time.time() - start
-    assert 0.9 < elapsed < 1.5  # ~1 second, allowing variance
+def test_deadline_detection_synthesizes_timeout_result(fake_context):
+    from piidigger.orchestration.coordinator import _check_worker_deadlines
+    import time
+    in_flight = {
+        "task-abc": {"pid": 99999, "start_time": time.monotonic() - 120,
+                     "timeout_seconds": 30}
+    }
+    synthesized = _check_worker_deadlines(in_flight, workers={})
+    assert len(synthesized) == 1
+    assert synthesized[0].status == "timeout"
+    assert synthesized[0].task_id == "task-abc"
 ```
 
 ---
 
-### 3. Timeout Executor Tests
+### Logging Setup — `tests/unit/orchestration/test_logging_setup.py`
 
-**File**: `tests/unit/orchestration/test_executor.py`
-
-**Tests**:
 ```python
-def test_execute_with_timeout_success():
-    """Function completes before timeout."""
-    def quick_task():
-        return 42
-    
-    success, result = execute_with_timeout(quick_task, args=(), timeout_seconds=5)
-    assert success is True
-    assert result == 42
+import logging, queue as q
+from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
 
-def test_execute_with_timeout_timeout():
-    """Function times out after specified duration."""
-    def slow_task():
-        time.sleep(10)
-        return 42
-    
-    start = time.time()
-    success, result = execute_with_timeout(slow_task, args=(), timeout_seconds=1)
-    elapsed = time.time() - start
-    
-    assert success is False
-    assert isinstance(result, TimeoutError)
-    assert 0.9 < elapsed < 1.5  # ~1 second
+def test_build_worker_logger_puts_records_on_queue():
+    log_queue = q.SimpleQueue()
+    logger = build_worker_logger(log_queue, name="test")
+    logger.warning("hello from test")
+    record = log_queue.get_nowait()
+    assert record.getMessage() == "hello from test"
 
-def test_execute_with_timeout_exception():
-    """Function raises exception during execution."""
-    def error_task():
-        raise ValueError("Test error")
-    
-    success, result = execute_with_timeout(error_task, args=(), timeout_seconds=5)
-    assert success is False
-    assert isinstance(result, ValueError)
-    assert str(result) == "Test error"
-
-def test_execute_with_timeout_cpu_bound():
-    """Timeout works on CPU-bound (regex) operations."""
-    def cpu_bound_task():
-        # Simulated catastrophic backtracking
-        import re
-        pattern = "(a+)+" * 10
-        text = "a" * 25 + "X"
-        re.match(pattern, text)
-    
-    success, result = execute_with_timeout(cpu_bound_task, args=(), timeout_seconds=1)
-    assert success is False
-    assert isinstance(result, TimeoutError)
+def test_listener_writes_to_file(tmp_path):
+    log_file = tmp_path / "test.log"
+    log_queue = q.Queue()
+    listener = start_listener(log_queue, log_file=str(log_file), log_level="DEBUG")
+    logger = build_worker_logger(log_queue, name="integration")
+    logger.info("written via listener")
+    stop_listener(listener)
+    assert "written via listener" in log_file.read_text()
 ```
 
 ---
 
-### 4. Handler Function Tests
+### Progress Display — `tests/unit/orchestration/test_progress.py`
 
-**File**: `tests/unit/orchestration/test_handlers.py`
-
-**Tests**:
 ```python
-def test_handle_enum_dirs():
-    """handle_enum_dirs generates file paths for subdirectories."""
-    task = Task(
-        task_id="enum-1",
-        task_type="enum_dirs",
-        payload={"base_path": str(TEST_DATA_DIR)},
-        timeout_seconds=10
-    )
-    
-    config = Config.from_dict(SAMPLE_CONFIG)
-    result = handlers.handle_enum_dirs(task, config)
-    
-    assert result.status == "success"
-    assert len(result.result_data["directories"]) > 0
-    assert result.duration_seconds > 0
+from piidigger.orchestration.progress import ProgressDisplay
 
-def test_handle_enum_files():
-    """handle_enum_files discovers files matching config criteria."""
-    task = Task(
-        task_id="enum-2",
-        task_type="enum_files",
-        payload={"dir_path": str(TEST_DATA_DIR / "plaintext")},
-        timeout_seconds=10
-    )
-    
-    config = Config.from_dict(SAMPLE_CONFIG)  # has .txt, .csv enabled
-    result = handlers.handle_enum_files(task, config)
-    
-    assert result.status == "success"
-    assert len(result.result_data["files"]) > 0
-    # All returned files should match configured extensions
-    for file_info in result.result_data["files"]:
-        assert file_info["path"].suffix in [".txt", ".csv"]
+def test_progress_display_no_tty_is_silent(capsys):
+    """In non-TTY mode, update() and log_event() produce no output."""
+    display = ProgressDisplay(is_tty=False)
+    display.start()
+    display.update({"files_scanned": 5, "bytes_scanned": 1024})
+    display.log_event("warning", "test warning")
+    display.stop()
+    captured = capsys.readouterr()
+    assert "test warning" not in captured.err  # progress events are silent
 
-def test_handle_scan_file():
-    """handle_scan_file scans file with data handlers."""
-    task = Task(
-        task_id="scan-1",
-        task_type="scan_file",
-        payload={
-            "file_path": str(TEST_DATA_DIR / "plaintext" / "test.txt"),
-            "handlers": ["pan", "email"]
-        },
-        timeout_seconds=10
-    )
-    
-    config = Config.from_dict(SAMPLE_CONFIG)
-    result = handlers.handle_scan_file(task, config)
-    
-    assert result.status in ("success", "timeout")  # Both acceptable
-    assert "pan_matches" in result.result_data or result.status == "timeout"
+def test_progress_display_counters_accumulate():
+    display = ProgressDisplay(is_tty=False)
+    display.start()
+    display.update({"files_scanned": 3})
+    display.update({"files_scanned": 2, "bytes_scanned": 512})
+    assert display.totals["files_scanned"] == 5
+    assert display.totals["bytes_scanned"] == 512
+    display.stop()
+```
 
-def test_handle_scan_file_timeout():
-    """handle_scan_file respects timeout on hung regex."""
-    # Use base64-xml-test.xml which causes catastrophic backtracking
-    task = Task(
-        task_id="scan-2",
-        task_type="scan_file",
-        payload={
-            "file_path": str(TEST_DATA_DIR / "pan" / "base64-xml-test.xml"),
-            "handlers": ["email"]
-        },
-        timeout_seconds=5  # Should timeout
-    )
-    
-    config = Config.from_dict(SAMPLE_CONFIG)
-    result = handlers.handle_scan_file(task, config)
-    
-    assert result.status == "timeout"
-    assert result.duration_seconds >= 4.9  # Close to 5 second timeout
+---
 
-def test_handle_write_results_csv():
-    """handle_write_results writes CSV output."""
+### Data Handlers
+
+Each handler test follows the same pattern: call `find_matches(text)`, assert the result dict.
+
+```python
+# tests/unit/datahandlers/test_pan.py
+from piidigger.datahandlers.pan import PanHandler
+
+def test_finds_valid_pan():
+    h = PanHandler()
+    result = h.find_matches("Card: 4111111111111111")
+    assert "4111111111111111" in result.get("pan", set())
+
+def test_does_not_match_invalid_luhn():
+    h = PanHandler()
+    result = h.find_matches("Card: 4111111111111112")
+    assert not result.get("pan")
+
+def test_returns_correct_type():
+    h = PanHandler()
+    result = h.find_matches("no card here")
+    assert isinstance(result, dict)
+    assert all(isinstance(v, set) for v in result.values())
+```
+
+---
+
+### File Handlers
+
+Each handler test: construct a `FilesystemItem` from a real fixture file, call `read()`, assert text chunks are non-empty strings.
+
+```python
+# tests/unit/filehandlers/test_plaintext.py
+from pathlib import Path
+from piidigger.filehandlers.plaintext import PlaintextHandler
+from piidigger.orchestration.sources import FilesystemItem
+
+FIXTURE = Path(__file__).parent.parent.parent / "testdata" / "plaintext" / "test.txt"
+
+def test_read_yields_strings():
+    item = FilesystemItem(path=FIXTURE)
+    handler = PlaintextHandler()
+    chunks = list(handler.read(item))
+    assert chunks
+    assert all(isinstance(c, str) for c in chunks)
+
+def test_read_nonempty_content():
+    item = FilesystemItem(path=FIXTURE)
+    combined = "".join(PlaintextHandler().read(item))
+    assert len(combined) > 0
+```
+
+---
+
+### Output Sinks
+
+```python
+# tests/unit/outputhandlers/test_csv_sink.py
+import csv
+from piidigger.outputhandlers.csv import CsvSink
+from piidigger.models.results import ResultRecord
+
+def test_csv_sink_writes_header_and_row(tmp_path):
     output_file = tmp_path / "results.csv"
-    
-    task = Task(
-        task_id="write-1",
-        task_type="write_results",
-        payload={
-            "output_file": str(output_file),
-            "format": "csv",
-            "results": [
-                {"file": "test.txt", "handler": "pan", "match": "4111111111111111"},
-                {"file": "test.txt", "handler": "email", "match": "user@example.com"}
-            ]
-        },
-        timeout_seconds=10
-    )
-    
-    config = Config.from_dict(SAMPLE_CONFIG)
-    result = handlers.handle_write_results(task, config)
-    
-    assert result.status == "success"
-    assert output_file.exists()
-    assert output_file.stat().st_size > 0
-    # Verify CSV content
-    with open(output_file) as f:
-        lines = f.readlines()
-        assert len(lines) == 3  # header + 2 records
+    sink = CsvSink(output_file)
+    sink.open()
+    sink.write(ResultRecord(
+        source_path="/data/test.txt",
+        handler="pan",
+        matches={"pan": ["4111111111111111"]},
+    ))
+    sink.close()
+
+    rows = list(csv.DictReader(output_file.open()))
+    assert len(rows) == 1
+    assert rows[0]["source_path"] == "/data/test.txt"
+    assert rows[0]["handler"] == "pan"
+
+def test_csv_sink_lineage_fields_present_for_on_disk(tmp_path):
+    output_file = tmp_path / "results.csv"
+    sink = CsvSink(output_file)
+    sink.open()
+    sink.write(ResultRecord(source_path="/x.txt", handler="email",
+                            matches={"email": ["a@b.com"]}))
+    sink.close()
+    rows = list(csv.DictReader(output_file.open()))
+    # Lineage columns exist even for on-disk files; values are empty/null
+    assert "source_member_path" in rows[0]
+    assert rows[0]["source_member_path"] == ""
 ```
 
 ---
 
 ## Integration Tests
 
-### 1. Full Scan Pipeline (Small Dataset)
+### Worker Pool Lifecycle — `tests/integration/test_worker_pool.py`
 
-**File**: `tests/integration/test_full_scan_small.py`
-
-**Tests**:
 ```python
-def test_scan_small_directory(tmp_path):
-    """Full scan pipeline on small test directory."""
-    # Setup
-    config = Config.from_dict({
-        "start_dirs": [str(SMALL_TEST_DATA_DIR)],
-        "file_handlers": ["pan", "email"],
-        "output_formats": ["csv", "json"],
-        "output_dir": str(tmp_path)
-    })
-    
-    # Execute
-    exit_code = run_main(config)
-    
-    # Verify
-    assert exit_code == 0
-    assert (tmp_path / "results.csv").exists()
-    assert (tmp_path / "results.json").exists()
-    
-    # Check content
-    with open(tmp_path / "results.csv") as f:
-        csv_lines = f.readlines()
-        assert len(csv_lines) > 1  # header + data
-    
-    with open(tmp_path / "results.json") as f:
-        json_data = json.load(f)
-        assert "results" in json_data
-        assert len(json_data["results"]) > 0
+import multiprocessing as mp
+from piidigger.models.tasks import Task, TaskType, TaskResult, SHUTDOWN
+from piidigger.orchestration.worker import start_worker_pool, broadcast_shutdown, join_workers
+from piidigger.orchestration.context import WorkerContext
+from piidigger.models.config import Config
 
-def test_scan_with_output_types(tmp_path):
-    """Scan produces all requested output formats."""
-    config = Config.from_dict({
-        "start_dirs": [str(SMALL_TEST_DATA_DIR)],
-        "file_handlers": ["pan"],
-        "output_formats": ["csv", "json", "txt"],
-        "output_dir": str(tmp_path)
-    })
-    
-    exit_code = run_main(config)
-    
+def test_pool_dispatches_and_collects(tmp_path):
+    task_q = mp.Queue()
+    result_q = mp.Queue()
+    log_q = mp.Queue()
+    ctx = WorkerContext(
+        config=Config.default(),
+        task_queue=task_q,
+        result_queue=result_q,
+        log_queue=log_q,
+        stop_event=mp.Event(),
+    )
+    workers = start_worker_pool(ctx, n_workers=2)
+
+    for _ in range(6):
+        task_q.put(Task(task_type=TaskType.NOOP, payload={}))
+    broadcast_shutdown(task_q, n_workers=2)
+    join_workers(workers, timeout=10)
+
+    results = []
+    while not result_q.empty():
+        msg = result_q.get_nowait()
+        if isinstance(msg, TaskResult):
+            results.append(msg)
+
+    assert len(results) == 6
+    assert all(r.status == "ok" for r in results)
+```
+
+---
+
+### Coordinator Fan-out — `tests/integration/test_coordinator_loop.py`
+
+```python
+def test_coordinator_reaches_zero_on_synthetic_tree(tmp_path):
+    """Fan-out loop terminates correctly when all tasks are accounted for.
+    Uses stub handlers that return synthetic new_tasks without touching the filesystem."""
+    ...  # Build ctx with stub DISPATCH, run coordinator, assert clean exit
+
+def test_ctrl_c_exits_within_timeout(tmp_path):
+    """KeyboardInterrupt during coordinator loop exits cleanly."""
+    import signal, subprocess, sys, time
+    proc = subprocess.Popen([sys.executable, "-m", "piidigger", "scan",
+                             "--conf-file", str(tmp_path / "empty.toml")])
+    time.sleep(1)
+    proc.send_signal(signal.SIGINT)
+    proc.wait(timeout=10)
+    assert proc.returncode in (0, 1, 130)  # clean exit codes
+```
+
+---
+
+### Full Scan — `tests/integration/test_full_scan.py`
+
+```python
+from piidigger.run import run_scan
+from piidigger.models.config import Config
+
+def test_scan_produces_csv_output(scan_config):
+    exit_code = run_scan(scan_config)
     assert exit_code == 0
+    csv_path = scan_config.results["csv"]
+    assert csv_path.exists()
+    assert csv_path.stat().st_size > 0
+
+def test_scan_all_output_formats(tmp_path):
+    config = Config.default().model_copy(update={
+        "start_dirs": [SMALL_TEST_DATA_DIR],
+        "results": {
+            "csv": tmp_path / "results.csv",
+            "json": tmp_path / "results.json",
+            "text": tmp_path / "results.txt",
+        },
+    })
+    assert run_scan(config) == 0
     assert (tmp_path / "results.csv").exists()
     assert (tmp_path / "results.json").exists()
     assert (tmp_path / "results.txt").exists()
 
-def test_scan_respects_file_filter(tmp_path):
-    """Scan respects file extension filtering."""
-    config = Config.from_dict({
-        "start_dirs": [str(SMALL_TEST_DATA_DIR)],
-        "file_handlers": ["pan"],
-        "file_extensions": [".csv"],  # Only CSV files
-        "output_formats": ["json"],
-        "output_dir": str(tmp_path)
-    })
-    
-    run_main(config)
-    
-    # Verify only CSV-sourced results in output
-    with open(tmp_path / "results.json") as f:
-        data = json.load(f)
-        for result in data["results"]:
-            assert result["source_file"].endswith(".csv")
-```
+def test_scan_empty_directory(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    config = Config.default().model_copy(update={"start_dirs": [empty]})
+    assert run_scan(config) == 0
 
-### 2. Timeout Enforcement
-
-**File**: `tests/integration/test_timeout_enforcement.py`
-
-**Tests**:
-```python
-def test_timeout_on_base64_xml(tmp_path):
-    """Email handler times out on base64-xml-test.xml."""
-    config = Config.from_dict({
-        "start_dirs": [str(TEST_DATA_DIR / "pan")],
-        "file_handlers": ["email"],
-        "datahandler_timeout_seconds": 30,
-        "output_formats": ["csv"],
-        "output_dir": str(tmp_path)
-    })
-    
-    start = time.time()
-    exit_code = run_main(config)
-    elapsed = time.time() - start
-    
-    # Should complete in ~30-45 seconds (30s timeout + overhead), not 2-4 minutes
-    assert elapsed < 60
-    assert exit_code == 0
-    
-    # Verify log contains timeout warning
-    with open(LOG_FILE) as f:
-        log_content = f.read()
-        assert "TIMED OUT" in log_content or "timeout" in log_content.lower()
-
-def test_partial_results_on_timeout(tmp_path):
-    """Results are still collected even if handler times out."""
-    # Create test file with both email-like strings and base64 data
-    test_file = SMALL_TEST_DATA_DIR / "mixed_content.txt"
-    test_file.write_text("user@example.com\n" + "a" * 1000 + "X" + "\n" + "admin@test.net")
-    
-    config = Config.from_dict({
-        "start_dirs": [str(test_file.parent)],
-        "file_handlers": ["email"],
-        "datahandler_timeout_seconds": 5,
-        "output_formats": ["json"],
-        "output_dir": str(tmp_path)
-    })
-    
-    run_main(config)
-    
-    # Even with timeout, should capture at least some results (before timeout)
-    with open(tmp_path / "results.json") as f:
-        data = json.load(f)
-        results = data["results"]
-        # Should have at least one email match (from unambiguous parts)
-        assert any("user@example.com" in str(r) or "admin@test.net" in str(r) 
-                  for r in results)
-```
-
-### 3. Graceful Shutdown
-
-**File**: `tests/integration/test_graceful_shutdown.py`
-
-**Tests**:
-```python
-def test_shutdown_on_ctrl_c(tmp_path):
-    """Scan shuts down gracefully on Ctrl+C (SIGINT)."""
-    config = Config.from_dict({
-        "start_dirs": [str(LARGE_TEST_DATA_DIR)],  # Large enough to take time
-        "file_handlers": ["pan", "email"],
-        "output_formats": ["csv"],
-        "output_dir": str(tmp_path)
-    })
-    
-    # Start scan in background
-    proc = mp.Process(target=run_main, args=(config,))
-    proc.start()
-    
-    time.sleep(2)  # Let it start
-    proc.terminate()  # Send SIGTERM
-    proc.join(timeout=5)
-    
-    assert not proc.is_alive()  # Process exited cleanly
-    
-    # Verify output file was created (partial results OK)
-    assert (tmp_path / "results.csv").exists()
-    
-    # Verify no leftover temp files
-    temp_dir = Path("/tmp/piidigger_*")
-    temp_files = list(Path("/tmp").glob("piidigger_*"))
-    assert len(temp_files) == 0
-
-def test_shutdown_cleanup(tmp_path):
-    """All resources cleaned up on shutdown."""
-    # Before scan: no locks
-    lock_dir = tmp_path / "locks"
-    lock_dir.mkdir()
-    
-    config = Config.from_dict({
-        "start_dirs": [str(SMALL_TEST_DATA_DIR)],
-        "file_handlers": ["pan"],
-        "output_formats": ["csv"],
-        "output_dir": str(tmp_path)
-    })
-    
-    run_main(config)
-    
-    # After scan: all locks released, temp files cleaned
-    lock_files = list(lock_dir.glob("*"))
-    assert len(lock_files) == 0
-```
-
-### 4. Edge Cases
-
-**File**: `tests/integration/test_edge_cases.py`
-
-**Tests**:
-```python
-def test_empty_directory_scan():
-    """Scan completes successfully on empty directory."""
-    empty_dir = tmp_path / "empty"
-    empty_dir.mkdir()
-    
-    config = Config.from_dict({
-        "start_dirs": [str(empty_dir)],
-        "file_handlers": ["pan"],
-        "output_formats": ["csv"]
-    })
-    
-    exit_code = run_main(config)
-    assert exit_code == 0
-
-def test_directory_with_no_matches():
-    """Scan completes on files with no PII."""
-    config = Config.from_dict({
-        "start_dirs": [str(TEST_DATA_DIR / "plaintext")],
-        "file_handlers": ["pan"],
-        "output_formats": ["json"]
-    })
-    
-    run_main(config)
-    # May have 0 results, but shouldn't error
-
-def test_file_access_denied():
-    """Scan handles permission denied errors gracefully."""
-    restricted_dir = tmp_path / "restricted"
-    restricted_dir.mkdir()
-    restricted_file = restricted_dir / "forbidden.txt"
-    restricted_file.write_text("secret data")
-    os.chmod(restricted_file, 0o000)  # No permissions
-    
-    config = Config.from_dict({
-        "start_dirs": [str(restricted_dir)],
-        "file_handlers": ["pan"]
-    })
-    
+def test_scan_permission_denied_file(tmp_path):
+    """A file we can't read should be logged and skipped; scan should not crash."""
+    import os
+    restricted = tmp_path / "forbidden.txt"
+    restricted.write_text("secret")
+    os.chmod(restricted, 0o000)
+    config = Config.default().model_copy(update={"start_dirs": [tmp_path]})
     try:
-        exit_code = run_main(config)
-        # Should handle gracefully, not crash
-        assert exit_code in (0, 1)  # Success or caught error
+        exit_code = run_scan(config)
+        assert exit_code in (0, 1)
     finally:
-        os.chmod(restricted_file, 0o644)  # Cleanup
+        os.chmod(restricted, 0o644)
+```
 
-def test_many_matches_single_file():
-    """Scan handles file with 1000+ matches."""
-    test_file = tmp_path / "many_matches.txt"
-    # Write file with 1000 PAN-like strings
-    lines = ["4111111111111111\n"] * 1000
-    test_file.write_text("".join(lines))
-    
-    config = Config.from_dict({
-        "start_dirs": [str(test_file.parent)],
-        "file_handlers": ["pan"]
+---
+
+### Timeout Enforcement — `tests/integration/test_timeout_enforcement.py`
+
+```python
+import time
+from piidigger.run import run_scan
+from piidigger.models.config import Config
+
+@pytest.mark.slow
+def test_base64_xml_completes_under_five_minutes(tmp_path):
+    config = Config.default().model_copy(update={
+        "start_dirs": [TEST_DATA_DIR / "pan"],
+        "data_handlers": ["email"],
+        "default_timeout_seconds": 30,
+        "results": {"csv": tmp_path / "results.csv"},
+        "log_file": tmp_path / "test.log",
     })
-    
-    run_main(config)
-    # Should complete without memory exhaustion
+    start = time.monotonic()
+    run_scan(config)
+    elapsed = time.monotonic() - start
+    assert elapsed < 300  # < 5 minutes
+
+    log_text = (tmp_path / "test.log").read_text()
+    assert "timeout" in log_text.lower()
+```
+
+---
+
+### CLI Layer — `tests/integration/test_cli.py`
+
+```python
+from click.testing import CliRunner
+from piidigger.cli.main import cli
+
+def test_cli_scan_exits_zero(tmp_path, scan_config_toml):
+    runner = CliRunner()
+    result = runner.invoke(cli, ["scan", "--conf-file", str(scan_config_toml)])
+    assert result.exit_code == 0
+
+def test_cli_config_generate(tmp_path):
+    runner = CliRunner()
+    out = tmp_path / "generated.toml"
+    result = runner.invoke(cli, ["config", "generate", "--output", str(out)])
+    assert result.exit_code == 0
+    assert out.exists()
+
+def test_cli_version():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--version"])
+    assert "2.0.0" in result.output
 ```
 
 ---
 
 ## E2E Tests
 
-### 1. Baseline Comparison
-
-**File**: `tests/e2e/test_baseline_comparison.py`
-
-**Purpose**: Ensure refactored version produces identical output to original implementation.
-
-**Tests**:
-```python
-def test_output_csv_matches_baseline(tmp_path):
-    """CSV output matches baseline results."""
-    config = Config.from_dict(BASELINE_CONFIG)
-    config.output_dir = str(tmp_path)
-    
-    run_main(config)
-    
-    # Load generated output
-    generated_path = tmp_path / "results.csv"
-    with open(generated_path) as f:
-        generated_csv = f.read()
-    
-    # Load baseline
-    with open(BASELINE_CSV_PATH) as f:
-        baseline_csv = f.read()
-    
-    # Compare
-    assert generated_csv == baseline_csv
-
-def test_output_json_matches_baseline(tmp_path):
-    """JSON output has same results as baseline (order-independent)."""
-    config = Config.from_dict(BASELINE_CONFIG)
-    config.output_dir = str(tmp_path)
-    
-    run_main(config)
-    
-    # Load generated
-    with open(tmp_path / "results.json") as f:
-        generated = json.load(f)
-    
-    # Load baseline
-    with open(BASELINE_JSON_PATH) as f:
-        baseline = json.load(f)
-    
-    # Compare (sort results for order-independent comparison)
-    gen_results = sorted(generated["results"], key=str)
-    base_results = sorted(baseline["results"], key=str)
-    assert gen_results == base_results
-
-def test_match_count_matches_baseline():
-    """Total match count equals baseline."""
-    config = Config.from_dict(BASELINE_CONFIG)
-    results = run_main_collect_results(config)
-    
-    baseline_count = sum(1 for _ in load_baseline_results())
-    assert len(results) == baseline_count
-```
-
----
-
-## Test Fixtures
-
-**File**: `tests/conftest.py`
+### Baseline Comparison — `tests/e2e/test_baseline_comparison.py`
 
 ```python
-import pytest
+import json, csv
 from pathlib import Path
-from piidigger.classes import Config
+from piidigger.run import run_scan
+from piidigger.models.config import Config
 
-# Test data directories
-TEST_DATA_DIR = Path(__file__).parent.parent / "testdata"
-SMALL_TEST_DATA_DIR = Path(__file__).parent / "fixtures/sample_data"
-LARGE_TEST_DATA_DIR = TEST_DATA_DIR
+BASELINE_DIR = Path(__file__).parent.parent / "fixtures" / "baseline_results"
 
-# Sample configurations
-SAMPLE_CONFIG = {
-    "start_dirs": [str(SMALL_TEST_DATA_DIR)],
-    "file_handlers": ["pan", "email"],
-    "file_extensions": [],  # All
-    "mime_types": [],  # All
-    "output_formats": ["csv"],
-    "datahandler_timeout_seconds": 30,
-}
+@pytest.mark.e2e
+def test_csv_matches_baseline(tmp_path):
+    config = Config.default().model_copy(update={
+        "start_dirs": [TEST_DATA_DIR],
+        "results": {"csv": tmp_path / "results.csv"},
+    })
+    run_scan(config)
+    generated = sorted(csv.DictReader(open(tmp_path / "results.csv")), key=str)
+    baseline  = sorted(csv.DictReader(open(BASELINE_DIR / "baseline.csv")), key=str)
+    assert generated == baseline
 
-BASELINE_CONFIG = {
-    "start_dirs": [str(TEST_DATA_DIR)],
-    "file_handlers": ["pan", "email", "ssn"],
-    "output_formats": ["csv", "json"],
-}
-
-@pytest.fixture
-def sample_config():
-    """Provide sample configuration for tests."""
-    return Config.from_dict(SAMPLE_CONFIG)
-
-@pytest.fixture
-def temp_output_dir(tmp_path):
-    """Provide temporary output directory."""
-    return tmp_path
-
-@pytest.fixture
-def sample_task():
-    """Provide sample task for testing."""
-    from piidigger.orchestration.tasks import Task
-    return Task(
-        task_id="test-task-1",
-        task_type="scan_file",
-        payload={"file_path": str(SMALL_TEST_DATA_DIR / "test.txt")},
-        timeout_seconds=30
-    )
+@pytest.mark.e2e
+def test_json_matches_baseline(tmp_path):
+    config = Config.default().model_copy(update={
+        "start_dirs": [TEST_DATA_DIR],
+        "results": {"json": tmp_path / "results.json"},
+    })
+    run_scan(config)
+    generated = sorted(json.loads(l) for l in open(tmp_path / "results.json"))
+    baseline  = sorted(json.loads(l) for l in open(BASELINE_DIR / "baseline.json"))
+    assert generated == baseline
 ```
 
 ---
 
 ## Running Tests
 
-### All Tests
 ```bash
-pytest tests/ -v
+# All tests
+uv run pytest tests/ -v
+
+# Fast tests only (skip slow timeout tests and e2e)
+uv run pytest tests/ -m "not slow and not e2e" -v
+
+# With coverage report
+uv run pytest tests/ --cov=src/piidigger --cov-report=term-missing
+
+# Specific phase work
+uv run pytest tests/unit/models/ -v                    # Phase 1
+uv run pytest tests/unit/orchestration/ -v             # Phase 1-2
+uv run pytest tests/integration/test_worker_pool.py -v # Phase 1 integration
+uv run pytest tests/integration/ -v                    # Phase 3+
+uv run pytest tests/e2e/ -m e2e -v                    # Phase 4+
 ```
 
-### With Coverage
-```bash
-pytest --cov=src/piidigger tests/ --cov-report=html
-```
+### pytest markers
 
-### Specific Test Categories
-```bash
-# Unit tests only
-pytest tests/unit/ -v
+Declare in `pyproject.toml`:
 
-# Integration tests only
-pytest tests/integration/ -v
-
-# E2E tests only
-pytest tests/e2e/ -v
-
-# Specific test file
-pytest tests/unit/orchestration/test_handlers.py -v
-
-# Specific test function
-pytest tests/unit/orchestration/test_handlers.py::test_handle_scan_file -v
-```
-
-### Watch Mode (during development)
-```bash
-pytest-watch tests/ -- -v
+```toml
+[tool.pytest.ini_options]
+markers = [
+    "slow: tests that take > 5 seconds (timeout enforcement, large scans)",
+    "e2e: end-to-end tests requiring full testdata/ and baseline files",
+]
 ```
 
 ---
 
 ## Coverage Requirements
 
-**Target**: ≥ 80% coverage
+| Module | Target | Notes |
+|---|---|---|
+| `src/piidigger/orchestration/` | ≥ 90% | Critical new code |
+| `src/piidigger/models/` | ≥ 90% | Validation logic |
+| `src/piidigger/datahandlers/` | ≥ 80% | Existing logic, verified correct |
+| `src/piidigger/filehandlers/` | ≥ 80% | Existing logic |
+| `src/piidigger/outputhandlers/` | ≥ 85% | New OutputSink contract |
+| `src/piidigger/run.py` | ≥ 75% | Thin wiring layer |
+| `src/piidigger/cli/` | — | Tested via `CliRunner`; exclude from cov target |
 
-**Breakdown**:
-- `src/piidigger/orchestration/`: 95% (critical new code)
-- `src/piidigger/classes.py`: 85% (modified)
-- `src/piidigger/piidigger.py`: 80% (main function significantly changed)
-- `src/piidigger/datahandlers/`: 75% (preserved, not modified)
-- `src/piidigger/filehandlers/`: 75% (preserved, not modified)
-
-**Exclude from coverage**:
-- `__main__.py` (CLI entry point, difficult to test)
-- Test files themselves
-- Old ProcessManager class (if not removed, mark as deprecated)
+**Minimum overall**: ≥ 80%
 
 ---
 
 ## Known Test Challenges
 
-### 1. Multiprocessing Tests Are Hard
+### Multiprocessing tests on Windows `spawn`
 
-**Challenge**: Multiprocessing code difficult to unit test (processes isolated, hard to mock).
+Integration tests that spin up real `mp.Process` workers are slower on Windows due to `spawn` reimporting the entire module tree per process. Keep the unit tests using `threading.Thread` + in-process queues (`queue.SimpleQueue`, `threading.Event`) for speed. Reserve real `mp.Process` for integration tests that are explicitly verifying cross-process behavior.
 
-**Solution**: 
-- Test at integration level (actual processes)
-- Use queue fixtures that can be inspected
-- Test handler functions in isolation as unit tests
+### Slow timeout tests
 
-### 2. Timeout Tests Require Real Delays
+Timeout tests inherently take seconds. Mark them `@pytest.mark.slow` and exclude from the default `pytest` run. A CI job can include them on schedule or on release branches.
 
-**Challenge**: Timeout tests inherently slow (must wait for timeout to occur).
+### `rich.Live` in test environments
 
-**Solution**:
-- Use short timeouts (1-5 seconds) for tests
-- Run timeout tests in separate test suite
-- Use `-m slow` marker for slow tests
+`rich.Live` detects whether it has a TTY. In `pytest` (piped output), `Console.is_terminal` is `False` and `ProgressDisplay` goes into no-op mode — this is correct behavior. If a test needs to assert on progress output, pass `is_tty=True` explicitly and use `rich`'s test utilities or capture `stderr`.
 
-```bash
-# Run only fast tests
-pytest tests/ -m "not slow" -v
+### E2E baseline generation
 
-# Run only slow tests
-pytest tests/ -m "slow" -v
-```
+The baseline in `tests/fixtures/baseline_results/` must be generated from the 1.x `main` branch **before** the old orchestration code is deleted in Phase 4. Procedure:
 
-### 3. File System Tests Need Cleanup
+1. Check out `main` branch
+2. Run `piidigger` against `testdata/` with all output formats
+3. Copy output files to `tests/fixtures/baseline_results/`
+4. Commit to `refactor` branch before Phase 4 begins
 
-**Challenge**: Tests create files/directories, must clean up properly.
-
-**Solution**: Use `pytest.tmp_path` fixture (automatic cleanup).
-
----
-
-## Success Criteria for Testing
-
-- [ ] All unit tests pass
-- [ ] All integration tests pass
-- [ ] All E2E tests pass
-- [ ] Coverage ≥ 80%
-- [ ] base64-xml-test.xml completes in <5 minutes
-- [ ] Output matches baseline comparison
-- [ ] No test flakiness (tests pass consistently)
-- [ ] Linting passes: `ruff check tests/`
+Any intentional format difference in 2.0 (e.g. lineage columns present but empty) must be documented and the comparison adjusted accordingly.

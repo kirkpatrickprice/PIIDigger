@@ -1,10 +1,24 @@
 # Current Implementation Issues & Technical Debt
 
-**Branch**: `refactor`  
-**Status**: Reference Document  
-**Last Updated**: 2026-03-06
+**Branch**: `refactor`
+**Status**: Historical Reference — Architecture Decided
+**Last Updated**: 2026-06-15
 
-This document catalogs specific issues in the current codebase that the refactor will address.
+This document catalogs the specific problems in the 1.x codebase that motivated the 2.0 refactor. It is now a **historical record**: the architecture decisions that address each issue are captured in [ARCHITECTURE_REDESIGN.md](./ARCHITECTURE_REDESIGN.md) and the work is tracked in [IMPLEMENTATION_CHECKLIST.md](./IMPLEMENTATION_CHECKLIST.md). Issues already resolved by pre-refactor commits are marked **[DONE]**.
+
+---
+
+## Already Resolved (Pre-Refactor Commits)
+
+The following issues were addressed on the `refactor` branch before the orchestration rewrite began, and are closed:
+
+| Issue | Resolution |
+|---|---|
+| argparse CLI — verbose, hard to extend | **[DONE]** Migrated to Click |
+| Hand-rolled colorama/ctypes terminal code | **[DONE]** Replaced with Rich (`console.py`) |
+| `tomli` third-party TOML dependency | **[DONE]** Replaced with `stdlib tomllib` |
+| camelCase naming in CLI layer | **[DONE]** Click migration used snake_case |
+| No linting or type-checking in CI | **[DONE]** ruff + mypy gates added |
 
 ---
 
@@ -12,126 +26,37 @@ This document catalogs specific issues in the current codebase that the refactor
 
 ### 1.1 SENTINEL-Based Deadlock Risk
 
-**File**: `src/piidigger/piidigger.py` lines ~210-229 (fileHandler process)
+**File**: `piidigger.py` — `file_handler_dispatcher`
 
-**Issue**:
-```python
-# Current pattern
-while True:
-    item = getItem(queues['filesQ'])
-    if item is SENTINEL:
-        with activeFilesQProcesses.get_lock():
-            activeFilesQProcesses.value -= 1
-            if activeFilesQProcesses.value == 0:
-                clearQ(queues['filesQ'])
-            else:
-                queues['filesQ'].put(SENTINEL)  # Signal next worker
-        break
-    # Process item...
-```
+If a worker hangs (e.g. email regex on `base64-xml-test.xml`), it never reaches the SENTINEL decrement. The next worker waiting on `filesQ.get()` never receives its signal. The entire pipeline deadlocks: one worker consuming CPU, N-1 workers waiting, queue empty.
 
-**Problem**:
-- If a worker hangs (e.g., email regex on base64-xml-test.xml), it never reaches the decrement
-- Next worker waiting on `filesQ.get()` never receives the SENTINEL signal
-- System deadlocks: one worker busy, N-1 workers waiting, queue empty
-
-**Impact**: Occasional hangs even on successful scans. System appears to "freeze" while worker consumes CPU.
-
-**Refactor Solution**: Task queue model - hung worker process can be terminated independently. No coordination chain to break.
+**2.0 Resolution**: Heartbeat + targeted worker restart. A hung worker is detected by the coordinator and forcibly terminated. No chain to break. See [ARCHITECTURE_REDESIGN.md § Reliability](./ARCHITECTURE_REDESIGN.md#reliability-timeouts--worker-restart).
 
 ---
 
-### 1.2 Race Condition in activeFilesQProcesses Counter
+### 1.2 Race Condition in `active_files_q_processes` Counter
 
-**File**: `src/piidigger/piidigger.py` lines ~120-121, ~215-218
+**File**: `piidigger.py` lines ~120-121, ~215-218
 
-**Issue**:
-```python
-# Increment
-with activeFilesQProcesses.get_lock():
-    activeFilesQProcesses.value += 1
+The counter serves dual purpose (tracking + termination signal). If a worker crashes without decrementing, the counter goes out of sync. Last-worker detection fails; pipeline deadlocks.
 
-# ... (worker processing)
-
-# Decrement
-with activeFilesQProcesses.get_lock():
-    activeFilesQProcesses.value -= 1
-    if activeFilesQProcesses.value == 0:
-        clearQ(queues['filesQ'])
-```
-
-**Problem**:
-- If worker crashes/exits without decrementing, counter gets out of sync
-- Lock contention on high-CPU workloads can cause delayed updates
-- Counter serves dual purpose (tracking + termination signal) - fragile
-
-**Impact**: Incorrect termination detection, potential deadlock if last-worker detection fails.
-
-**Refactor Solution**: No manual counter management. Worker pool handles its own lifecycle. Results collected independently.
+**2.0 Resolution**: No manual counter. The coordinator's `pending` variable tracks outstanding tasks with no locks — single writer, single reader, no races.
 
 ---
 
 ### 1.3 Inability to Add New Process Types
 
-**Context**: User previously attempted to add parallel `fileScanner` process to rebalance work → **FAILED**
+Adding a new process type required: new queue(s), new `ProcessManager` registration, modified SENTINEL coordination, updated counter management, updated shutdown choreography — touching every layer and risking the existing handoff chain. Parallel file enumeration was attempted and abandoned for this reason.
 
-**Issue**:
-- Current architecture: role-specialized processes with fixed queue connections
-- Adding new process type requires:
-  1. Creating new queue(s)
-  2. Registering process in ProcessManager
-  3. Modifying SENTINEL coordination logic
-  4. Updating counter management
-  5. Updating shutdown choreography
-  6. Testing entire pipeline (risk of breaking existing handoff)
-
-**Example**: To parallelize file enumeration, you'd need to:
-- Create new queue between findDirsWorker and findFilesWorker
-- Make findFilesWorker pull from multiple queues
-- Update SENTINEL logic to account for multiple sources
-- Risk: break dirsQ → filesQ coordination
-
-**Impact**: Architecture is closed to extension. User gave up on parallelization.
-
-**Refactor Solution**: Single task queue. Adding "parallel_enum_files" task type = add elif branch. Workers agnostic to task type.
+**2.0 Resolution**: Adding a task type adds one entry to the `DISPATCH` table and one handler function. No other code changes.
 
 ---
 
-### 1.4 Fixed Process Role Specialization
+### 1.4 Fixed Process Role Specialization / Load Imbalance
 
-**File**: `src/piidigger/piidigger.py` lines ~408-428 (ProcessManager registration)
+`findDirsWorker`, `findFilesWorker`, and `fileHandler` had fixed roles. Slow directory enumeration left file handlers idle; slow file scanning left everything else idle. No dynamic rebalancing.
 
-**Issue**:
-```python
-mainPM.register(target=filescan.findDirsWorker, name='findDirsWorker', num_processes=1, ...)
-mainPM.register(target=filescan.findFilesWorker, name='findFilesWorker', num_processes=1, ...)
-mainPM.register(target=fileHandlerDispatcher, name='fileHandler', num_processes=config.getMaxProcs(), ...)
-```
-
-**Problem**:
-- Each process has one job
-- If directory enumeration is slow: findFilesWorker idle (waiting for dirsQ), fileHandlers idle (waiting for filesQ)
-- If file scanning is slow: dirsQ fills, findDirsWorker blocked, findFilesWorker blocked
-- No dynamic rebalancing or work stealing
-
-**Load Pattern Graph**:
-```
-Scenario: Slow directory enumeration
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-findDirsWorker:  [BUSY] [BUSY]              [BUSY]
-                 =============================== (enumerating 100k dirs)
-
-findFilesWorker:                 [IDLE]... [IDLE]
-                                 (waiting for dirsQ)
-
-fileHandlers(8): [IDLE] [IDLE].. 
-                 (waiting for filesQ)
-```
-
-**Impact**: Underutilization of CPU resources on typical mixed workloads.
-
-**Refactor Solution**: All workers pull from single task queue. Naturally load-balanced.
+**2.0 Resolution**: All workers are identical. They pull from a single task queue. Load balancing is automatic.
 
 ---
 
@@ -139,79 +64,25 @@ fileHandlers(8): [IDLE] [IDLE]..
 
 ### 2.1 Threading-Based Timeout Blocked by GIL
 
-**Attempted Solution** (early in session): Threading for timeout enforcement.
+Threading was tried for timeout enforcement. Python cannot forcibly terminate a thread; `join(timeout=X)` returns but the worker thread still holds the GIL. Unusable for CPU-bound regex operations.
 
-**Issue**:
-```python
-def call_with_timeout_thread(handler_func, timeout_sec):
-    result = [None]
-    def worker():
-        result[0] = handler_func()
-    
-    thread = threading.Thread(target=worker)
-    thread.start()
-    thread.join(timeout=timeout_sec)  # Wait up to N seconds
-    
-    if thread.is_alive():
-        # Thread still running - timeout occurred
-        # BUT: we can't terminate a thread in Python!
-```
-
-**Problem**:
-- Python Global Interpreter Lock (GIL) means main thread doesn't get CPU time while worker thread is busy
-- `join(timeout=X)` expires, but worker thread still holds GIL
-- Can't forcefully terminate thread (Python limitation)
-- Main thread starved of GIL time, unable to proceed
-
-**Impact**: **Threading unusable for CPU-bound operations** (regex pattern matching is CPU-bound).
-
-**Refactor Solution**: Process-based timeout. Each process has separate GIL. Can forcefully terminate subprocess.
+**2.0 Resolution**: Process-level termination. Each worker is a separate process with its own GIL. The coordinator calls `proc.terminate()` on expired workers.
 
 ---
 
 ### 2.2 Multiprocessing Timeout with File-Based IPC
 
-**Attempted Solution** (mid session): Multiprocessing with JSON file result passing.
+A `multiprocessing.Process` + JSON result file approach was tried. Process termination mid-write produced corrupt JSON. Timeouts were configured but not reliably firing. `base64-xml-test.xml` still caused 2-4 minute hangs.
 
-**Issue**:
-```python
-def call_data_handler_with_timeout(handler_func, timeout_sec):
-    result_file = f"/tmp/result_{uuid4()}.json"
-    
-    # Start handler in separate process
-    proc = mp.Process(target=handler_func, args=(..., result_file))
-    proc.start()
-    proc.join(timeout=timeout_sec)
-    
-    if proc.is_alive():
-        proc.terminate()  # Can forcefully terminate subprocess
-        # But reading result_file may fail or be partial
-```
-
-**Problem**:
-- File-based IPC unreliable (partial writes, not yet flushed)
-- Process termination mid-write → corrupt JSON
-- Reading result from incomplete file → parse errors
-- Exception handling across process boundary difficult
-
-**Impact**: Timeouts configured but not triggering. Logs show `Timeout=False` even with hangs. base64-xml-test.xml still causes 2-4 minute hang.
-
-**Refactor Solution**: Queue-based result passing with `multiprocessing.Pool` API. Timeout handled at pool level, not file level.
+**2.0 Resolution**: Queue-based result passing. Coordinator-side deadline monitoring via heartbeats. No file-based IPC for results.
 
 ---
 
 ### 2.3 No Timeout Logging or Visibility
 
-**File**: `src/piidigger/globalfuncs.py` (timeout wrapper, if added in earlier edits)
+Timeouts produced no log messages. Users saw silent hangs with no indication of which file or handler was involved.
 
-**Issue**:
-- Timeout mechanism added but produces no log messages
-- User doesn't know which handlers timed out, which files, or how many times
-- Silent failures difficult to debug
-
-**Impact**: Users unaware of partial results or skipped processing.
-
-**Refactor Solution**: Every task timeout → explicit log message with task_id, handler, file, timeout_duration.
+**2.0 Resolution**: Every timeout produces an explicit log entry (task_id, file path, handler, duration) and a `status="timeout"` result record visible in output.
 
 ---
 
@@ -219,319 +90,126 @@ def call_data_handler_with_timeout(handler_func, timeout_sec):
 
 ### 3.1 Naming Convention Violations
 
-**File**: Scattered throughout codebase
+`dirsQ`, `filesQ`, `resultsQ`, `findDirsWorker`, `findFilesWorker`, `fileHandlerDispatcher` — mixed camelCase and abbreviated names throughout.
 
-**Issues**:
-- Queue names: `dirsQ`, `filesQ`, `resultsQ` (abbreviated, not PEP8)
-  - ✗ `getItem(queues['filesQ'])`
-  - ✓ `get_task(queues['files_queue'])`
-  
-- Function names: mixed camelCase/snake_case
-  - ✗ `findDirsWorker`, `findFilesWorker`, `fileHandlerDispatcher`
-  - ✓ `find_dirs_worker`, `find_files_worker`, `file_handler_dispatcher`
-  
-- Variable names: abbreviated or unclear
-  - ✗ `pm`, `dh`, `ft`, `cfg`
-  - ✓ `process_manager`, `data_handler`, `file_type`, `config`
-
-**Impact**: 
-- Inconsistent codebase harder to maintain
-- Violates PEP8, fails linter checks
-- New contributors confused by style
-
-**Refactor Solution**: Systematic rename to PEP8 conventions. Use linter-enforced formatting.
+**2.0 Resolution**: Global snake_case rename in Phase 0. Enforced by ruff `N` ruleset in CI. No exceptions.
 
 ---
 
 ### 3.2 Missing Type Hints
 
-**File**: All process and handler functions
+Process functions had no type hints, making IDE support and static analysis impossible.
 
-**Issue**:
-```python
-# Current
-def fileHandlerDispatcher(config, queues, totals, stopEvent, activeFilesQProcesses, logManager):
-    # ... no type hints, unclear what each param is
-
-# Should be
-def file_handler_dispatcher(
-    config: Config,
-    queues: dict[str, mp.Queue],
-    totals: dict[str, mp.Value],
-    stop_event: mp.Event,
-    active_files_queue_processes: mp.Value,
-    log_manager: LogManager
-) -> None:
-    # ... clear intent, IDE support
-```
-
-**Impact**:
-- No IDE autocomplete or inline documentation
-- Static type checkers can't find bugs
-- Self-documenting code (hints serve as documentation)
-
-**Refactor Solution**: 100% type hint coverage across all files.
+**2.0 Resolution**: 100% type hint coverage required. mypy `--strict` enforced in CI.
 
 ---
 
 ### 3.3 Inadequate Docstrings
 
-**File**: Process functions and handlers
+Process functions and handlers had no docstrings.
 
-**Issue**:
-```python
-# Current: no docstring
-def fileHandlerDispatcher(config, queues, ...):
-    while True:
-        item = queuefuncs.getItem(queues['filesQ'])
-        # ...
-
-# Should be
-def file_handler_dispatcher(
-    config: Config,
-    queues: dict[str, mp.Queue],
-    ...
-) -> None:
-    """
-    Main file scanner worker process.
-    
-    Consumes file paths from files_queue, scans with configured data handlers,
-    writes results to output-specific result queues.
-    
-    Args:
-        config: Application configuration
-        queues: Inter-process queue dict with keys:
-            - 'files_queue': Input (file paths)
-            - 'csv_results_queue': Output (CSV rows)
-            - 'json_results_queue': Output (JSON records)
-        stop_event: Shutdown signal
-        log_manager: Logging manager for queue-based logging
-    
-    Returns:
-        None (process target function)
-        
-    Raises:
-        (Logs exceptions, doesn't raise)
-    
-    Example:
-        >>> config = Config('config.toml')
-        >>> queues = {'files_queue': mp.Queue(), ...}
-        >>> proc = mp.Process(target=file_handler_dispatcher, 
-        ...                     args=(config, queues, ...))
-        >>> proc.start()
-    """
-```
-
-**Impact**:
-- New developers can't understand function purpose without reading full code
-- No IDE hint popup explaining parameters
-- Hard to maintain
-
-**Refactor Solution**: All functions documented with Args, Returns, description.
+**2.0 Resolution**: All public functions require docstrings. Protocol interfaces document their contracts.
 
 ---
 
 ### 3.4 Insufficient Test Coverage
 
-**File**: `tests/` directory
+No tests for process orchestration, queue coordination, or integration pipelines. Only data-handler and file-handler unit tests existed.
 
-**Issue**:
-```
-tests/
-├── test_email.py (data handler tests)
-├── test_pan.py (data handler tests)
-├── test_read_*.py (file type tests)
-└── (no process orchestration tests)
-```
-
-**Missing**:
-- Unit tests for process functions
-- Unit tests for queue coordination
-- Integration tests for full pipeline
-- Edge case tests (timeout, crash recovery)
-- Baseline comparison tests
-
-**Impact**:
-- Can't refactor confidently (no regression detection)
-- Bugs introduced during refactoring not caught
-- Edge cases not discovered until production
-
-**Refactor Solution**: 
-- Unit tests: 100% handler coverage
-- Integration tests: full scan pipeline
-- E2E tests: baseline comparison
-- Target: ≥ 80% coverage
+**2.0 Resolution**: Comprehensive test pyramid per [TESTING_STRATEGY.md](./TESTING_STRATEGY.md). Coverage ≥ 80% enforced in CI.
 
 ---
 
-### 3.5 Pydantic Model Gap
+### 3.5 No Validated Data Models at IPC Boundary
 
-**File**: Data definitions scattered
+Tasks and results were bare dicts or positional args. No validation on deserialization from queues.
 
-**Issue**:
-- Task/result definitions not centralized
-- Config loading done with dict/getters, not validated models
-- No schema validation or IDE support
-
-**Impact**:
-- Config typos not caught until runtime
-- Data serialization unclear
-- Hard to extend config
-
-**Refactor Solution**:
-- Dataclasses (or Pydantic) for Task/Result
-- Explicit validation of all inputs
-- Type safe throughout
+**2.0 Resolution**: `Task` and `TaskResult` are Pydantic v2 models (frozen, validated). A malformed task cannot reach a handler.
 
 ---
 
 ## 4. Configuration Issues
 
-### 4.1 Scattered Configuration Getters
+### 4.1 Getter-Soup Config Class
 
-**File**: `src/piidigger/classes.py` (Config class), multiple getter methods
+`Config` in `classes.py` exposed ~12 single-purpose getter methods (`getMaxProcs()`, `getDataHandlers()`, ...). No nested structure, no IDE autocomplete, no validation, hard to extend.
 
-**Issue**:
-```python
-# Many single-purpose getters
-config.getMaxProcs()
-config.getMaxFilesScanProcs()
-config.getEnabledOutputTypes()
-config.getLogFile()
-config.getDataHandlers()
-# ...
-```
-
-**Problem**:
-- No clear separation: which getters are for multiprocessing? which for output?
-- New settings require new getter methods
-- Hard to explore what config options exist
-
-**Impact**:
-- Difficult to understand configuration structure
-- Tedious to add new settings
-- Unclear which settings depend on each other
-
-**Refactor Solution**:
-- Nested config structure: `config.multiprocessing`, `config.output_formats`, `config.data_handlers`
-- Dataclass or dict-like access
-- IDE autocomplete support
+**2.0 Resolution**: `Config` replaced by a validated Pydantic model with nested sections (`config.results`, `config.archives`, etc.) in `models/config.py`.
 
 ---
 
-### 4.2 Hard-to-Find Default Values
+### 4.2 `errorCodes` Wrong Module Reference (Latent Bug)
 
-**File**: `src/piidigger/globalfuncs.py` (getDefaultConfig function)
+`classes.py:66` and `:110` call `globalfuncs.errorCodes['invalidConfig']`, but `errorCodes` lives in `globalvars`, not `globalfuncs`. The invalid-config and missing-start-dir error paths crash with `AttributeError` instead of a clean exit. A sibling bug at `piidigger.py:288` references the non-existent key `errorCodes['unknown']` (correct key: `'unknownError'`).
 
-**Issue**:
-- Default values embedded in Python function
-- Not obvious to user what the defaults are
-- Hard to compare custom config against defaults
+**2.0 Resolution**: Both bugs closed as part of the `Config` model rewrite in Phase 0/3.
 
-**Impact**:
-- Users don't know what settings affect timeout
-- Difficult to debug configuration issues
+---
 
-**Refactor Solution**:
-- Default config in TOML (user-readable)
-- Well-commented with explanations
-- Schema validation against defaults
+### 4.3 Hard-to-Find Default Values
+
+Defaults were embedded in a Python function, invisible to users and hard to compare against a custom config.
+
+**2.0 Resolution**: Default config expressed as a TOML template (generated by `piidigger config generate`). Schema validation against the Pydantic model provides clear error messages.
 
 ---
 
 ## 5. Logging Issues
 
-### 5.1 Queue-Based Logging Complexity
+### 5.1 Hand-Rolled Queue Logging Lifecycle
 
-**File**: `src/piidigger/logmanager.py`
+`LogManager` used a custom `log_processor` subprocess with a `sleep(2)` shutdown and manual SENTINEL-on-logQ signaling. Hard to reason about; a blocked logQ could stall the pipeline; the 2-second sleep was a guess.
 
-**Issue**:
-- All multi-process logging goes through queue
-- If logging queue blocks, entire pipeline stalls
-- Difficult to debug logging itself
-
-**Impact**:
-- Occasional hangs might be logging-related (hard to distinguish)
-- Adds latency to critical path
-
-**Refactor Solution**:
-- Use standard Python `multiprocessing.managers.SyncManager` logging handler (simpler)
-- Or: async logging with fallback to stderr (non-blocking)
+**2.0 Resolution**: Replaced by stdlib `logging.handlers.QueueListener` (a thread, not a process) started before any worker and stopped after all workers have joined. No sleeps, no manual SENTINEL on the log queue.
 
 ---
 
 ## 6. Edge Cases Not Handled
 
-### 6.1 base64-xml-test.xml Catastrophic Backtracking
+### 6.1 `base64-xml-test.xml` Catastrophic Backtracking
 
-**File**: `testdata/pan/base64-xml-test.xml` (1.5MB)
+The email regex catastrophically backtracked on 1.5 MB of embedded base64 data, causing 2-4 minute hangs with no timeout enforcement.
 
-**Issue**:
-- Email regex (and possibly PAN regex) catastrophic backtracking on embedded base64 data
-- Causes 2-4 minute hang when scanning with email handler enabled
-- No timeout enforcement
+**2.0 Resolution**: Per-task timeout (default 30s) enforced by coordinator deadline monitoring. Timeout is logged; run continues. Exit criterion: file completes in < 5 minutes.
 
-**Impact**:
-- Users report "system hung" on this specific file
-- Scan timeout config doesn't help (not working)
-
-**Refactor Solution**:
-- Per-handler timeout enforcement
-- Task timeout = 30 seconds
-- If email handler takes >30s, log timeout and continue
-- Test: base64-xml-test.xml should complete in <5 minutes total
+---
 
 ### 6.2 Worker Process Crash
 
-**Issue**:
-- If worker process crashes, task is lost
-- No retry mechanism
-- No detection of lost tasks
+Worker crash → task lost → `pending` never decrements → coordinator never terminates. No recovery mechanism.
 
-**Impact**:
-- Occasional missing results on specific files
-- User doesn't know why
+**2.0 Resolution**: Crash-before-heartbeat detection in Phase 4. Coordinator counts live workers; orphaned tasks are re-queued up to `MAX_RETRIES`, then synthesized as errors.
 
-**Refactor Solution**:
-- Task result timeout monitoring
-- If result not received within 2x timeout, log error
-- Potentially retry task or continue
+---
 
 ### 6.3 Shutdown During Active Scan
 
-**Issue**:
-- Ctrl+C during middle of scan
-- SENTINEL coordination complex, may not complete cleanly
-- Locks not released properly
+`Ctrl+C` during a scan left the SENTINEL choreography in an indeterminate state. Processes could remain alive; queues were not reliably drained; temp files were not cleaned up.
 
-**Impact**:
-- Temp files left behind
-- Queue processes not fully shut down
-- Next run may have lock conflicts
-
-**Refactor Solution**:
-- Explicit shutdown sequence with try/finally
-- All resources cleaned up
-- Graceful close of result files
+**2.0 Resolution**: `KeyboardInterrupt` caught in the coordinator. `broadcast_shutdown()` → join with timeout → flush sinks → stop log listener. Exit criterion: clean in < 5 seconds.
 
 ---
 
-## Summary: What the Refactor Fixes
+## Summary
 
-| Issue | Current | Refactored |
-|-------|---------|-----------|
-| SENTINEL deadlock | Risk: hung worker breaks chain | No chain: workers independent |
-| Race conditions | Counter management fragile | No manual counters |
-| Load balancing | None (fixed roles) | Automatic (shared task queue) |
-| Timeout enforcement | Not working (GIL + file IPC) | Process-level, reliable |
-| Code quality | Inconsistent naming, no type hints | PEP8 compliant, full type hints |
-| Extensibility | Difficult (touch many systems) | Easy (polymorphic handler dispatch) |
-| Testing | Minimal (integration only) | Comprehensive (unit + integration + e2e) |
-| Documentation | Scattered, incomplete | Complete and systematic |
-
----
-
-## Related Documents
-
-- [ARCHITECTURE_REDESIGN.md](./ARCHITECTURE_REDESIGN.md) - Complete design proposal
-- [IMPLEMENTATION_CHECKLIST.md](./IMPLEMENTATION_CHECKLIST.md) - Step-by-step tasks
+| Issue | Category | 2.0 Disposition |
+|---|---|---|
+| SENTINEL deadlock | Architecture | Eliminated — heartbeat + restart |
+| Race on counter | Architecture | Eliminated — no shared counter |
+| Can't add process types | Architecture | Eliminated — DISPATCH table |
+| Load imbalance | Architecture | Eliminated — shared task queue |
+| GIL blocks threading timeout | Timeout | Eliminated — process-level termination |
+| File-IPC timeout unreliable | Timeout | Eliminated — queue-based results |
+| Silent timeouts | Timeout | Fixed — explicit log + result record |
+| camelCase / abbreviations | Code quality | Fixed in Phase 0 — ruff N enforced |
+| No type hints | Code quality | Fixed — mypy strict enforced |
+| No docstrings | Code quality | Fixed — required by protocol |
+| Insufficient tests | Code quality | Fixed — ≥ 80% coverage enforced |
+| No IPC validation | Code quality | Fixed — Pydantic v2 on Task/TaskResult |
+| Config getter-soup | Configuration | Fixed — Pydantic Config model |
+| `errorCodes` wrong module | Configuration | Fixed in Phase 0 |
+| Hard-coded defaults | Configuration | Fixed — TOML template + validation |
+| Hand-rolled log lifecycle | Logging | Fixed — QueueListener |
+| base64 hang | Edge case | Fixed — deadline + restart |
+| Worker crash recovery | Edge case | Fixed in Phase 4 |
+| Ctrl+C cleanup | Edge case | Fixed — coordinator shutdown sequence |
