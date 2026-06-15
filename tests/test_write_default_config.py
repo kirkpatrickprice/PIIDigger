@@ -3,15 +3,15 @@ import tomllib
 
 import pytest
 
-from piidigger.globalfuncs import getDefaultConfig, writeDefaultConfig
+from piidigger.globalfuncs import get_default_config, write_default_config
 
 
 @pytest.mark.utils
 def test_write_default_config():
-    expectedConfig=getDefaultConfig()
+    expectedConfig=get_default_config()
     testFile = 'testDefault.toml'
 
-    result=writeDefaultConfig(testFile)
+    result=write_default_config(testFile)
 
     if result=="Success":
         with open(testFile, 'rb') as f:

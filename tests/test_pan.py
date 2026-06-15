@@ -23,5 +23,5 @@ from piidigger.datahandlers import pan
                           ]
                   )
 def testIsValidPan(data, expected_result):
-    result = pan.findMatch(data)
+    result = pan.find_match(data)
     assert result == expected_result

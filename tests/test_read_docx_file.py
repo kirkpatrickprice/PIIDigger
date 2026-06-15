@@ -58,7 +58,7 @@ def test_read_docx_file(filename, expected_result):
 
     result: list = []
 
-    for content in docx.readFile(filename, logManager, maxChunkCount):
+    for content in docx.read_file(filename, logManager, maxChunkCount):
         result.append((content, len(content)))
 
     print(f'Result: "{result}"')

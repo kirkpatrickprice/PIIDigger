@@ -101,9 +101,14 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Legacy camelCase predates the PEP8 naming standard; the queue refactor renames
-# these incrementally. New packages (e.g. orchestration/) are NOT exempted.
-"src/piidigger/**" = ["N"]
+# Legacy camelCase files that have not been renamed yet (deleted in Phase 4).
+# New packages (orchestration/, models/, cli/) are NOT exempted.
+"src/piidigger/classes.py" = ["N"]
+"src/piidigger/piidigger.py" = ["N"]
+"src/piidigger/queuefuncs.py" = ["N"]
+"src/piidigger/filescan.py" = ["N"]
+"src/piidigger/logmanager.py" = ["N"]
+"src/piidigger/__main__.py" = ["N"]
 "piidigger.py" = ["N"]  # legacy repo-root PyInstaller entry wrapper
 "tests/**" = ["S101", "N"]  # asserts are expected in tests
 # Handler packages re-export submodules so the dynamic __dir__() discovery in
@@ -125,6 +130,7 @@ disable_error_code = ["no-untyped-call"]
 [[tool.mypy.overrides]]
 module = [
     "piidigger.piidigger",
+    "piidigger.run",
     "piidigger.__main__",
     "piidigger.classes",
     "piidigger.globalfuncs",
@@ -161,4 +167,6 @@ markers = [
     "filehandlers: mark a test as a file handler test",
     "unit: mark a test as a unit test",
     "utils: mark a test as a utility test",
+    "slow: mark a test as slow (timeout/reliability tests)",
+    "e2e: mark a test as an end-to-end test (full scan + baseline)",
     ]

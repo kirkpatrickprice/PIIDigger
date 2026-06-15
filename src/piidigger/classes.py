@@ -7,7 +7,8 @@ import string
 import tomllib
 
 from piidigger import console, globalfuncs
-from piidigger.getmime import testMagic
+from piidigger.getmime import test_magic
+from piidigger.globalvars import ERROR_CODES
 from piidigger.logmanager import LogManager
 
 
@@ -17,41 +18,40 @@ class File:
         self.path=f.parent
         self.ext=f.suffix
         self.mimeType=mimeType
-        self.handler=globalfuncs.getFileHandlerName(self.ext, self.mimeType)
+        self.handler=globalfuncs.get_file_handler_name(self.ext, self.mimeType)
         self.times=(f.stat().st_atime, f.stat().st_mtime)
         self.size=f.stat().st_size
-        
+
     def __lt__(self, other):
         return self.getFullPath() < other.getFullPath()
 
     def getFullPath(self):
         return os.path.join(self.path, self.filename)
-    
+
     def getExtension(self):
         return self.ext
-    
+
     def getOldAccessTime(self):
         return self.times[0]
-    
+
     def getOldModTime(self):
         return self.times[1]
-    
+
     def getFileHandlerName(self) -> str:
         return self.handler
-    
-    
+
     def getFileSize(self):
         return self.size
-    
+
     def getTimeStamps(self) -> tuple:
         return self.times
 
 class Config:
     def __init__(self, configFile: str, useDefault: bool=False,):
-        
+
         if useDefault:
             console.normal('Using default configuration.')
-            self.config=globalfuncs.getDefaultConfig()
+            self.config=globalfuncs.get_default_config()
         else:
             try:
                 with open(configFile, 'rb') as file:
@@ -59,38 +59,38 @@ class Config:
             except FileNotFoundError:
                 console.warn(f'Configuration file {configFile} not found. Using default configuration.')
                 configFile = 'Internal Config'
-                self.config=globalfuncs.getDefaultConfig()
+                self.config=globalfuncs.get_default_config()
             except tomllib.TOMLDecodeError as e:
                 console.error(f'Invalid configuration ({configFile})')
                 console.error(str(e))
-                exit(globalfuncs.errorCodes['invalidConfig'])
-        
+                exit(ERROR_CODES['invalidConfig'])
+
         self.config['rootPath']=str(pathlib.Path(os.getcwd()).absolute())
         self.config['maxProcs']=os.cpu_count()
         hostname=str(platform.node())
         self.config['hostname']=hostname
         timeStamp=datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        
+
         if _isAll(self.config['dataHandlers']):
-            self.config['dataHandlers'] = globalfuncs.getSupportedDataHandlerNames()
+            self.config['dataHandlers'] = globalfuncs.get_supported_data_handler_names()
         else:
             configHandlers=self.config['dataHandlers']
-            notFound = [n for n in configHandlers if n not in globalfuncs.getSupportedDataHandlerNames()]
+            notFound = [n for n in configHandlers if n not in globalfuncs.get_supported_data_handler_names()]
             if notFound:
                 console.error(f"Unexpected data handler found in configuration file ({configFile})")
                 console.error("The following data handlers will be ignored: " + str(notFound))
                 self.config['dataHandlers'] = [n for n in configHandlers if n not in notFound]
-        
+
         # Build the file names for each of the supported result file types
         outpath=self.config['results']['path']
         if not outpath.endswith('/'):
             outpath+='/'
-        
+
         # We don't need this item now and it'll mess up the output file function if we leave it in.
         del self.config['results']['path']
         fileTypes=[
             ('csv', '.csv'),
-            ('json', '.json'), 
+            ('json', '.json'),
             ('text', '.txt')
             ]
 
@@ -104,31 +104,31 @@ class Config:
 
         # Fix any Windows paths replacing ALL with the actual drive letters and confirming that hard-coded starting directories exist
         if _isAll(self.config['includeFiles']['startDirs']['windows']):
-            self.config['includeFiles']['startDirs']['windows'] = [f'{d}:\\' for d in string.ascii_uppercase if os.path.exists(f'{d}:')]        
+            self.config['includeFiles']['startDirs']['windows'] = [f'{d}:\\' for d in string.ascii_uppercase if os.path.exists(f'{d}:')]
         elif not all([os.path.isdir(d) for d in self.getStartDirs()]):
             console.error(f"Starting directory does not exist ({self.getStartDirs()}). Check configuration file ({configFile}).")
-            exit(globalfuncs.errorCodes['invalidConfig'])
+            exit(ERROR_CODES['invalidConfig'])
 
 
         # Replace "all" extensions with those currently supported by File Handlers
         if _isAll(self.config['includeFiles']['ext']):
-            self.config['includeFiles']['ext'] = globalfuncs.getSupportedFileExts()
+            self.config['includeFiles']['ext'] = globalfuncs.get_supported_file_exts()
         else:
             # Before comparing to the expected list, fix the YAML-provided extensions if they don't start with a period
             configExts=[c if c.startswith('.') else '.' + c for c in self.config['includeFiles']['ext']]
-            notFound = [n for n in configExts if n not in globalfuncs.getSupportedFileExts()]
+            notFound = [n for n in configExts if n not in globalfuncs.get_supported_file_exts()]
             if notFound:
                 console.error(f"Unexpected file extensions found in configuration file ({configFile})")
                 console.error("The following file extensions will be ignored: " + str(notFound))
                 self.config['includeFiles']['ext'] = [n for n in configExts if n not in notFound]
-        
+
         # Replace "all" MIME types with those currently supported by File Handlers
-        if testMagic():
+        if test_magic():
             if _isAll(self.config['includeFiles']['mime']):
-                self.config['includeFiles']['mime'] = globalfuncs.getSupportedFileMimes()
+                self.config['includeFiles']['mime'] = globalfuncs.get_supported_file_mimes()
             else:
                 configMimes=self.config['includeFiles']['mime']
-                notFound = [n for n in configMimes if n not in globalfuncs.getSupportedFileMimes()]
+                notFound = [n for n in configMimes if n not in globalfuncs.get_supported_file_mimes()]
                 if notFound:
                     console.error(f"Unexpected MIME types found in configuration file ({configFile})")
                     console.error("The following MIME types will be ignored: " + str(notFound))
@@ -136,37 +136,35 @@ class Config:
         else:
             self.config['includeFiles']['mime']=[]
 
-        # Add Results and Log folders to the list of folders to exlude
-        self.config['excludeDirs'][globalfuncs.getOSType()].append(str(pathlib.Path(self.getRootPath()) / outpath))
-        self.config['excludeDirs'][globalfuncs.getOSType()].append(str(pathlib.Path(pathlib.Path(self.getRootPath()) / self.getLogFile()).parent))
- 
+        # Add Results and Log folders to the list of folders to exclude
+        self.config['excludeDirs'][globalfuncs.get_os_type()].append(str(pathlib.Path(self.getRootPath()) / outpath))
+        self.config['excludeDirs'][globalfuncs.get_os_type()].append(str(pathlib.Path(pathlib.Path(self.getRootPath()) / self.getLogFile()).parent))
+
     def getDataHandlers(self):
         return self.config['dataHandlers']
-    
+
     def getEnabledOutputTypes(self):
-        #return [key for key in self.config['results'].keys()]
         return self.config['results'].keys()
- 
+
     def getExcludeDirs(self):
-        return self.config['excludeDirs'][globalfuncs.getOSType()]
- 
+        return self.config['excludeDirs'][globalfuncs.get_os_type()]
+
     def getFileExts(self):
         return self.config['includeFiles']['ext']
- 
+
     def getConfig(self):
         return self.config
- 
+
     def getLocalFilesOnly(self):
         return self.config['localFilesOnly']
-    
+
     def getLogLevel(self):
         return self.config['logging']['logLevel']
- 
+
     def getLogFile(self):
         return self.config['logging']['logFile']
 
     def getMaxFilesScanProcs(self):
-        #return max(self.getMaxProcs() // 4, 1)
         return 1
 
     def getMaxProcs(self):
@@ -185,28 +183,28 @@ class Config:
         return self.config['rootPath']
 
     def getStartDirs(self):
-        return self.config['includeFiles']['startDirs'][globalfuncs.getOSType()]
-    
+        return self.config['includeFiles']['startDirs'][globalfuncs.get_os_type()]
+
     def setMaxProcs(self, procs):
         self.config['maxProcs']=procs
 
 class ProcessManager:
-    def __init__(self, 
+    def __init__(self,
                  name: str,
                  logManager: LogManager,):
-        
+
         self.processes: list = []
         self.name = name
         self.logger = logManager.getLogger(name=name,)
-        
-    def register(self, 
+
+    def register(self,
                  *,
                  target: callable,
                  name: str,
-                 num_processes: int, 
+                 num_processes: int,
                  args: tuple = None
                  ):
-        
+
         p={
             'target': target,
             'start_order': len(self.processes) + 1,
@@ -217,7 +215,7 @@ class ProcessManager:
             'started': False,
             'args': args,
             }
-        
+
         self.processes.append(p)
         self.logger.info(f'{self.name}: Registered process {name} with {num_processes} processes.')
 
@@ -228,7 +226,7 @@ class ProcessManager:
                 if not process['started']:
                     process['shutdown_order'] = len(self.processes) - i
                     for j in range(process['num_processes']):
-                        p = mp.Process(target=process['target'], 
+                        p = mp.Process(target=process['target'],
                                     name=f'{process["name"]}_{j}',
                                     args=process['args'],
                         )
@@ -256,7 +254,7 @@ class ProcessManager:
             for p in process['processes']:
                 self.logger.debug(f'Terminating process {p.name} (PID={p.pid}).')
                 p.terminate()
-                p.join()        
+                p.join()
 
 def _isAll(x) -> bool:
     '''
@@ -272,7 +270,7 @@ def _isAll(x) -> bool:
         s= x
     if isinstance(x, dict):
         s = list(x.keys())[0]
-    
+
     return s.lower() == 'all'
 
 

@@ -34,7 +34,7 @@ def test_read_pdf_file(filename, expected_result):
     logManager=LogManager(logFile='test.log', logLevel='INFO', logQueue=logQ)
 
     result: list[str] = []
-    for content in pdf.readFile(filename, logManager, maxChunkCount):
+    for content in pdf.read_file(filename, logManager, maxChunkCount):
         result.append((content, len(content)))
 
     print(f'Result: "{result}"')

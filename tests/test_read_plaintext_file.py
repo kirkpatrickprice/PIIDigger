@@ -66,7 +66,7 @@ def test_read_plaintext_file(filename, expected_result):
 
     result: list = []
 
-    for content in plaintext.readFile(filename, logManager, maxChunkCount):
+    for content in plaintext.read_file(filename, logManager, maxChunkCount):
         result.append((content, len(content)))
 
     print(f'Result: "{result}"')

@@ -6,7 +6,7 @@ Windows consoles, terminal width detection, and graceful degradation when
 output is not a TTY (e.g. piped to a file or running in CI).
 
 Public API is unchanged: ``normal``, ``warn``, ``error``, ``status`` and
-``getTerminalSize``.
+``get_terminal_size``.
 
 Stream convention: informational/list output goes to stdout so it can be piped;
 warnings, errors and the live progress line go to stderr so they never pollute
@@ -25,10 +25,10 @@ from rich.console import Console
 _out = Console(highlight=False)
 _err = Console(stderr=True, highlight=False)
 
-__all__ = ['getTerminalSize', 'warn', 'error', 'normal', 'status']
+__all__ = ['get_terminal_size', 'warn', 'error', 'normal', 'status']
 
 
-def getTerminalSize() -> tuple[int, int]:
+def get_terminal_size() -> tuple[int, int]:
     '''Return the terminal as a (width, height) tuple (Rich falls back to 80x25).'''
     size = _err.size
     return (size.width, size.height)
@@ -62,8 +62,8 @@ def error(s: str) -> None:
 
 
 if __name__ == "__main__":
-    sizex, sizey = getTerminalSize()
-    normal(f'width = {sizex} height = {sizey}')
+    size_x, size_y = get_terminal_size()
+    normal(f'width = {size_x} height = {size_y}')
     error('This is error text')
     warn('This is warning text')
     normal('This is normal text')

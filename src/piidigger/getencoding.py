@@ -5,8 +5,8 @@ from charset_normalizer import from_path
 from piidigger.logmanager import LogManager
 
 
-def getEncoding(filename: str,
-                logManager: LogManager,) -> str | None:
+def get_encoding(filename: str,
+                 log_manager: LogManager,) -> str | None:
     '''
     Uses charset-normalizer to identify the file encoding.
 
@@ -16,7 +16,7 @@ def getEncoding(filename: str,
     "unknown encoding -> skip" behaviour.
     '''
 
-    logger = logManager.getLogger('getEncoding')
+    logger = log_manager.getLogger('getEncoding')
 
     try:
         # An empty file has no encoding to detect.  chardet reported None here;

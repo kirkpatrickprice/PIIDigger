@@ -3,6 +3,7 @@ from collections.abc import Iterator
 from zipfile import BadZipFile
 
 import openpyxl
+from openpyxl.cell.cell import MergedCell
 from openpyxl.utils.exceptions import (
     CellCoordinatesException,
     IllegalCharacterError,
@@ -11,19 +12,13 @@ from openpyxl.utils.exceptions import (
 )
 
 from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.globalvars import defaultChunkCount, excelBlankColLimit, excelBlankRowLimit, maxChunkSize
+from piidigger.globalvars import DEFAULT_CHUNK_COUNT, EXCEL_BLANK_COL_LIMIT, EXCEL_BLANK_ROW_LIMIT, MAX_CHUNK_SIZE
 from piidigger.logmanager import LogManager
 
 # Ignore the UserWarning message from OpenPyXL that seem to pop up here and there
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
-# Each filehandler must have the following:
-#   "handles" -     dictionary to identify lists of file extensions and mime types that the handler will manage.
-#                   This will be read by globals upon initial load to build the full list of supported mime types and file extensions
-#   "processFile" - Function that manages opening and reading of the file.  The main module will call this handler wtih the "processFile(filename)" function.
-#                   processFile should provide the lines of text to each of the dataHandlers
-
-handles={
+handles = {
     'ext': [
         '.xlsx',
         '.xlsm',
@@ -34,78 +29,77 @@ handles={
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'application/vnd.ms-excel.sheet.macroEnabled',
         'application/vnd.ms-excel.template',
-        ],
+    ],
 }
 
-def readFile(filename: str, 
-             logManager: LogManager,
-             maxChunkCount: int = defaultChunkCount,
-            ) -> Iterator[str]:
+
+def read_file(filename: str,
+              log_manager: LogManager,
+              max_chunk_count: int = DEFAULT_CHUNK_COUNT,
+              ) -> Iterator[str]:
     ''''
-    Handle all file IO and text extraction operations for this file type.  Returns a list of results that have been validated by each datahandler.  
-    "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
+    Handle all file IO and text extraction operations for this file type.  Returns a list of results that have been validated by each datahandler.
+    "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by read_file.
     '''
 
-    logger = logManager.getLogger('xlsx_handler')
+    logger = log_manager.getLogger('xlsx_handler')
 
     content: str = ''
-    maxChunkSize * maxChunkCount
 
-    
     try:
         # Don't use "on_demand" in order to keep the code simpler.  All worksheets are loaded into RAM.
         # Some spreadsheet dimensions can't be accurately determined -- e.g. if there's a lot of extraneous formatting to make it look "pretty"
         # We build a safety valve so that it stops after the first 5000 rows and 5000 columns.  If the "interesting data" is present outside of these limits...
         # well... it's probably not the ONLY instance of such data.
 
-        book=openpyxl.load_workbook(filename=filename, read_only=True, data_only=True,)
+        book = openpyxl.load_workbook(filename=filename, read_only=True, data_only=True)
         logger.debug('%s: Read %d worksheets', filename, len(book.sheetnames))
         for sheet in book.sheetnames:
             logger.debug('%s: Processing worksheet: %s', filename, str(sheet))
-            activeSheet=book[sheet]
-            handler: ContentHandler = ContentHandler(maxContentSize = maxChunkSize * maxChunkCount)
-            blankRowCount=0
-            rowCount=0
+            active_sheet = book[sheet]
+            handler: ContentHandler = ContentHandler(max_content_size=MAX_CHUNK_SIZE * max_chunk_count)
+            blank_row_count = 0
+            row_count = 0
             # create a string with all of the content of this sheet
             # Iterate through each cell in each row.  If we reach a limit of blank cells, move to the next row
             # If we reach a limit of blank rows, then move to the next sheet.
-            for row in activeSheet.iter_rows(values_only=True):
-                rowCount+=1
-                rowHasData=False
+            for row in active_sheet.iter_rows(values_only=True):
+                row_count += 1
+                row_has_data = False
                 line: str = ''
-                blankColCount: int = 0
+                blank_col_count: int = 0
                 for item in row:
-                    if isinstance(item, openpyxl.cell.cell.MergedCell):
+                    if isinstance(item, MergedCell):
                         continue
                     if item is None or item == '':
-                        blankColCount+=1
-                        if blankColCount>excelBlankColLimit:
+                        blank_col_count += 1
+                        if blank_col_count > EXCEL_BLANK_COL_LIMIT:
                             break
                         continue
                     line += str(item) + ' '
-                    rowHasData=True
-                handler.appendContent(line)
+                    row_has_data = True
+                handler.append_content(line)
 
-                if rowHasData:
-                    blankRowCount=0
+                if row_has_data:
+                    blank_row_count = 0
                 else:
-                    blankRowCount+=1
-                    if blankRowCount>excelBlankRowLimit:
-                        logger.debug('%s[Sheet %s]: Blank row count exceeded at row %d', filename, sheet, rowCount)
+                    blank_row_count += 1
+                    if blank_row_count > EXCEL_BLANK_ROW_LIMIT:
+                        logger.debug('%s[Sheet %s]: Blank row count exceeded at row %d', filename, sheet, row_count)
                         break
-                if handler.contentBufferFull():
-                    yield handler.getContent()
-                    
+                if handler.content_buffer_full():
+                    yield handler.get_content()
+
             logger.debug('%s[Sheet %s]: Read content (%d bytes)', filename, sheet, len(content))
-            yield handler.finalizeContent()
-            
+            yield handler.finalize_content()
+
     except FileNotFoundError:
         logger.error('Previously discovered file no longer exists: %s. File skipped', filename)
     except PermissionError as e:
         logger.error('PermissionError adding %s.  File skipped.  Error message: %s', filename, str(e))
     except OSError as e:
         logger.error('OSError adding %s.  File skipped.  Error message: %s', filename, str(e))
-    except CellCoordinatesException as e: 
+    except CellCoordinatesException as e:
         logger.error('%s: %s', filename, e)
     except IllegalCharacterError as e:
         logger.error('%s: %s', filename, e)
@@ -121,6 +115,3 @@ def readFile(filename: str,
         logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
     else:
         book.close()
-
-
-

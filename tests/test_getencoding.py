@@ -2,7 +2,7 @@ from queue import Queue
 
 import pytest
 
-from piidigger.getencoding import getEncoding
+from piidigger.getencoding import get_encoding
 from piidigger.logmanager import LogManager
 
 
@@ -14,6 +14,6 @@ from piidigger.logmanager import LogManager
                         )
 def test_getEncoding(testFile, expected_result):
     logManager=LogManager(logFile='test.log', logLevel='INFO', logQueue=Queue())
-    result=getEncoding(testFile, logManager)
+    result=get_encoding(testFile, logManager)
 
     assert result==expected_result

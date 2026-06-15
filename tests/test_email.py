@@ -33,29 +33,29 @@ from piidigger.datahandlers import email
 ])
 def test_email_match_and_redaction(data, expected_result):
     """Test email detection and redaction rules"""
-    result = email.findMatch(data)
+    result = email.find_match(data)
     assert result == expected_result
 
 class TestEmailFunctions:
     def test_is_valid(self):
         """Test email validation function"""
         # Valid emails
-        assert email._isValid('user@example.com') is True
-        assert email._isValid('a@b.co') is True
-        assert email._isValid('complex+email.address123@sub-domain.example.co.uk') is True
+        assert email._is_valid('user@example.com') is True
+        assert email._is_valid('a@b.co') is True
+        assert email._is_valid('complex+email.address123@sub-domain.example.co.uk') is True
         
         # Invalid emails
-        assert email._isValid('not_an_email') is False
-        assert email._isValid('@missing_local_part.com') is False
-        assert email._isValid('missing_domain@') is False
-        assert email._isValid('multiple@@at.symbols') is False
-        assert email._isValid('user@example@example.com') is False  # Invalid due to multiple @ symbols
-        assert email._isValid('') is False
-        assert email._isValid('invalid local and domain: &ap123456789012345678f@0.33') is False
-        assert email._isValid('invalid domain: ron@0.67') is False
-        assert email._isValid('user@thisisasuperlongdomainlabelofexactlysixtysevencharactersinlengthxxx.com') is False  # Invalid domain label length
-        assert email._isValid('user@invalid.0tld') is False  # Invalid TLD
-        assert email._isValid('user@example.thisisaverylongdomainnamethatexceedsthemaximumallowedlengthforadomainpartof253charactersandshouldbeusedtotestemailvalidationroutines.com') is False  # Domain part too long
+        assert email._is_valid('not_an_email') is False
+        assert email._is_valid('@missing_local_part.com') is False
+        assert email._is_valid('missing_domain@') is False
+        assert email._is_valid('multiple@@at.symbols') is False
+        assert email._is_valid('user@example@example.com') is False  # Invalid due to multiple @ symbols
+        assert email._is_valid('') is False
+        assert email._is_valid('invalid local and domain: &ap123456789012345678f@0.33') is False
+        assert email._is_valid('invalid domain: ron@0.67') is False
+        assert email._is_valid('user@thisisasuperlongdomainlabelofexactlysixtysevencharactersinlengthxxx.com') is False  # Invalid domain label length
+        assert email._is_valid('user@invalid.0tld') is False  # Invalid TLD
+        assert email._is_valid('user@example.thisisaverylongdomainnamethatexceedsthemaximumallowedlengthforadomainpartof253charactersandshouldbeusedtotestemailvalidationroutines.com') is False  # Domain part too long
     
 
     def test_redact_rule1(self):
@@ -104,7 +104,7 @@ class TestEmailFunctions:
     def test_find_match_with_multiple_emails(self):
         """Test finding multiple email addresses in a single line"""
         text = "Contact us at info@company.com, support@company.com or ourlongsupportemail@company.com for help"
-        result = email.findMatch(text)
+        result = email.find_match(text)
         assert 'email' in result
         assert len(result['email']) == 3
         assert 'i***@company.com' in result['email']
@@ -113,10 +113,10 @@ class TestEmailFunctions:
 
     def test_empty_and_invalid_inputs(self):
         """Test handling of empty or invalid inputs"""
-        assert email.findMatch('') == {}
-        assert email.findMatch('No email addresses here') == {}
-        assert email.findMatch('Invalid: user@') == {}
-        assert email.findMatch('Invalid: @example.com') == {}
+        assert email.find_match('') == {}
+        assert email.find_match('No email addresses here') == {}
+        assert email.find_match('Invalid: user@') == {}
+        assert email.find_match('Invalid: @example.com') == {}
 
 if __name__ == "__main__":
     # This allows running the tests directly with python

@@ -62,7 +62,7 @@ def test_read_xls_file(filename, expected_result):
 
     result: list = []
 
-    for content in xls.readFile(filename, logManager, maxChunkCount):
+    for content in xls.read_file(filename, logManager, maxChunkCount):
         result.append((content, len(content)))
 
     print(f'Result: "{result}"')

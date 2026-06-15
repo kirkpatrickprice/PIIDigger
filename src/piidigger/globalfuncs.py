@@ -6,65 +6,18 @@ from piidigger import console
 from piidigger import datahandlers as dh
 from piidigger import filehandlers as fh
 from piidigger import outputhandlers as oh
-from piidigger.globalvars import maxChunkSize
+from piidigger.globalvars import MAX_CHUNK_SIZE
 
 # Dynamically build the supported file handlers based on the contents of the filehandlers package.
 # Each file handler needs a globally-defined variable called "handles" with a dictionary as follows:
 #   ext: [a list of file extensions with the leading .]
 #   mime: [a list of mime-type strings]
 
-fileHandlers = {
+FILE_HANDLERS = {
     handler: getattr(fh, handler).handles
     for handler in fh.__dir__()
     if not handler.startswith("_")
 }
-
-# Leave these in here as reference until I write more file handlers.
-# fileHandlers={
-#     'archive': {
-#         'ext': ['.7z','.bz2','.gz','.gzip','.tar','.zip',],
-#         'mime': ['application/x-7z-compressed','application/gzip','application/zip','application/x-tar','application/x-bzip2',],
-#     },
-#     'appledocs': {
-#         'ext': ['.numbers',],
-#         'mime': [],
-#     },
-#     'csv': {
-#         'ext': ['.csv',],
-#         'mime': ['text/csv'],
-#     },
-#     'googledocs': {
-#         'ext': ['.gsheet',],
-#         'mime': [],
-#     },
-#     'msoffice': {
-#         'ext': ['.doc','.docx','.ppt','.pptx','.xls','.xlsx',],
-#         'mime': [
-#             'application/msword',
-#             'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-#             'application/vnd.ms-powerpoint',
-#             'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-#             'application/vnd.ms-excel',
-#             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-#         ],
-#     },
-#     'openoffice': {
-#         'ext': ['.odp','.ods','.odt','.odp',],
-#         'mime': ['application/vnd.oasis.opendocument.spreadsheet', 'application/vnd.oasis.opendocument.text', 'application/vnd.oasis.opendocument.presentation'],
-#     },
-#     'outlook': {
-#         'ext': ['.pst','.ost',],
-#         'mime': [],
-#     },
-#     'pdf': {
-#         'ext': ['.pdf',],
-#         'mime': ['application/pdf',],
-#     },
-#     'richtext': {
-#         'ext': ['.rtf',],
-#     	'mime': ['text/rtf'],
-#     },
-# }
 
 
 ######################################################
@@ -72,27 +25,27 @@ fileHandlers = {
 ######################################################
 
 
-def countResults(results: dict) -> int:
+def count_results(results: dict) -> int:
     """Receives a dictionary of results and returns the total match count across all match sets in the dictionary"""
     count = 0
     for key in results:
         item = results[key]
         if isinstance(item, dict):
-            count += countResults(item)
+            count += count_results(item)
         elif isinstance(item, list):
             count += len(item)
 
     return count
 
 
-def getAllDataHandlerModules() -> list:
+def get_all_data_handler_modules() -> list:
     """
     Returns a list containing the data handler modules from datahandler package
     """
-    return [getattr(dh, module) for module in getSupportedDataHandlerNames()]
+    return [getattr(dh, module) for module in get_supported_data_handler_names()]
 
 
-def getDataHandlerModule(name: str):
+def get_data_handler_module(name: str):
     """
     Returns a module object for a specific data handler
     """
@@ -102,7 +55,7 @@ def getDataHandlerModule(name: str):
         return None
 
 
-def getDefaultConfig() -> dict:
+def get_default_config() -> dict:
     """
     Returns a default configuration object for when a configuration file couldn't be found.
     """
@@ -169,14 +122,14 @@ def getDefaultConfig() -> dict:
     }
 
 
-def getEnabledDataHandlerModules(moduleNames: list):
+def get_enabled_data_handler_modules(module_names: list):
     """
     Receives a list of enabled module names and returns a list of the module objects
     """
-    return [getDataHandlerModule(name) for name in moduleNames]
+    return [get_data_handler_module(name) for name in module_names]
 
 
-def getFileHandlerName(ext: str, mime: str) -> str:
+def get_file_handler_name(ext: str, mime: str) -> str | None:
     """
     Receives a file extension and MIME type
 
@@ -186,15 +139,15 @@ def getFileHandlerName(ext: str, mime: str) -> str:
     """
     handler = None
 
-    for key in fileHandlers:
-        if (ext in fileHandlers[key]["ext"]) or (mime in fileHandlers[key]["mime"]):
+    for key in FILE_HANDLERS:
+        if (ext in FILE_HANDLERS[key]["ext"]) or (mime in FILE_HANDLERS[key]["mime"]):
             handler = str(key)
             break
 
     return handler
 
 
-def getFileHandlerModule(name):
+def get_file_handler_module(name):
     """
     Returns a module object for a file handler by the provided name
     """
@@ -204,7 +157,7 @@ def getFileHandlerModule(name):
         return None
 
 
-def getOutputHandlerModule(name: str):
+def get_output_handler_module(name: str):
     """
     Returns a module object for a specific output handler
     """
@@ -214,39 +167,39 @@ def getOutputHandlerModule(name: str):
         return None
 
 
-def getOSType() -> str:
+def get_os_type() -> str:
     return platform.system().lower()
 
 
-def getSupportedDataHandlerNames() -> list:
+def get_supported_data_handler_names() -> list:
     return [n for n in dh.__dir__() if not n.startswith("__")]
 
 
-def getSupportedFileExts() -> list:
+def get_supported_file_exts() -> list:
     """
-    Returns a list of all supported file extentions
+    Returns a list of all supported file extensions
     """
     exts = []
 
-    for key in fileHandlers:
-        exts += fileHandlers[key]["ext"]
+    for key in FILE_HANDLERS:
+        exts += FILE_HANDLERS[key]["ext"]
 
     return exts
 
 
-def getSupportedFileMimes() -> list:
+def get_supported_file_mimes() -> list:
     """
-    Returns a list of all supported file extentions
+    Returns a list of all supported MIME types
     """
     mimes = []
 
-    for key in fileHandlers:
-        mimes += fileHandlers[key]["mime"]
+    for key in FILE_HANDLERS:
+        mimes += FILE_HANDLERS[key]["mime"]
 
     return mimes
 
 
-def isAdmin() -> bool:
+def is_admin() -> bool:
     try:
         check = os.geteuid() == 0
     except AttributeError:
@@ -254,26 +207,26 @@ def isAdmin() -> bool:
     return check
 
 
-def makeChunks(s: str, chunkSize: int = maxChunkSize) -> list:
-    """Breaks up a string into smaller strings not larger than chunkSize"""
+def make_chunks(s: str, chunk_size: int = MAX_CHUNK_SIZE) -> list:
+    """Breaks up a string into smaller strings not larger than chunk_size"""
     words = s.split()
-    wordNum = 0
+    word_num = 0
     chunks = list()
 
-    while wordNum < len(words):
+    while word_num < len(words):
         chunk = ""
-        while len(chunk) < chunkSize and wordNum < len(words):
-            if len(words[wordNum]) > chunkSize:
+        while len(chunk) < chunk_size and word_num < len(words):
+            if len(words[word_num]) > chunk_size:
                 # Break up super-long strings into shorter words and add them to the word list
-                chunkList = [
-                    words[wordNum][i : i + chunkSize]
-                    for i in range(0, len(words[wordNum]), chunkSize)
+                chunk_list = [
+                    words[word_num][i : i + chunk_size]
+                    for i in range(0, len(words[word_num]), chunk_size)
                 ]
-                words = [*words, *chunkList]
+                words = [*words, *chunk_list]
             else:
                 # Add the next word to the current chunk
-                chunk += words[wordNum] + " "
-            wordNum += 1
+                chunk += words[word_num] + " "
+            word_num += 1
 
         # Add the current chunk to the list of chunks
         chunks += [chunk.strip()]
@@ -281,25 +234,25 @@ def makeChunks(s: str, chunkSize: int = maxChunkSize) -> list:
     return chunks
 
 
-def processMatches(results: dict, matches: dict, dhName: str) -> dict:
+def process_matches(results: dict, matches: dict, dh_name: str) -> dict:
     """Process the results from RE matches and add them to the results dictionary"""
     for key in matches:
         value = matches[key]
         if value:
-            if dhName not in results["matches"]:
-                results["matches"][dhName] = dict()
-            if key not in results["matches"][dhName]:
-                results["matches"][dhName][key] = set()
-            results["matches"][dhName][key].update(value)
+            if dh_name not in results["matches"]:
+                results["matches"][dh_name] = dict()
+            if key not in results["matches"][dh_name]:
+                results["matches"][dh_name][key] = set()
+            results["matches"][dh_name][key].update(value)
 
     return results
 
 
-def progressLine(*pargs, **kwargs):
+def progress_line(*pargs, **kwargs):
     """
     Prints a status line that includes details about directories, files, and results
     """
-    screenWidth = console.getTerminalSize()[0]
+    screen_width = console.get_terminal_size()[0]
 
     line = (
         f"Folders scanned: {kwargs['totalDirs'].value} | "
@@ -308,8 +261,8 @@ def progressLine(*pargs, **kwargs):
         f"Results found: {kwargs['totalResults'].value}"
     )
 
-    if len(line) > screenWidth:
-        line = line[: screenWidth - 1]
+    if len(line) > screen_width:
+        line = line[: screen_width - 1]
 
     console.status(line)
 
@@ -326,7 +279,7 @@ def sizeof_fmt(num, suffix="B"):
     return f"{num:.1f}Y{suffix}"
 
 
-def writeDefaultConfig(tomlFile: str):
+def write_default_config(toml_file: str):
     # This is a total kluge, but without a reasonable Python library to write a TOML v1.1 file based on a Python dictionary, we have to build the default config file from scratch
 
     def _tomlfy(key, value):
@@ -336,46 +289,42 @@ def writeDefaultConfig(tomlFile: str):
             return key + " = " + str(value).lower()
         return key + " = " + str(value).replace("'", '"')
 
-    defaultConfig = getDefaultConfig()
+    default_config = get_default_config()
     lines = list()
     for key in ["dataHandlers"]:
-        lines.append(_tomlfy(key, defaultConfig[key]))
+        lines.append(_tomlfy(key, default_config[key]))
 
     lines.append("")
     for key in ["localFilesOnly"]:
-        lines.append(_tomlfy(key, defaultConfig[key]))
+        lines.append(_tomlfy(key, default_config[key]))
 
     lines.append("")
     lines.append("[results]")
-    for key in defaultConfig["results"].keys():
-        lines.append(_tomlfy(key, defaultConfig["results"][key]))
+    for key in default_config["results"].keys():
+        lines.append(_tomlfy(key, default_config["results"][key]))
 
     lines.append("")
     lines.append("[includeFiles]")
     for key in ["ext", "mime"]:
-        lines.append(_tomlfy(key, defaultConfig["includeFiles"][key]))
+        lines.append(_tomlfy(key, default_config["includeFiles"][key]))
 
     lines.append("")
     lines.append("[includeFiles.startDirs]")
     for key in ["windows", "linux", "darwin"]:
-        lines.append(_tomlfy(key, defaultConfig["includeFiles"]["startDirs"][key]))
-        # if isinstance(value, str):
-        #     lines.append(pf + ' = "' + value + '"')
-        # else:
-        #     lines.append(pf + ' = ' + str(defaultConfig['includeFiles']['startDirs'][pf]).replace('\'', '"'))
+        lines.append(_tomlfy(key, default_config["includeFiles"]["startDirs"][key]))
 
     lines.append("")
     lines.append("[excludeDirs]")
     for key in ["windows", "linux", "darwin"]:
-        lines.append(_tomlfy(key, defaultConfig["excludeDirs"][key]))
+        lines.append(_tomlfy(key, default_config["excludeDirs"][key]))
 
     lines.append("")
     lines.append("[logging]")
     for key in ["logLevel", "logFile"]:
-        lines.append(_tomlfy(key, defaultConfig["logging"][key]))
+        lines.append(_tomlfy(key, default_config["logging"][key]))
 
     try:
-        with open(tomlFile, "w") as tf:
+        with open(toml_file, "w") as tf:
             tf.writelines(line + "\n" for line in lines)
         return "Success"
     except Exception as e:

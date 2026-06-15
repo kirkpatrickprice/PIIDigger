@@ -2,7 +2,7 @@ import multiprocessing as mp
 import pathlib
 
 from piidigger import classes, queuefuncs
-from piidigger.getmime import getMime
+from piidigger.getmime import get_mime
 from piidigger.globalvars import SENTINEL
 from piidigger.logmanager import LogManager
 
@@ -124,8 +124,8 @@ def findFilesWorker(config: classes.Config,
                 for f in d.iterdir():
                     screenItem=fileChecks(f, config)           
                     if all(screenItem):
-                        mimeType = getMime(f)
-                        match=fileMatches(f, config.getFileExts(), config.getMimeTypes())
+                        mimeType = get_mime(f)
+                        match=fileMatches(f, config.getFileExts(), config.get_mimeTypes())
                         if match:
                             fObj=classes.File(f, mimeType)
                             logger.debug('Initialized File object for %s, mimeType=%s, times=%s, handler=%s', 
@@ -198,7 +198,7 @@ def fileChecks(f: pathlib.Path,
 
 def fileMatches(f: pathlib.Path, fileExts: list, mimeTypes: list) -> bool:
     extFound = f.suffix in fileExts
-    mimeFound = getMime(f) in mimeTypes
+    mimeFound = get_mime(f) in mimeTypes
 
     return extFound or mimeFound
 
