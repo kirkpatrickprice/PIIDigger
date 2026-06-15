@@ -39,10 +39,26 @@ def _handle_enum_dir_stub(task: Task, _ctx: WorkerContext, logger: logging.Logge
 
     depth == 0: fans out to 2 child ENUM_DIR tasks (depth=1) + 3 SCAN_FILE tasks.
     depth >= 1: leaf node; returns only a dirs_scanned counter.
+
+    Special path prefix "/slow_test/": returns one SLOW_TEST task (timeout=60s)
+    and no child dirs.  Used by the Ctrl+C integration test to guarantee the
+    coordinator is blocked on result_queue.get() when SIGINT is sent.
+
     Replace with handle_enum_dir() in Phase 3.
     """
+    path: str = str(task.payload.get("path", ""))
     depth: int = int(task.payload.get("depth", 0))
     logger.debug("enum_dir stub depth=%d task=%s", depth, task.task_id)
+
+    if path.startswith("/slow_test/"):
+        return TaskResult(
+            task_id=task.task_id,
+            task_type=task.task_type,
+            status="ok",
+            new_tasks=[{"task_type": TaskType.SLOW_TEST, "payload": {}, "timeout_seconds": 60}],
+            counters={"dirs_scanned": 1},
+            worker_pid=os.getpid(),
+        )
 
     if depth >= 1:
         return TaskResult(

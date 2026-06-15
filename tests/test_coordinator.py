@@ -175,9 +175,10 @@ def test_ctrl_c_exits_within_5_seconds(tmp_path: Path) -> None:
     log_queue: mp.Queue[object] = mp.Queue()
     stop_event = mp.Event()
 
-    # Many start dirs keep the coordinator busy long enough to interrupt
-    start_dirs = [Path(f"/synthetic/dir{i}") for i in range(30)]
-    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, start_dirs)
+    # /slow_test/ prefix causes _handle_enum_dir_stub to return a SLOW_TEST task
+    # (sleep 120s) instead of normal fan-out.  This guarantees the coordinator is
+    # blocked on result_queue.get() when SIGINT is sent — no race on fast CI.
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [Path("/slow_test/root")])
 
     # _run_with_internal_workers is defined in piidigger.orchestration.coordinator
     # (an installed package), so Windows spawn can import it.  Workers are started
