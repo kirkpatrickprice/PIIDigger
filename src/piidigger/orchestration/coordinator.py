@@ -143,6 +143,7 @@ def run_coordinator(
     # ------------------------------------------------------------------
     # Main fan-out loop
     # ------------------------------------------------------------------
+    _interrupted = False
     try:
         while pending > 0:
             try:
@@ -182,10 +183,17 @@ def run_coordinator(
         logger.info("coordinator: all tasks complete (pending=0)")
 
     except KeyboardInterrupt:
+        _interrupted = True
         logger.warning("scan interrupted by user (KeyboardInterrupt)")
 
     finally:
         broadcast_shutdown(ctx.task_queue, len(workers))
+        if _interrupted:
+            # Workers may be mid-task and won't drain the shutdown queue promptly;
+            # terminate immediately so the process exits within the expected window.
+            for p in workers:
+                if p.is_alive():
+                    p.terminate()
         join_workers(workers, timeout=5.0, logger=logger)
         _flush_sinks(sinks)
         stop_listener(listener)

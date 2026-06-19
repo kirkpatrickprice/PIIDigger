@@ -228,15 +228,22 @@ def join_workers(
     timeout: float = 5.0,
     logger: logging.Logger | None = None,
 ) -> None:
-    """Join all workers; force-terminate any still alive after timeout."""
+    """Join all workers; force-terminate any still alive after timeout.
+
+    timeout is a total wall-clock budget shared across all workers, not a
+    per-worker limit — so N workers don't multiply the wait.
+    """
     log = logger or logging.getLogger(__name__)
+    deadline = time.monotonic() + timeout
     for proc in workers:
-        proc.join(timeout=timeout)
-        if proc.is_alive():
-            log.warning(
-                "worker PID %d did not exit within %.1fs; terminating",
-                proc.pid,
-                timeout,
-            )
-            proc.terminate()
-            proc.join(timeout=2.0)
+        proc.join(timeout=max(0.0, deadline - time.monotonic()))
+    stragglers = [p for p in workers if p.is_alive()]
+    for proc in stragglers:
+        log.warning(
+            "worker PID %d did not exit within %.1fs; terminating",
+            proc.pid,
+            timeout,
+        )
+        proc.terminate()
+    for proc in stragglers:
+        proc.join(timeout=2.0)
