@@ -18,9 +18,18 @@ from piidigger.orchestration.logging_setup import build_worker_logger
 type _HandlerFn = Callable[[Task, WorkerContext, logging.Logger], TaskResult]
 
 
-def _handle_noop(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
-    """Return an ok result immediately; used only for integration testing."""
-    logger.debug("noop task %s", task.task_id)
+def _handle_noop(task: Task, _ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
+    """Return an ok result; used only for integration testing.
+
+    Pass {"delay_seconds": N} in the task payload to simulate a slow task for
+    deadline-detection tests.  This replaces the removed SLOW_TEST task type.
+    """
+    delay = float(task.payload.get("delay_seconds", 0))
+    if delay > 0:
+        logger.debug("noop task %s sleeping %.1fs", task.task_id, delay)
+        time.sleep(delay)
+    else:
+        logger.debug("noop task %s", task.task_id)
     return TaskResult(
         task_id=task.task_id,
         task_type=task.task_type,
@@ -40,9 +49,10 @@ def _handle_enum_dir_stub(task: Task, _ctx: WorkerContext, logger: logging.Logge
     depth == 0: fans out to 2 child ENUM_DIR tasks (depth=1) + 3 SCAN_FILE tasks.
     depth >= 1: leaf node; returns only a dirs_scanned counter.
 
-    Special path prefix "/slow_test/": returns one SLOW_TEST task (timeout=60s)
-    and no child dirs.  Used by the Ctrl+C integration test to guarantee the
-    coordinator is blocked on result_queue.get() when SIGINT is sent.
+    Special path prefix "/slow_test/": returns one long-running NOOP task
+    (delay_seconds=120, timeout_seconds=60) and no child dirs.  Used by the
+    Ctrl+C integration test to guarantee the coordinator is blocked on
+    result_queue.get() when SIGINT is sent.
 
     Replace with handle_enum_dir() in Phase 3.
     """
@@ -55,7 +65,7 @@ def _handle_enum_dir_stub(task: Task, _ctx: WorkerContext, logger: logging.Logge
             task_id=task.task_id,
             task_type=task.task_type,
             status="ok",
-            new_tasks=[{"task_type": TaskType.SLOW_TEST, "payload": {}, "timeout_seconds": 60}],
+            new_tasks=[{"task_type": TaskType.NOOP, "payload": {"delay_seconds": 120}, "timeout_seconds": 60}],
             counters={"dirs_scanned": 1},
             worker_pid=os.getpid(),
         )
@@ -101,28 +111,11 @@ def _handle_scan_file_stub(task: Task, _ctx: WorkerContext, logger: logging.Logg
     )
 
 
-def _handle_slow_test(task: Task, _ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
-    """Sleep for 120 seconds to trigger coordinator deadline detection.
-
-    TEST-ONLY — used exclusively by test_deadline_detection_terminates_hung_worker.
-    Remove from DISPATCH in Phase 3 when real handlers replace all stubs.
-    """
-    logger.debug("slow_test sleeping task=%s", task.task_id)
-    time.sleep(120)
-    return TaskResult(
-        task_id=task.task_id,
-        task_type=task.task_type,
-        status="ok",
-        worker_pid=os.getpid(),
-    )
-
-
-# Phase 2 stubs in DISPATCH — ENUM_DIR/SCAN_FILE/SLOW_TEST replaced by real handlers in Phase 3
+# Phase 2 stubs in DISPATCH — ENUM_DIR/SCAN_FILE replaced by real handlers in Phase 3
 DISPATCH: dict[TaskType, _HandlerFn] = {
     TaskType.NOOP: _handle_noop,
     TaskType.ENUM_DIR: _handle_enum_dir_stub,
     TaskType.SCAN_FILE: _handle_scan_file_stub,
-    TaskType.SLOW_TEST: _handle_slow_test,  # test-only; remove in Phase 3
 }
 
 # ---------------------------------------------------------------------------

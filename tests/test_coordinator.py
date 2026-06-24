@@ -204,7 +204,7 @@ def test_ctrl_c_exits_within_5_seconds(tmp_path: Path) -> None:
 
 @pytest.mark.slow
 def test_deadline_detection_terminates_hung_worker(tmp_path: Path) -> None:
-    """A SLOW_TEST task (timeout=2s) triggers deadline detection.
+    """A slow NOOP task (delay_seconds=120, timeout=2s) triggers deadline detection.
 
     The coordinator-like inline loop below exercises the same deadline logic
     as run_coordinator._check_worker_deadlines() — verifying: the hung worker
@@ -218,7 +218,7 @@ def test_deadline_detection_terminates_hung_worker(tmp_path: Path) -> None:
 
     ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [])
 
-    slow_task = Task(task_type=TaskType.SLOW_TEST, payload={}, timeout_seconds=2)
+    slow_task = Task(task_type=TaskType.NOOP, payload={"delay_seconds": 120}, timeout_seconds=2)
     noop_task = Task(task_type=TaskType.NOOP)
 
     task_queue.put(slow_task)
@@ -282,6 +282,6 @@ def test_deadline_detection_terminates_hung_worker(tmp_path: Path) -> None:
     stop_listener(listener)
     progress.stop()
 
-    assert deadline_fired, "deadline detection never fired for the SLOW_TEST task"
+    assert deadline_fired, "deadline detection never fired for the slow NOOP task"
     assert pending == 0, f"pending did not reach 0; remaining={pending}"
     assert time.monotonic() - test_start < TEST_LIMIT

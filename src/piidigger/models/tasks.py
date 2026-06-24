@@ -5,20 +5,21 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field
+
+from piidigger.models.base import PiiDiggerModel
 
 
 class TaskType(StrEnum):
     ENUM_DIR = "enum_dir"
     SCAN_FILE = "scan_file"
-    NOOP = "noop"
-    SLOW_TEST = "slow_test"  # test-only: handler sleeps 120s to trigger deadline detection; remove in Phase 3
+    NOOP = "noop"  # kept for integration tests; pass {"delay_seconds": N} in payload to simulate slow tasks
     # Archive types arrive with ZIP (Phase 5) — no orchestration change required:
     # ENUM_ARCHIVE_MEMBERS = "enum_archive_members"
     # SCAN_ARCHIVE_MEMBER = "scan_archive_member"
 
 
-class Task(BaseModel):
+class Task(PiiDiggerModel):
     model_config = ConfigDict(frozen=True)
 
     task_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
@@ -27,7 +28,7 @@ class Task(BaseModel):
     timeout_seconds: int = Field(default=30, ge=1, le=600)
 
 
-class TaskResult(BaseModel):
+class TaskResult(PiiDiggerModel):
     task_id: str
     task_type: TaskType
     status: Literal["ok", "timeout", "error"]
