@@ -5,7 +5,7 @@ from pathlib import Path
 
 import click
 
-from piidigger.models.config import Config
+from piidigger.models.config import Config, generate_toml_template
 
 
 @click.group(name="config")
@@ -22,7 +22,7 @@ def generate(output: str) -> None:
         click.echo(f"Error: {output!r} already exists.  Delete it or choose a different path.", err=True)
         sys.exit(1)
     try:
-        dest.write_text(Config.default().to_toml_str(), encoding="utf-8")
+        dest.write_text(generate_toml_template(), encoding="utf-8")
         click.echo(f"Default config written to {output}")
     except OSError as exc:
         click.echo(f"Error writing {output!r}: {exc}", err=True)

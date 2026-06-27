@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from piidigger.models.config import Config, ResultsConfig
+from piidigger.models.config import Config, ResultsConfig, generate_toml_template
 
 # ---------------------------------------------------------------------------
 # ResultsConfig
@@ -61,24 +61,6 @@ def test_config_default_is_picklable() -> None:
     assert restored.max_workers == c.max_workers
 
 
-@pytest.mark.unit
-def test_config_to_toml_str_roundtrip(tmp_path: Path) -> None:
-    """to_toml_str() produces valid TOML that from_toml() can re-read."""
-    c = Config(
-        start_dirs=[tmp_path],
-        data_handlers=["pan"],
-        performance="fast",
-        max_workers=2,
-    )
-    toml_text = c.to_toml_str()
-    toml_file = tmp_path / "test.toml"
-    toml_file.write_text(toml_text, encoding="utf-8")
-    restored = Config.from_toml(toml_file)
-    assert restored.start_dirs == [tmp_path]
-    assert restored.data_handlers == ["pan"]
-    assert restored.performance == "fast"
-    assert restored.max_workers == 2
-
 
 # ---------------------------------------------------------------------------
 # Config.from_toml — error paths
@@ -122,6 +104,38 @@ def test_from_toml_unknown_field_suggests_current_template(tmp_path: Path) -> No
         Config.from_toml(bad)
 
     assert "piidigger config generate" in str(exc_info.value)
+
+
+@pytest.mark.unit
+def test_from_toml_multi_os_format(tmp_path: Path) -> None:
+    """from_toml() extracts the current OS slice from a multi-OS config."""
+    toml = tmp_path / "multi.toml"
+    # All three OS keys point at tmp_path so the existence check passes on
+    # whichever OS runs this test.
+    toml.write_text(
+        f'[start_dirs]\nwindows = ["{tmp_path.as_posix()}"]\n'
+        f'macos = ["{tmp_path.as_posix()}"]\n'
+        f'linux = ["{tmp_path.as_posix()}"]\n'
+        f"\n[exclude_dirs]\nwindows = []\nmacos = []\nlinux = []\n",
+        encoding="utf-8",
+    )
+
+    config = Config.from_toml(toml)
+    assert config.start_dirs == [tmp_path]
+    assert config.exclude_dirs == []
+
+
+@pytest.mark.unit
+def test_generate_toml_template_is_valid_toml() -> None:
+    """generate_toml_template() produces TOML that tomllib can parse."""
+    import tomllib
+    text = generate_toml_template()
+    data = tomllib.loads(text)
+    assert isinstance(data["start_dirs"], dict)
+    assert "windows" in data["start_dirs"]
+    assert "macos" in data["start_dirs"]
+    assert "linux" in data["start_dirs"]
+    assert isinstance(data["exclude_dirs"], dict)
 
 
 @pytest.mark.unit

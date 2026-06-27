@@ -34,8 +34,8 @@ def inspect_encoding(file_path: Path) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
-@inspect_group.command(name="handlers")
-def inspect_handlers() -> None:
+@inspect_group.command(name="datatypes")
+def inspect_datatypes() -> None:
     """List available data handlers."""
     for name in sorted(HANDLER_REGISTRY):
         click.echo(name)

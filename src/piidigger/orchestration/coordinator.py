@@ -144,6 +144,12 @@ def run_coordinator(
     # ------------------------------------------------------------------
     # Seed initial tasks — one ENUM_DIR per configured start directory
     # ------------------------------------------------------------------
+
+    # Pre-seed dirs_found so the progress bar starts at "0 / N" rather than
+    # "0 / 0".  Each ENUM_DIR result will add its discovered subdirs to the
+    # total, so the bar reaches 100% when all dirs have been scanned.
+    progress.update({"dirs_found": len(ctx.config.start_dirs)})
+
     pending = 0
     for path in ctx.config.start_dirs:
         task = Task(task_type=TaskType.ENUM_DIR, payload={"path": str(path), "depth": 0})

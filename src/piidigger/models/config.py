@@ -11,19 +11,56 @@ from pydantic import Field, ValidationError, field_validator
 
 from piidigger.models.base import PiiDiggerModel
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-class ResultsConfig(PiiDiggerModel):
-    """Output destination and format selection.
+_WINDOWS_START_DIRS: list[str] = ["all"]
+_DARWIN_START_DIRS: list[str] = ["/"]
+_LINUX_START_DIRS: list[str] = ["/"]
 
-    path is the folder where output files are written.
-    formats selects which output formats to produce; ["all"] enables every format.
-    Valid format names: "csv", "json", "text".
-    Filenames are generated automatically: piidigger-<timestamp>.<ext>
-    """
+_WINDOWS_EXCLUDE_DIRS: list[str] = [
+    "C:/Windows",
+    "C:/Program Files (x86)",
+    "C:/Program Files",
+]
 
-    path: Path = Path("piidigger-results")
-    formats: list[str] = Field(default_factory=lambda: ["all"])
+_DARWIN_EXCLUDE_DIRS: list[str] = [
+    "/dev",
+    "/etc",
+    "/usr/bin",
+    "/usr/local/Homebrew",
+    "/usr/lib",
+    "/usr/sbin",
+    "/Applications",
+    "/Library/Developer",
+    "/Library/Documentation",
+    "/System",
+]
 
+_LINUX_EXCLUDE_DIRS: list[str] = [
+    "/boot",
+    "/dev",
+    "/etc",
+    "/proc",
+    "/run",
+    "/snap",
+    "/sys",
+    "/usr/bin",
+    "/usr/lib",
+    "/usr/lib32",
+    "/usr/lib64",
+    "/usr/libx32",
+    "/usr/local",
+    "/usr/sbin",
+    "/usr/share",
+    "/usr/src",
+    "*/.vscode-server",
+    "/mnt/c",
+    "/mnt/d",
+    "/mnt/wslg",
+    "/wsl",
+]
 
 _KNOWN_CONFIG_KEYS: tuple[str, ...] = (
     "start_dirs",
@@ -40,6 +77,27 @@ _KNOWN_CONFIG_KEYS: tuple[str, ...] = (
     "results.path",
     "results.formats",
 )
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+
+def _default_start_dirs() -> list[Path]:
+    system = platform.system().lower()
+    if system == "windows":
+        return [Path(f"{d}:\\") for d in string.ascii_uppercase if Path(f"{d}:\\").exists()]
+    return [Path("/")]
+
+
+def _default_exclude_dirs() -> list[str]:
+    system = platform.system().lower()
+    if system == "windows":
+        return _WINDOWS_EXCLUDE_DIRS
+    if system == "darwin":
+        return _DARWIN_EXCLUDE_DIRS
+    return _LINUX_EXCLUDE_DIRS
 
 
 def _format_error_location(loc: tuple[Any, ...]) -> str:
@@ -81,66 +139,64 @@ def _format_validation_errors(path: Path, error: ValidationError) -> str:
     return "\n".join(lines)
 
 
-def _default_start_dirs() -> list[Path]:
-    """Return OS-appropriate default start directories."""
-    system = platform.system().lower()
-    if system == "windows":
-        return [Path(f"{d}:\\") for d in string.ascii_uppercase if Path(f"{d}:\\").exists()]
-    return [Path("/")]
+def generate_toml_template() -> str:
+    """Generate a multi-OS TOML configuration template.
+
+    [start_dirs] and [exclude_dirs] hold per-OS keys so one file works on
+    Windows, macOS, and Linux.  from_toml() picks the right key at load time.
+    "all" in start_dirs expands to every available drive/mount at scan time.
+    """
+
+    def _toml_list(items: list[str]) -> str:
+        inner = ", ".join(f'"{item}"' for item in items)
+        return f"[{inner}]"
+
+    # Root-level flat keys must come before any [table] headers; a key written
+    # after a [header] is parsed as a member of that table by TOML parsers.
+    lines: list[str] = [
+        'include_exts = ["all"]',
+        'include_mime = ["all"]',
+        'data_handlers = ["all"]',
+        'performance = "balanced"',
+        "max_workers = 0",
+        "default_timeout_seconds = 30",
+        "local_files_only = true",
+        'log_file = "logs/piidigger.log"',
+        'log_level = "INFO"',
+        "",
+        "[start_dirs]",
+        f"windows = {_toml_list(_WINDOWS_START_DIRS)}",
+        f"macos = {_toml_list(_DARWIN_START_DIRS)}",
+        f"linux = {_toml_list(_LINUX_START_DIRS)}",
+        "",
+        "[exclude_dirs]",
+        f"windows = {_toml_list(_WINDOWS_EXCLUDE_DIRS)}",
+        f"macos = {_toml_list(_DARWIN_EXCLUDE_DIRS)}",
+        f"linux = {_toml_list(_LINUX_EXCLUDE_DIRS)}",
+        "",
+        "[results]",
+        'path = "piidigger-results"',
+        'formats = ["all"]',
+    ]
+    return "\n".join(lines) + "\n"
 
 
-_WINDOWS_EXCLUDE_DIRS: list[str] = [
-    "C:\\Windows",
-    "C:\\Program Files (x86)",
-    "C:\\Program Files",
-]
-
-_DARWIN_EXCLUDE_DIRS: list[str] = [
-    "/dev",
-    "/etc",
-    "/usr/bin",
-    "/usr/local/Homebrew",
-    "/usr/lib",
-    "/usr/sbin",
-    "/Applications",
-    "/Library/Developer",
-    "/Library/Documentation",
-    "/System",
-]
-
-_LINUX_EXCLUDE_DIRS: list[str] = [
-    "/boot",
-    "/dev",
-    "/etc",
-    "/proc",
-    "/run",
-    "/snap",
-    "/sys",
-    "/usr/bin",
-    "/usr/lib",
-    "/usr/lib32",
-    "/usr/lib64",
-    "/usr/libx32",
-    "/usr/local",
-    "/usr/sbin",
-    "/usr/share",
-    "/usr/src",
-    "*/.vscode-server",
-    "/mnt/c",
-    "/mnt/d",
-    "/mnt/wslg",
-    "/wsl",
-]
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
 
 
-def _default_exclude_dirs() -> list[str]:
-    """Return OS-appropriate default exclude directories."""
-    system = platform.system().lower()
-    if system == "windows":
-        return _WINDOWS_EXCLUDE_DIRS
-    if system == "darwin":
-        return _DARWIN_EXCLUDE_DIRS
-    return _LINUX_EXCLUDE_DIRS
+class ResultsConfig(PiiDiggerModel):
+    """Output destination and format selection.
+
+    path is the folder where output files are written.
+    formats selects which output formats to produce; ["all"] enables every format.
+    Valid format names: "csv", "json", "text".
+    Filenames are generated automatically: piidigger-<timestamp>.<ext>
+    """
+
+    path: Path = Path("piidigger-results")
+    formats: list[str] = Field(default_factory=lambda: ["all"])
 
 
 class Config(PiiDiggerModel):
@@ -197,6 +253,20 @@ class Config(PiiDiggerModel):
         except tomllib.TOMLDecodeError as e:
             raise ValueError(f"invalid TOML in {path}: {e}") from e
 
+        # Multi-OS format: [start_dirs] / [exclude_dirs] are TOML tables keyed
+        # by "windows", "macos", "linux".  Extract the current-OS slice so the
+        # rest of validation sees a plain list.
+        system = platform.system().lower()
+        os_key = "macos" if system == "darwin" else system
+        if isinstance(data.get("start_dirs"), dict):
+            data["start_dirs"] = data["start_dirs"].get(os_key, [])
+        if isinstance(data.get("exclude_dirs"), dict):
+            data["exclude_dirs"] = data["exclude_dirs"].get(os_key, [])
+
+        # "all" expands to every available drive/mount point on the current OS.
+        if data.get("start_dirs") == ["all"]:
+            data["start_dirs"] = [str(d) for d in _default_start_dirs()]
+
         try:
             config = cls.model_validate(data)
         except ValidationError as e:
@@ -228,44 +298,3 @@ class Config(PiiDiggerModel):
             data_handlers=["all"],
             results=ResultsConfig(),
         )
-
-    def to_toml_str(self) -> str:
-        """Serialize this Config to a TOML-formatted string.
-
-        Suitable for writing to a file with config generate.
-        Note: the json_file field is written as ``json = ...`` for TOML
-        compatibility (matching what from_toml() expects).
-        """
-        lines: list[str] = []
-
-        def _fmt(val: object) -> str:
-            if isinstance(val, bool):
-                return str(val).lower()
-            if isinstance(val, str):
-                return f'"{val}"'
-            if isinstance(val, Path):
-                return f'"{val.as_posix()}"'
-            if isinstance(val, int):
-                return str(val)
-            if isinstance(val, list):
-                items = ", ".join(_fmt(v) for v in val)
-                return f"[{items}]"
-            return f'"{val}"'
-
-        lines.append(f"start_dirs = {_fmt([d.as_posix() for d in self.start_dirs])}")
-        lines.append(f"exclude_dirs = {_fmt(self.exclude_dirs)}")
-        lines.append(f"include_exts = {_fmt(self.include_exts)}")
-        lines.append(f"include_mime = {_fmt(self.include_mime)}")
-        lines.append(f"data_handlers = {_fmt(self.data_handlers)}")
-        lines.append(f"performance = {_fmt(self.performance)}")
-        lines.append(f"max_workers = {self.max_workers}")
-        lines.append(f"default_timeout_seconds = {self.default_timeout_seconds}")
-        lines.append(f"local_files_only = {str(self.local_files_only).lower()}")
-        lines.append(f'log_file = "{self.log_file.as_posix()}"')
-        lines.append(f'log_level = "{self.log_level}"')
-        lines.append("")
-        lines.append("[results]")
-        lines.append(f"path = {_fmt(self.results.path)}")
-        lines.append(f"formats = {_fmt(self.results.formats)}")
-
-        return "\n".join(lines) + "\n"

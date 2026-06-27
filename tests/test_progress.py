@@ -38,7 +38,7 @@ def test_noop_in_non_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     display.log_event("WARNING", "test event")
 
     # Rich objects must remain uninitialised (start() was a no-op)
-    assert display._progress is None
+    assert display._bars is None
     assert display._live is None
 
 
