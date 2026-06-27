@@ -322,6 +322,36 @@ Create empty-but-importable stubs (docstring + `__all__ = []` or equivalent) so 
 - [x] `cli/commands/config.py`: `generate` subcommand (write default TOML); `validate` subcommand (load and report errors)
 - [x] `run.py`: `run_scan(config: Config) -> int` wires together: start logging listener → start workers → run coordinator → return exit code
 
+### CLI — second pass (pre-2.0 launch, deferred from Wave 3)
+
+- [ ] Add `piidigger inspect` subcommand group (`cli/commands/inspect.py`); register it on the root group in `cli/main.py`
+- [ ] `piidigger inspect mime <file>` — detect and print the MIME type PIIDigger would assign to a given file (wraps `getmime.get_mime()`)
+- [ ] `piidigger inspect encoding <file>` — detect and print the encoding PIIDigger would use to read a given file (wraps `getencoding.detect_encoding()`)
+- [ ] `piidigger inspect handlers` — list available data handlers; moved from `scan --list-datahandlers`
+- [ ] `piidigger inspect filetypes` — list supported extensions and MIME types; moved from `scan --list-filetypes`
+- [ ] `piidigger inspect cpu` — print logical CPU count; moved from `scan --cpu-count`
+- [ ] Remove `--list-datahandlers`, `--list-filetypes`, and `--cpu-count` from `scan` after `inspect` is in place
+- [ ] Move `--version` / `-v` from `piidigger scan` to the root `piidigger` group (`cli/main.py`); remove `click.version_option` from `scan.py`
+
+### CLI — performance preset (pre-2.0 launch, deferred from Wave 3)
+
+Replace the raw `--max-workers N` option with a user-friendly performance preset.  The preset maps to a worker count using physical core count (via `psutil`) so the application handles CPU architecture differences transparently.
+
+Preset → worker count formula:
+
+| Preset | Workers | Notes |
+|---|---|---|
+| `slow` | 1 | Background scan — machine stays fully responsive |
+| `balanced` | `max(1, ceil(physical_cores × 0.75))` | Default — leaves ~25% of physical cores free for other work |
+| `fast` | `os.cpu_count()` (logical cores) | Full throughput; HT benefit is real for PIIDigger's mixed I/O+CPU profile |
+
+- [ ] Add `psutil` to project dependencies (`pyproject.toml`)
+- [ ] Add `performance: Literal["fast", "balanced", "slow"] = "balanced"` field to `Config`; include in `to_toml_str()` and `from_toml()` round-trip
+- [ ] Implement `_resolve_workers(performance: str, physical_cores: int, logical_cores: int) -> int` in `run.py`; `psutil.cpu_count(logical=False)` provides physical cores with `os.cpu_count()` as logical fallback
+- [ ] Replace `--max-workers` as the primary CLI option with `--performance fast|balanced|slow` (default `balanced`) on `piidigger scan`
+- [ ] Retain `--max-workers N` as a hidden expert override; when provided it takes precedence over `--performance`
+- [ ] Unit tests for `_resolve_workers()`: each preset on a range of physical/logical core counts, including the 2-core edge case
+
 ### Phase 3 — Tests
 
 - [ ] Unit: `FilesystemItem` satisfies `ScannableItem` protocol
