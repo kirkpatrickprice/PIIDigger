@@ -1,24 +1,7 @@
-import sys
-import traceback
-from multiprocessing import Process, freeze_support
+from multiprocessing import freeze_support
 
-from piidigger.globalvars import errorCodes
-from piidigger.piidigger import main
+from piidigger.cli.main import cli
 
-exitCode = errorCodes['ok']
-
-if __name__=='__main__':
+if __name__ == "__main__":
     freeze_support()
-    try:
-        m = Process(target=main)
-        m.start()
-        m.join()
-        exitCode = m.exitcode
-    except KeyboardInterrupt:
-        pass
-    except Exception:
-        exitCode = errorCodes['unknownError']
-        errorFile='piidigger.exc'
-        print(f'An unknown error was encountered.  Detailed error information has been written to {errorFile}.')
-        traceback.print_exception(file=errorFile)
-    sys.exit(exitCode)
+    cli()

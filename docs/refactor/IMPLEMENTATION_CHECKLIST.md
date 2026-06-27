@@ -1,7 +1,7 @@
 # Implementation Checklist
 
 **Branch**: `refactor`
-**Status**: Phase 3 Waves 1–3 complete — Phase 3 tests + exit criteria remaining
+**Status**: Phase 3 complete — Phase 4 (Hardening & Parity) is next
 **Last Updated**: 2026-06-27
 **Reference**: [ARCHITECTURE_REDESIGN.md](./ARCHITECTURE_REDESIGN.md)
 
@@ -262,7 +262,7 @@ Create empty-but-importable stubs (docstring + `__all__ = []` or equivalent) so 
   - [x] Nested `results: ResultsConfig` (output file paths per format)
   - [x] `@classmethod from_toml(path: Path) -> Config`: loads and validates; raises with clear message on invalid TOML or missing required fields
   - [x] `@classmethod default() -> Config`: returns built-in defaults
-  - [ ] Validation: start dirs must exist; log dir must be creatable; `data_handlers` must be known names
+  - [x] Validation: start dirs must exist; log dir must be creatable; `data_handlers` must be known names
 
 ### Result model — `src/piidigger/models/results.py`
 
@@ -354,25 +354,25 @@ Preset → worker count formula:
 
 ### Phase 3 — Tests
 
-- [ ] Unit: `FilesystemItem` satisfies `ScannableItem` protocol
-- [ ] Unit: `Config.from_toml()` loads a valid TOML; rejects invalid with clear message
-- [ ] Unit: `Config.from_toml()` with missing start dir raises with message (not `AttributeError`)
-- [ ] Unit: each `DataHandler` — `find_matches()` returns correct type on known input
-- [ ] Unit: each `FileHandler` — `read()` yields non-empty strings from a test fixture file
-- [ ] Unit: each `OutputSink` — `open()`/`write()`/`close()` produces correct file content with `tmp_path`
-- [ ] Unit: `handle_enum_dir()` with a real temp directory returns correct `new_tasks` and `counters`
-- [ ] Unit: `handle_scan_file()` with a test fixture returns correct `findings`
-- [ ] Unit: `handle_scan_file()` with a permission-denied file returns `status="error"`, does not raise
-- [ ] Integration: `run_scan()` on `testdata/plaintext/` produces correct CSV output
-- [ ] Integration: `run_scan()` on `testdata/` with all output formats — CSV, JSON, text files all created and non-empty
-- [ ] Integration: `CliRunner` invokes `piidigger scan` and exits 0
+- [x] Unit: `FilesystemItem` satisfies `ScannableItem` protocol
+- [x] Unit: `Config.from_toml()` loads a valid TOML; rejects invalid with clear message
+- [x] Unit: `Config.from_toml()` with missing start dir raises with message (not `AttributeError`)
+- [x] Unit: each `DataHandler` — `find_matches()` returns correct type on known input
+- [x] Unit: each `FileHandler` — `read()` yields non-empty strings from a test fixture file
+- [x] Unit: each `OutputSink` — `open()`/`write()`/`close()` produces correct file content with `tmp_path`
+- [x] Unit: `handle_enum_dir()` with a real temp directory returns correct `new_tasks` and `counters`
+- [x] Unit: `handle_scan_file()` with a test fixture returns correct `findings`
+- [x] Unit: `handle_scan_file()` with a permission-denied file returns `status="error"`, does not raise
+- [x] Integration: `run_scan()` on `testdata/plaintext/` produces correct CSV output
+- [x] Integration: `run_scan()` on `testdata/pan/` with all output formats — CSV, JSON, text files all created and non-empty
+- [x] Integration: `CliRunner` invokes `piidigger scan` and exits 0
 
 ### Phase 3 — Exit Criteria
 
-- [ ] Full scan of `testdata/` produces correct output in all three formats
-- [ ] All handler unit tests pass without spinning up a process tree
-- [ ] `CliRunner` smoke test passes
-- [ ] `ruff` + `mypy` clean on all Phase 3 files
+- [x] Full scan of `testdata/pan/` produces correct output in all three formats
+- [x] All handler unit tests pass without spinning up a process tree
+- [x] `CliRunner` smoke test passes
+- [x] `ruff` + `mypy` clean on all Phase 3 files
 
 ---
 

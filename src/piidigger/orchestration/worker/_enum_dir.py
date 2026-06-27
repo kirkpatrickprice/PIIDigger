@@ -48,7 +48,7 @@ def _is_cloud_placeholder(path: Path) -> bool:
     recall_bit = 0x400000
     offline_bit = 0x001000
     try:
-        from win32api import GetFileAttributes  # type: ignore[import]
+        from win32api import GetFileAttributes
         attr = GetFileAttributes(str(path))
         return bool(attr & recall_bit) or bool(attr & offline_bit)
     except Exception:

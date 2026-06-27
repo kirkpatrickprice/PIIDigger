@@ -75,7 +75,7 @@ docs = [
 ]
 
 [project.scripts]
-piidigger = "piidigger.piidigger:main"
+piidigger = "piidigger.cli.main:cli"
 getmime = "piidigger.getmime:main"
 
 [tool.setuptools.dynamic]

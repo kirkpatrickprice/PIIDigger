@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import unittest.mock
 from pathlib import Path
 
 import pytest
@@ -227,3 +228,20 @@ def test_scan_file_testdata_pan_pdf() -> None:
 
     assert result.status == "ok"
     assert len(result.findings) >= 1
+
+
+@pytest.mark.unit
+def test_scan_file_permission_denied_returns_error(tmp_path: Path) -> None:
+    """handle_scan_file() returns status='error' when the file cannot be opened."""
+    f = tmp_path / "restricted.txt"
+    f.write_text("content that cannot be read")
+
+    ctx = _make_ctx(tmp_path)
+    with unittest.mock.patch(
+        "piidigger.orchestration.sources.FilesystemItem.open_stream",
+        side_effect=PermissionError("access denied"),
+    ):
+        result = handle_scan_file(_scan_file_task(f), ctx, _logger())
+
+    assert result.status == "error"
+    assert result.counters.get("files_scanned") == 1

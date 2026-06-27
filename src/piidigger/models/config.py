@@ -6,7 +6,7 @@ import string
 import tomllib
 from pathlib import Path
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, field_validator
 
 from piidigger.models.base import PiiDiggerModel
 
@@ -109,6 +109,18 @@ class Config(PiiDiggerModel):
     log_level: str = "INFO"
     results: ResultsConfig = Field(default_factory=ResultsConfig)
 
+    @field_validator("data_handlers")
+    @classmethod
+    def _validate_data_handlers(cls, v: list[str]) -> list[str]:
+        if "all" in v:
+            return v
+        from piidigger.datahandlers import HANDLER_REGISTRY  # noqa: PLC0415
+        unknown = [name for name in v if name not in HANDLER_REGISTRY]
+        if unknown:
+            known = ", ".join(sorted(HANDLER_REGISTRY))
+            raise ValueError(f"unknown data handler(s): {', '.join(unknown)}; known: {known}")
+        return v
+
     @classmethod
     def from_toml(cls, path: Path) -> Config:
         """Load and validate a Config from a TOML file.
@@ -135,6 +147,11 @@ class Config(PiiDiggerModel):
         for d in config.start_dirs:
             if not d.exists():
                 raise ValueError(f"start directory does not exist: {d}")
+
+        try:
+            config.log_file.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise ValueError(f"cannot create log directory {config.log_file.parent}: {e}") from e
 
         return config
 

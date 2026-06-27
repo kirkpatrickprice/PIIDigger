@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
 import multiprocessing as mp
 import re
 import socket
+from datetime import datetime
 from typing import Any
 
 from piidigger.models.config import Config
@@ -13,7 +13,6 @@ from piidigger.orchestration.logging_setup import start_listener
 from piidigger.orchestration.progress import ProgressDisplay
 from piidigger.orchestration.worker import start_worker_pool
 from piidigger.outputhandlers import CsvSink, JsonSink, TextSink
-
 
 _ALL_FORMATS: frozenset[str] = frozenset({"csv", "json", "text"})
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
