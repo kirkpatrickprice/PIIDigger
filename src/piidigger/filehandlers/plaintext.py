@@ -1,17 +1,11 @@
 from collections.abc import Iterator
 
 from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.getencoding import get_encoding
+from piidigger.getencoding import detect_encoding, get_encoding
 from piidigger.globalvars import DEFAULT_CHUNK_COUNT, MAX_CHUNK_SIZE
 from piidigger.logmanager import LogManager
 
-# Each filehandler must have the following:
-#   "handles" -     dictionary to identify lists of file extensions and mime types that the handler will manage.
-#                   This will be read by globals upon initial load to build the full list of supported mime types and file extensions
-#   "read_file" -   Function that manages opening and reading of the file.  The main module will call this handler with the "read_file(filename)" function.
-#                   read_file should provide the lines of text to each of the dataHandlers
-
-handles = {
+HANDLES = {
     'ext': [
         '.aplt', '.applescript', '.armx', '.asp', '.asax', '.asmx', '.aspx',
         '.bat',
@@ -96,3 +90,45 @@ def read_file(filename: str,
         logger.error('Codec lookup error processing file %s (enc=%s)', filename, enc)
     except Exception as e:
         logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
+
+
+# ---------------------------------------------------------------------------
+# 2.0 FileHandler protocol implementation
+# ---------------------------------------------------------------------------
+
+# Backward-compat alias for globalfuncs dynamic discovery (uses lowercase 'handles')
+handles = HANDLES
+
+
+class PlaintextHandler:
+    """FileHandler for text-based files.
+
+    Reads via source.open_stream() — works for both on-disk files and
+    archive members without requiring a real filesystem path.
+    Encoding is detected from the raw bytes via charset-normalizer.
+    """
+
+    def read(self, source) -> Iterator[str]:  # source: ScannableItem
+        stream = source.open_stream()
+        try:
+            raw = stream.read()
+        finally:
+            stream.close()
+
+        enc = detect_encoding(raw)
+        if not enc:
+            return
+
+        text = raw.decode(enc, errors='replace')
+        chunk_handler: ContentHandler = ContentHandler(max_content_size=MAX_CHUNK_SIZE * DEFAULT_CHUNK_COUNT)
+        for line in text.splitlines():
+            chunk_handler.append_content(line)
+            if chunk_handler.content_buffer_full():
+                yield chunk_handler.get_content()
+
+        final = chunk_handler.finalize_content()
+        if final:
+            yield final
+
+
+handler = PlaintextHandler()

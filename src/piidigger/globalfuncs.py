@@ -16,7 +16,7 @@ from piidigger.globalvars import MAX_CHUNK_SIZE
 FILE_HANDLERS = {
     handler: getattr(fh, handler).handles
     for handler in fh.__dir__()
-    if not handler.startswith("_")
+    if not handler.startswith("_") and hasattr(getattr(fh, handler), "handles")
 }
 
 

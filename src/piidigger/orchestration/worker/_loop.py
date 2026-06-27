@@ -10,10 +10,8 @@ from typing import Any
 from piidigger.models.tasks import SHUTDOWN, ShutdownSentinel, Task, TaskResult, TaskStarted, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger
-
-# ---------------------------------------------------------------------------
-# Handler type alias and dispatch table
-# ---------------------------------------------------------------------------
+from piidigger.orchestration.worker._enum_dir import handle_enum_dir
+from piidigger.orchestration.worker._scan_file import handle_scan_file
 
 type _HandlerFn = Callable[[Task, WorkerContext, logging.Logger], TaskResult]
 
@@ -38,89 +36,11 @@ def _handle_noop(task: Task, _ctx: WorkerContext, logger: logging.Logger) -> Tas
     )
 
 
-# ---------------------------------------------------------------------------
-# Phase 2 stubs — replace with real filesystem handlers in Phase 3
-# ---------------------------------------------------------------------------
-
-
-def _handle_enum_dir_stub(task: Task, _ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
-    """Synthetic directory enumeration — no filesystem I/O.
-
-    depth == 0: fans out to 2 child ENUM_DIR tasks (depth=1) + 3 SCAN_FILE tasks.
-    depth >= 1: leaf node; returns only a dirs_scanned counter.
-
-    Special path prefix "/slow_test/": returns one long-running NOOP task
-    (delay_seconds=120, timeout_seconds=60) and no child dirs.  Used by the
-    Ctrl+C integration test to guarantee the coordinator is blocked on
-    result_queue.get() when SIGINT is sent.
-
-    Replace with handle_enum_dir() in Phase 3.
-    """
-    path: str = str(task.payload.get("path", ""))
-    depth: int = int(task.payload.get("depth", 0))
-    logger.debug("enum_dir stub depth=%d task=%s", depth, task.task_id)
-
-    if path.startswith("/slow_test/"):
-        return TaskResult(
-            task_id=task.task_id,
-            task_type=task.task_type,
-            status="ok",
-            new_tasks=[{"task_type": TaskType.NOOP, "payload": {"delay_seconds": 120}, "timeout_seconds": 60}],
-            counters={"dirs_scanned": 1},
-            worker_pid=os.getpid(),
-        )
-
-    if depth >= 1:
-        return TaskResult(
-            task_id=task.task_id,
-            task_type=task.task_type,
-            status="ok",
-            counters={"dirs_scanned": 1},
-            worker_pid=os.getpid(),
-        )
-
-    new_tasks: list[dict[str, Any]] = [
-        {"task_type": TaskType.ENUM_DIR, "payload": {"path": "/synthetic/child/1", "depth": 1}},
-        {"task_type": TaskType.ENUM_DIR, "payload": {"path": "/synthetic/child/2", "depth": 1}},
-        {"task_type": TaskType.SCAN_FILE, "payload": {"path": "/synthetic/file1.txt"}},
-        {"task_type": TaskType.SCAN_FILE, "payload": {"path": "/synthetic/file2.txt"}},
-        {"task_type": TaskType.SCAN_FILE, "payload": {"path": "/synthetic/file3.txt"}},
-    ]
-    return TaskResult(
-        task_id=task.task_id,
-        task_type=task.task_type,
-        status="ok",
-        new_tasks=new_tasks,
-        counters={"dirs_found": 2, "files_found": 3, "dirs_scanned": 1},
-        worker_pid=os.getpid(),
-    )
-
-
-def _handle_scan_file_stub(task: Task, _ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
-    """Synthetic file scan — no filesystem I/O.
-
-    Returns fixed counters only.  Replace with handle_scan_file() in Phase 3.
-    """
-    logger.debug("scan_file stub task=%s", task.task_id)
-    return TaskResult(
-        task_id=task.task_id,
-        task_type=task.task_type,
-        status="ok",
-        counters={"files_scanned": 1, "bytes_scanned": 1024},
-        worker_pid=os.getpid(),
-    )
-
-
-# Phase 2 stubs in DISPATCH — ENUM_DIR/SCAN_FILE replaced by real handlers in Phase 3
 DISPATCH: dict[TaskType, _HandlerFn] = {
     TaskType.NOOP: _handle_noop,
-    TaskType.ENUM_DIR: _handle_enum_dir_stub,
-    TaskType.SCAN_FILE: _handle_scan_file_stub,
+    TaskType.ENUM_DIR: handle_enum_dir,
+    TaskType.SCAN_FILE: handle_scan_file,
 }
-
-# ---------------------------------------------------------------------------
-# Worker internals
-# ---------------------------------------------------------------------------
 
 
 def _cleanup_temp_workspace() -> None:
@@ -162,11 +82,6 @@ def _dispatch(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskRes
     return result
 
 
-# ---------------------------------------------------------------------------
-# Worker loop (process target)
-# ---------------------------------------------------------------------------
-
-
 def worker_loop(ctx: WorkerContext) -> None:
     """Main loop for each worker process.
 
@@ -193,11 +108,6 @@ def worker_loop(ctx: WorkerContext) -> None:
         logger.debug("worker interrupted; exiting after current task")
 
     logger.debug("worker stopped (pid=%d)", os.getpid())
-
-
-# ---------------------------------------------------------------------------
-# Worker pool helpers
-# ---------------------------------------------------------------------------
 
 
 def start_worker_pool(ctx: WorkerContext, n_workers: int) -> list[mp.Process]:

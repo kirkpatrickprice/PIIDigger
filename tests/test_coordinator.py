@@ -82,19 +82,20 @@ def test_config_accepts_start_dirs(tmp_path: Path) -> None:
 
 @pytest.mark.integration
 def test_pending_arithmetic_single_start_dir(tmp_path: Path) -> None:
-    """Coordinator terminates with pending==0 after fanning out one start dir.
+    """Coordinator terminates with pending==0 after processing one real start dir.
 
-    One ENUM_DIR at depth=0 → 2 ENUM_DIR (depth=1) + 3 SCAN_FILE = 5 new tasks.
-    Each depth-1 ENUM_DIR is a leaf (returns immediately).
-    Each SCAN_FILE returns counters only.
-    Total tasks processed: 1 + 2 + 3 = 6.  run_coordinator() returns → pending was 0.
+    Empty directory → 1 ENUM_DIR task, no child tasks → pending reaches 0.
+    run_coordinator() returns and all workers are joined.
     """
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+
     task_queue: mp.Queue[object] = mp.Queue()
     result_queue: mp.Queue[object] = mp.Queue()
     log_queue: mp.Queue[object] = mp.Queue()
     stop_event = mp.Event()
 
-    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [Path("/synthetic/start")])
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [scan_root])
     listener = start_listener(log_queue, tmp_path / "arith.log", "WARNING")
     workers = start_worker_pool(ctx, 2)
     progress = _non_tty_progress()
@@ -106,26 +107,32 @@ def test_pending_arithmetic_single_start_dir(tmp_path: Path) -> None:
 
 @pytest.mark.integration
 def test_coordinator_accumulates_counters(tmp_path: Path) -> None:
-    """Progress counters are summed across all completed tasks."""
+    """Progress counters are summed across all completed tasks.
+
+    Real directory layout: root with 2 subdirs (no files in them) + 3 .txt files.
+    Expected: dirs_scanned=3 (root + 2 subdirs), files_scanned=3.
+    """
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    (scan_root / "sub1").mkdir()
+    (scan_root / "sub2").mkdir()
+    for i in range(3):
+        (scan_root / f"file{i}.txt").write_text(f"content line {i}")
+
     task_queue: mp.Queue[object] = mp.Queue()
     result_queue: mp.Queue[object] = mp.Queue()
     log_queue: mp.Queue[object] = mp.Queue()
     stop_event = mp.Event()
 
-    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [Path("/synthetic/root")])
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [scan_root])
     listener = start_listener(log_queue, tmp_path / "counters.log", "WARNING")
     workers = start_worker_pool(ctx, 2)
     progress = _non_tty_progress()
 
     run_coordinator(ctx, workers, listener, [], progress)
 
-    # Stub layout (see _handle_enum_dir_stub in worker.py):
-    #   depth-0 ENUM_DIR → dirs_scanned=1, dirs_found=2, files_found=3
-    #   depth-1 ENUM_DIR × 2 → dirs_scanned=1 each
-    #   SCAN_FILE × 3 → files_scanned=1, bytes_scanned=1024 each
     assert progress._counters.get("dirs_scanned", 0) == 3
     assert progress._counters.get("files_scanned", 0) == 3
-    assert progress._counters.get("bytes_scanned", 0) == 3072
 
 
 # ---------------------------------------------------------------------------
@@ -136,12 +143,18 @@ def test_coordinator_accumulates_counters(tmp_path: Path) -> None:
 @pytest.mark.integration
 def test_full_fanout_multiple_start_dirs(tmp_path: Path) -> None:
     """Coordinator handles multiple start dirs without hanging."""
+    start_dirs = []
+    for i in range(3):
+        d = tmp_path / f"root{i}"
+        d.mkdir()
+        (d / f"file{i}.txt").write_text(f"line {i}")
+        start_dirs.append(d)
+
     task_queue: mp.Queue[object] = mp.Queue()
     result_queue: mp.Queue[object] = mp.Queue()
     log_queue: mp.Queue[object] = mp.Queue()
     stop_event = mp.Event()
 
-    start_dirs = [Path(f"/synthetic/root{i}") for i in range(3)]
     ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, start_dirs)
     listener = start_listener(log_queue, tmp_path / "multi.log", "WARNING")
     workers = start_worker_pool(ctx, 3)
@@ -150,9 +163,8 @@ def test_full_fanout_multiple_start_dirs(tmp_path: Path) -> None:
     run_coordinator(ctx, workers, listener, [], progress)
 
     assert all(not w.is_alive() for w in workers)
-    # 3 roots × (1+2+3) tasks each = 18 tasks total → 3 × 3 = 9 dirs_scanned, 3 × 3 = 9 files
-    assert progress._counters.get("dirs_scanned", 0) == 9
-    assert progress._counters.get("files_scanned", 0) == 9
+    assert progress._counters.get("dirs_scanned", 0) == 3
+    assert progress._counters.get("files_scanned", 0) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -175,10 +187,10 @@ def test_ctrl_c_exits_within_5_seconds(tmp_path: Path) -> None:
     log_queue: mp.Queue[object] = mp.Queue()
     stop_event = mp.Event()
 
-    # /slow_test/ prefix causes _handle_enum_dir_stub to return a SLOW_TEST task
-    # (sleep 120s) instead of normal fan-out.  This guarantees the coordinator is
-    # blocked on result_queue.get() when SIGINT is sent — no race on fast CI.
-    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [Path("/slow_test/root")])
+    # testdata/ has ~80 files across several subdirs; the scan takes well over
+    # 0.5 s, so the coordinator is still in its main loop when SIGINT arrives.
+    testdata = Path(__file__).parent.parent / "testdata"
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [testdata])
 
     # _run_with_internal_workers is defined in piidigger.orchestration.coordinator
     # (an installed package), so Windows spawn can import it.  Workers are started

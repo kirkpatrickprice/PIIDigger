@@ -116,10 +116,22 @@ def run_coordinator(
         return pending
 
     def _route_to_sinks(findings: list[dict[str, Any]], output_sinks: list[Any]) -> None:
-        """Forward findings to each OutputSink.  No-op when sinks list is empty (Phase 2)."""
-        for finding in findings:
+        """Forward findings to each OutputSink.  No-op when sinks list is empty (Phase 2).
+
+        Findings cross the process boundary as plain dicts (picklable); sinks
+        expect validated ResultRecord objects, so we reconstitute them here at
+        the coordinator boundary.
+        """
+        from piidigger.models.results import ResultRecord  # local: avoids circular at module level
+
+        for finding_dict in findings:
+            try:
+                record = ResultRecord.model_validate(finding_dict)
+            except Exception:  # noqa: BLE001
+                logger.warning("coordinator: could not deserialize finding: %r", finding_dict)
+                continue
             for sink in output_sinks:
-                sink.write(finding)
+                sink.write(record)
 
     def _flush_sinks(output_sinks: list[Any]) -> None:
         """Close all output sinks after the coordinator loop exits."""

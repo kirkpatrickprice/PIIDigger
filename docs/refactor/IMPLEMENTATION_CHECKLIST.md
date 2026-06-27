@@ -1,8 +1,8 @@
 # Implementation Checklist
 
 **Branch**: `refactor`
-**Status**: Phase 2 complete — Phase 3 next
-**Last Updated**: 2026-06-15
+**Status**: Phase 3 Waves 1–3 complete — Phase 3 tests + exit criteria remaining
+**Last Updated**: 2026-06-27
 **Reference**: [ARCHITECTURE_REDESIGN.md](./ARCHITECTURE_REDESIGN.md)
 
 Use this checklist to track progress. Mark items `[x]` as completed. Each phase ends with an exit-criteria gate — do not start the next phase until all exit criteria are met.
@@ -229,98 +229,98 @@ Create empty-but-importable stubs (docstring + `__all__ = []` or equivalent) so 
 
 ### Protocols — `src/piidigger/protocols.py`
 
-- [ ] `DataHandler(Protocol)`: `name: str`; `find_matches(text: str) -> dict[str, set[str]]`
-- [ ] `FileHandler(Protocol)`: `read(source: ScannableItem) -> Iterator[str]`
-- [ ] `OutputSink(Protocol)`: `open() -> None`; `write(record: ResultRecord) -> None`; `close() -> None`
-- [ ] `ScannableItem(Protocol)`: `display_path: str`; `ext: str`; `mime: str | None`; `size: int`; `depth: int`; `open_stream() -> IO[bytes]`; `materialize() -> Path`
+- [x] `DataHandler(Protocol)`: `name: str`; `find_matches(text: str) -> dict[str, set[str]]`
+- [x] `FileHandler(Protocol)`: `read(source: ScannableItem) -> Iterator[str]`
+- [x] `OutputSink(Protocol)`: `open() -> None`; `write(record: ResultRecord) -> None`; `close() -> None`
+- [x] `ScannableItem(Protocol)`: `display_path: str`; `ext: str`; `mime: str | None`; `size: int`; `depth: int`; `open_stream() -> IO[bytes]`; `materialize() -> Path`
 
 ### Sources — `src/piidigger/orchestration/sources.py`
 
-- [ ] `FilesystemItem(ScannableItem)`: wraps `pathlib.Path`
-  - [ ] `display_path`: `str(path)`
-  - [ ] `ext`: `path.suffix`
-  - [ ] `mime`: result of MIME detection (or `None` if detection disabled)
-  - [ ] `size`: `path.stat().st_size`
-  - [ ] `depth`: always `0`
-  - [ ] `open_stream()`: `open(path, "rb")`
-  - [ ] `materialize()`: returns `path` itself (no copy)
-- [ ] `FilesystemItem` passes the `ScannableItem` Protocol check (`typing.runtime_checkable` or `isinstance` test)
+- [x] `FilesystemItem(ScannableItem)`: wraps `pathlib.Path`
+  - [x] `display_path`: `str(path)`
+  - [x] `ext`: `path.suffix`
+  - [x] `mime`: result of MIME detection (or `None` if detection disabled)
+  - [x] `size`: `path.stat().st_size`
+  - [x] `depth`: always `0`
+  - [x] `open_stream()`: `open(path, "rb")`
+  - [x] `materialize()`: returns `path` itself (no copy)
+- [x] `FilesystemItem` passes the `ScannableItem` Protocol check (`typing.runtime_checkable` or `isinstance` test)
 
 ### Configuration model — `src/piidigger/models/config.py`
 
-- [ ] `Config` Pydantic model replaces the 1.x `classes.Config` getter-soup
-  - [ ] `start_dirs: list[Path]`
-  - [ ] `exclude_dirs: list[str]`
-  - [ ] `include_exts: list[str]`
-  - [ ] `include_mime: list[str]`
-  - [ ] `data_handlers: list[str]`
-  - [ ] `max_workers: int` (defaults to `cpu_count()`)
-  - [ ] `default_timeout_seconds: int` (default: 30)
-  - [ ] `local_files_only: bool`
-  - [ ] `log_file: Path`
-  - [ ] `log_level: str`
-  - [ ] Nested `results: ResultsConfig` (output file paths per format)
-  - [ ] `@classmethod from_toml(path: Path) -> Config`: loads and validates; raises with clear message on invalid TOML or missing required fields
-  - [ ] `@classmethod default() -> Config`: returns built-in defaults
+- [x] `Config` Pydantic model replaces the 1.x `classes.Config` getter-soup
+  - [x] `start_dirs: list[Path]`
+  - [x] `exclude_dirs: list[str]`
+  - [x] `include_exts: list[str]`
+  - [x] `include_mime: list[str]`
+  - [x] `data_handlers: list[str]`
+  - [x] `max_workers: int` (defaults to `cpu_count()`)
+  - [x] `default_timeout_seconds: int` (default: 30)
+  - [x] `local_files_only: bool`
+  - [x] `log_file: Path`
+  - [x] `log_level: str`
+  - [x] Nested `results: ResultsConfig` (output file paths per format)
+  - [x] `@classmethod from_toml(path: Path) -> Config`: loads and validates; raises with clear message on invalid TOML or missing required fields
+  - [x] `@classmethod default() -> Config`: returns built-in defaults
   - [ ] Validation: start dirs must exist; log dir must be creatable; `data_handlers` must be known names
 
 ### Result model — `src/piidigger/models/results.py`
 
-- [ ] `ResultRecord` Pydantic model (as specified in architecture doc, with all lineage fields)
-- [ ] `source_member_path`, `source_depth`, `source_container_type` present but optional/defaulted; non-null for archive members
+- [x] `ResultRecord` Pydantic model (as specified in architecture doc, with all lineage fields)
+- [x] `source_member_path`, `source_depth`, `source_container_type` present but optional/defaulted; non-null for archive members
 
 ### Payload models — `src/piidigger/models/payloads.py`
 
-- [ ] `EnumDirPayload(BaseModel)`: `path: Path`; `depth: int = 0`
-- [ ] `ScanFilePayload(BaseModel)`: `display_path: str`; `file_path: Path`; `ext: str`; `mime: str | None`; `size: int`; `depth: int = 0`
+- [x] `EnumDirPayload(BaseModel)`: `path: Path`; `depth: int = 0`
+- [x] `ScanFilePayload(BaseModel)`: `display_path: str`; `file_path: Path`; `ext: str`; `mime: str | None`; `size: int`; `depth: int = 0`
 
 ### Real task handlers — `src/piidigger/orchestration/worker.py`
 
-- [ ] `handle_enum_dir(task, ctx, logger) -> TaskResult`:
-  - [ ] Validates payload as `EnumDirPayload`
-  - [ ] Iterates directory; respects `config.exclude_dirs`, `config.local_files_only`
-  - [ ] Handles `PermissionError`, `OSError`, `FileNotFoundError` — logs and continues
-  - [ ] Returns `new_tasks`: one `ENUM_DIR` per subdirectory, one `SCAN_FILE` per matching file
-  - [ ] Returns `counters`: `{"dirs_scanned": 1, "dirs_found": N, "files_found": M, "bytes_found": B}`
-- [ ] `handle_scan_file(task, ctx, logger) -> TaskResult`:
-  - [ ] Validates payload as `ScanFilePayload`
-  - [ ] Constructs a `FilesystemItem`
-  - [ ] Loads enabled `FileHandler` for the item's extension/MIME
-  - [ ] Iterates chunks from `file_handler.read(item)`
-  - [ ] For each chunk, runs all enabled `DataHandler.find_matches()` instances
-  - [ ] Aggregates matches into `ResultRecord` entries
-  - [ ] Returns `findings` (list of serialized `ResultRecord`) and `counters`: `{"files_scanned": 1, "bytes_scanned": N}`
-  - [ ] Handles unreadable files, encoding errors — logs and returns `status="error"`
-- [ ] Update `DISPATCH` table: replace stubs with real handlers
+- [x] `handle_enum_dir(task, ctx, logger) -> TaskResult`:
+  - [x] Validates payload as `EnumDirPayload`
+  - [x] Iterates directory; respects `config.exclude_dirs`, `config.local_files_only`
+  - [x] Handles `PermissionError`, `OSError`, `FileNotFoundError` — logs and continues
+  - [x] Returns `new_tasks`: one `ENUM_DIR` per subdirectory, one `SCAN_FILE` per matching file
+  - [x] Returns `counters`: `{"dirs_scanned": 1, "dirs_found": N, "files_found": M, "bytes_found": B}`
+- [x] `handle_scan_file(task, ctx, logger) -> TaskResult`:
+  - [x] Validates payload as `ScanFilePayload`
+  - [x] Constructs a `FilesystemItem`
+  - [x] Loads enabled `FileHandler` for the item's extension/MIME
+  - [x] Iterates chunks from `file_handler.read(item)`
+  - [x] For each chunk, runs all enabled `DataHandler.find_matches()` instances
+  - [x] Aggregates matches into `ResultRecord` entries
+  - [x] Returns `findings` (list of serialized `ResultRecord`) and `counters`: `{"files_scanned": 1, "bytes_scanned": N}`
+  - [x] Handles unreadable files, encoding errors — logs and returns `status="error"`
+- [x] Update `DISPATCH` table: replace stubs with real handlers
 
 ### Data handlers — re-contracted
 
-- [ ] Each handler implements `DataHandler` protocol
-- [ ] Function renamed: `find_match` → `find_matches` (returns `dict[str, set[str]]`)
-- [ ] No imports of `multiprocessing`, queues, or loggers
-- [ ] Unit tests pass without changes (just import path updates)
+- [x] Each handler implements `DataHandler` protocol
+- [x] Function renamed: `find_match` → `find_matches` (returns `dict[str, set[str]]`)
+- [x] No imports of `multiprocessing`, queues, or loggers
+- [x] Unit tests pass without changes (just import path updates)
 
 ### File handlers — re-contracted
 
-- [ ] Each handler implements `FileHandler` protocol: `read(source: ScannableItem) -> Iterator[str]`
-- [ ] Text-based handlers (`plaintext`): use `source.open_stream()` with encoding detection
-- [ ] Binary handlers requiring a real path (`xlsx`, `xls`): call `source.materialize()`; document this explicitly in the function docstring
-- [ ] Handlers do not import `multiprocessing`, queues, or loggers
+- [x] Each handler implements `FileHandler` protocol: `read(source: ScannableItem) -> Iterator[str]`
+- [x] Text-based handlers (`plaintext`, `pdf`): use `source.open_stream()` with encoding detection
+- [x] Binary handlers requiring a real path (`docx`, `xlsx`, `xls`): call `source.materialize()`; documented in class docstring
+- [x] Handlers do not import `multiprocessing`, queues, or loggers
 
 ### Output sinks — re-implemented
 
-- [ ] `outputhandlers/csv.py`: `CsvSink(OutputSink)` — `open()` creates file + writes header; `write(record)` appends row; `close()` flushes
-- [ ] `outputhandlers/json.py`: `JsonSink(OutputSink)` — `open()` opens file; `write(record)` appends JSON line; `close()` finalizes
-- [ ] `outputhandlers/text.py`: `TextSink(OutputSink)` — `open()` opens file; `write(record)` appends formatted line; `close()` flushes
-- [ ] All sinks write `ResultRecord` lineage fields (even if null for on-disk files)
-- [ ] All sinks handle `IOError` gracefully — log, do not crash the coordinator
+- [x] `outputhandlers/csv.py`: `CsvSink(OutputSink)` — `open()` creates file + writes header; `write(record)` appends row; `close()` flushes
+- [x] `outputhandlers/json.py`: `JsonSink(OutputSink)` — `open()` opens file; `write(record)` appends JSON line; `close()` finalizes
+- [x] `outputhandlers/text.py`: `TextSink(OutputSink)` — `open()` opens file; `write(record)` appends formatted line; `close()` flushes
+- [x] All sinks write `ResultRecord` lineage fields (even if null for on-disk files)
+- [x] All sinks handle `IOError` gracefully — log, do not crash the coordinator
 
 ### CLI scaffolding — `src/piidigger/cli/`
 
-- [ ] `cli/main.py`: `@click.group()` with `scan` as default command
-- [ ] `cli/commands/scan.py`: all current Click options migrated from `piidigger.py`; calls `run_scan(config)`
-- [ ] `cli/commands/config.py`: `generate` subcommand (write default TOML); `validate` subcommand (load and report errors)
-- [ ] `run.py`: `run_scan(config: Config) -> int` wires together: start logging listener → start workers → run coordinator → return exit code
+- [x] `cli/main.py`: `@click.group()` with `scan` as default command
+- [x] `cli/commands/scan.py`: all current Click options migrated from `piidigger.py`; calls `run_scan(config)`
+- [x] `cli/commands/config.py`: `generate` subcommand (write default TOML); `validate` subcommand (load and report errors)
+- [x] `run.py`: `run_scan(config: Config) -> int` wires together: start logging listener → start workers → run coordinator → return exit code
 
 ### Phase 3 — Tests
 
