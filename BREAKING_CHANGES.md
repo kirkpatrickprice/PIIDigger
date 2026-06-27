@@ -24,6 +24,7 @@ Run `piidigger config generate` to produce a valid 2.0 config file, then migrate
 | `[logging] logLevel` | `[logging] log_level` |
 | `[logging] logFile` | `[logging] log_file` |
 | `maxProcs` | `max_workers` (now optional; defaults to `cpu_count()`) |
+| `[results] csv = true`, `json = true`, `text = true` | `[results] formats = ["csv", "json", "text"]` |
 
 #### macOS key renamed
 
@@ -81,9 +82,7 @@ macos   = ["/dev", "/etc", "/usr/bin", "/usr/local/Homebrew",
 
 [results]
 path = "piidigger-results/"
-csv  = true
-json = true
-text = true
+formats = ["csv", "json", "text"]
 
 [logging]
 log_level = "WARNING"

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import math
 import multiprocessing as mp
+import os
 import re
 import socket
 from datetime import datetime
 from typing import Any
+
+import psutil
 
 from piidigger.models.config import Config
 from piidigger.orchestration.context import WorkerContext
@@ -16,6 +20,18 @@ from piidigger.outputhandlers import CsvSink, JsonSink, TextSink
 
 _ALL_FORMATS: frozenset[str] = frozenset({"csv", "json", "text"})
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _resolve_workers(performance: str, physical_cores: int, logical_cores: int) -> int:
+    """Map a performance preset to a worker count."""
+    if performance == "slow":
+        return 1
+    if performance == "fast":
+        return max(1, logical_cores)
+    if performance == "balanced":
+        base_cores = physical_cores or logical_cores
+        return max(1, math.ceil(base_cores * 0.75))
+    raise ValueError(f"unknown performance preset: {performance}")
 
 
 def _build_sinks(config: Config) -> list[Any]:
@@ -75,7 +91,10 @@ def run_scan(config: Config) -> int:
         log_queue=log_queue,
         stop_event=stop_event,
     )
-    workers = start_worker_pool(ctx, config.max_workers)
+    logical_cores = os.cpu_count() or 1
+    physical_cores = psutil.cpu_count(logical=False) or logical_cores
+    worker_count = config.max_workers or _resolve_workers(config.performance, physical_cores, logical_cores)
+    workers = start_worker_pool(ctx, worker_count)
 
     progress = ProgressDisplay()
     progress.start()

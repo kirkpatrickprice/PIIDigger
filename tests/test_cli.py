@@ -16,6 +16,7 @@ def test_root_help_exits_0() -> None:
     assert result.exit_code == 0
     assert "scan" in result.output
     assert "config" in result.output
+    assert "inspect" in result.output
 
 
 @pytest.mark.unit
@@ -23,6 +24,8 @@ def test_scan_help_exits_0() -> None:
     result = CliRunner().invoke(cli, ["scan", "--help"])
     assert result.exit_code == 0
     assert "Scan directories for PII" in result.output
+    assert "--performance" not in result.output
+    assert "--list-datahandlers" not in result.output
 
 
 @pytest.mark.unit
@@ -34,24 +37,84 @@ def test_config_help_exits_0() -> None:
 
 
 @pytest.mark.unit
-def test_scan_list_datahandlers_exits_0() -> None:
-    result = CliRunner().invoke(cli, ["scan", "--list-datahandlers"])
+def test_root_version_exits_0() -> None:
+    result = CliRunner().invoke(cli, ["--version"])
+    assert result.exit_code == 0
+    assert "PIIDigger version:" in result.output
+
+
+@pytest.mark.unit
+def test_inspect_help_exits_0() -> None:
+    result = CliRunner().invoke(cli, ["inspect", "--help"])
+    assert result.exit_code == 0
+    assert "handlers" in result.output
+    assert "filetypes" in result.output
+    assert "mime" in result.output
+    assert "encoding" in result.output
+
+
+@pytest.mark.unit
+def test_inspect_handlers_exits_0() -> None:
+    result = CliRunner().invoke(cli, ["inspect", "handlers"])
     assert result.exit_code == 0
     assert "pan" in result.output
 
 
 @pytest.mark.unit
-def test_scan_list_filetypes_exits_0() -> None:
-    result = CliRunner().invoke(cli, ["scan", "--list-filetypes"])
+def test_inspect_filetypes_exits_0() -> None:
+    result = CliRunner().invoke(cli, ["inspect", "filetypes"])
     assert result.exit_code == 0
     assert ".txt" in result.output
 
 
 @pytest.mark.unit
-def test_scan_cpu_count_exits_0() -> None:
-    result = CliRunner().invoke(cli, ["scan", "--cpu-count"])
+def test_inspect_cpu_count_exits_0() -> None:
+    result = CliRunner().invoke(cli, ["inspect", "cpu"])
     assert result.exit_code == 0
+    assert "Physical CPUs" in result.output
     assert "Logical CPUs" in result.output
+
+
+@pytest.mark.unit
+def test_inspect_mime_exits_0(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fixture = tmp_path / "sample.txt"
+    fixture.write_text("hello", encoding="utf-8")
+    monkeypatch.setattr("piidigger.cli.commands.inspect.get_mime", lambda _: "text/plain")
+
+    result = CliRunner().invoke(cli, ["inspect", "mime", str(fixture)])
+
+    assert result.exit_code == 0
+    assert "text/plain" in result.output
+
+
+@pytest.mark.unit
+def test_inspect_encoding_exits_0(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fixture = tmp_path / "sample.txt"
+    fixture.write_text("hello", encoding="utf-8")
+    monkeypatch.setattr("piidigger.cli.commands.inspect.detect_encoding", lambda _: "utf-8")
+
+    result = CliRunner().invoke(cli, ["inspect", "encoding", str(fixture)])
+
+    assert result.exit_code == 0
+    assert "utf-8" in result.output
+
+
+@pytest.mark.unit
+def test_scan_max_workers_override_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_scan(config: object) -> int:
+        captured["config"] = config
+        return 0
+
+    monkeypatch.setattr("piidigger.cli.commands.scan.run_scan", fake_run_scan)
+
+    result = CliRunner().invoke(cli, ["scan", "--default-config", "--max-workers", "3"])
+
+    assert result.exit_code == 0
+    config = captured["config"]
+    assert config.performance == "balanced"
+    assert config.max_workers == 3
 
 
 @pytest.mark.unit
@@ -75,3 +138,20 @@ def test_config_validate_valid_file_exits_0(tmp_path: Path) -> None:
 def test_config_validate_missing_file_exits_nonzero(tmp_path: Path) -> None:
     result = CliRunner().invoke(cli, ["config", "validate", str(tmp_path / "missing.toml")])
     assert result.exit_code != 0
+
+
+@pytest.mark.unit
+def test_config_validate_invalid_file_shows_friendly_error(tmp_path: Path) -> None:
+    toml = tmp_path / "legacy.toml"
+    toml.write_text(
+        f'start_dirs = ["{tmp_path.as_posix()}"]\ndataHandlers = ["pan", "email"]\n',
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(cli, ["config", "validate", str(toml)])
+
+    assert result.exit_code != 0
+    assert "Unknown setting 'dataHandlers'." in result.output
+    assert "Did you mean 'data_handlers'?" in result.output
+    assert "piidigger config generate" in result.output
+    assert "validation errors for Config" not in result.output

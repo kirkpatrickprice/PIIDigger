@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import os
+import difflib
 import platform
 import string
 import tomllib
 from pathlib import Path
+from typing import Any, Literal
 
 from pydantic import Field, ValidationError, field_validator
 
@@ -22,6 +23,62 @@ class ResultsConfig(PiiDiggerModel):
 
     path: Path = Path("piidigger-results")
     formats: list[str] = Field(default_factory=lambda: ["all"])
+
+
+_KNOWN_CONFIG_KEYS: tuple[str, ...] = (
+    "start_dirs",
+    "exclude_dirs",
+    "include_exts",
+    "include_mime",
+    "data_handlers",
+    "performance",
+    "max_workers",
+    "default_timeout_seconds",
+    "local_files_only",
+    "log_file",
+    "log_level",
+    "results.path",
+    "results.formats",
+)
+
+
+def _format_error_location(loc: tuple[Any, ...]) -> str:
+    return ".".join(str(part) for part in loc)
+
+
+def _suggest_config_key(location: str) -> str | None:
+    matches = difflib.get_close_matches(location, _KNOWN_CONFIG_KEYS, n=1, cutoff=0.6)
+    return matches[0] if matches else None
+
+
+def _format_validation_errors(path: Path, error: ValidationError) -> str:
+    lines = [f"invalid configuration in {path}:"]
+    saw_unknown_setting = False
+
+    for item in error.errors(include_url=False):
+        location = _format_error_location(item["loc"])
+        error_type = item["type"]
+
+        if error_type == "extra_forbidden":
+            saw_unknown_setting = True
+            message = f"Unknown setting '{location}'."
+            suggestion = _suggest_config_key(location)
+            if suggestion is not None:
+                message += f" Did you mean '{suggestion}'?"
+            lines.append(f"- {message}")
+            continue
+
+        if error_type == "missing":
+            lines.append(f"- Missing required setting '{location}'.")
+            continue
+
+        lines.append(f"- Invalid value for '{location}': {item['msg']}.")
+
+    if saw_unknown_setting:
+        lines.append("- The configuration file appears to use unsupported or legacy option names.")
+        lines.append("- Run 'piidigger config generate' to create a current 2.0 template and copy your values into it.")
+
+    return "\n".join(lines)
 
 
 def _default_start_dirs() -> list[Path]:
@@ -86,7 +143,6 @@ def _default_exclude_dirs() -> list[str]:
     return _LINUX_EXCLUDE_DIRS
 
 
-
 class Config(PiiDiggerModel):
     """2.0 scan configuration.
 
@@ -102,7 +158,8 @@ class Config(PiiDiggerModel):
     include_mime: list[str] = Field(default_factory=lambda: ["all"])
     # ["all"] means all data handlers in datahandlers.HANDLER_REGISTRY
     data_handlers: list[str] = Field(default_factory=lambda: ["all"])
-    max_workers: int = Field(default_factory=lambda: os.cpu_count() or 1)
+    performance: Literal["fast", "balanced", "slow"] = "balanced"
+    max_workers: int = Field(default=0, ge=0)
     default_timeout_seconds: int = Field(default=30, ge=1, le=600)
     local_files_only: bool = True
     log_file: Path = Path("logs/piidigger.log")
@@ -115,6 +172,7 @@ class Config(PiiDiggerModel):
         if "all" in v:
             return v
         from piidigger.datahandlers import HANDLER_REGISTRY  # noqa: PLC0415
+
         unknown = [name for name in v if name not in HANDLER_REGISTRY]
         if unknown:
             known = ", ".join(sorted(HANDLER_REGISTRY))
@@ -142,7 +200,7 @@ class Config(PiiDiggerModel):
         try:
             config = cls.model_validate(data)
         except ValidationError as e:
-            raise ValueError(f"invalid configuration in {path}:\n{e}") from e
+            raise ValueError(_format_validation_errors(path, e)) from e
 
         for d in config.start_dirs:
             if not d.exists():
@@ -199,6 +257,7 @@ class Config(PiiDiggerModel):
         lines.append(f"include_exts = {_fmt(self.include_exts)}")
         lines.append(f"include_mime = {_fmt(self.include_mime)}")
         lines.append(f"data_handlers = {_fmt(self.data_handlers)}")
+        lines.append(f"performance = {_fmt(self.performance)}")
         lines.append(f"max_workers = {self.max_workers}")
         lines.append(f"default_timeout_seconds = {self.default_timeout_seconds}")
         lines.append(f"local_files_only = {str(self.local_files_only).lower()}")

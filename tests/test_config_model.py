@@ -30,6 +30,7 @@ def test_results_config_custom(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_results_config_rejects_unknown_fields() -> None:
     from pydantic import ValidationError
+
     with pytest.raises(ValidationError):
         ResultsConfig(unknown_field="bad")  # type: ignore[call-arg]
 
@@ -45,13 +46,15 @@ def test_config_default_returns_config() -> None:
     assert isinstance(c, Config)
     assert len(c.start_dirs) >= 1
     assert len(c.exclude_dirs) >= 1
-    assert c.max_workers >= 1
+    assert c.performance == "balanced"
+    assert c.max_workers == 0
     assert c.local_files_only is True
 
 
 @pytest.mark.unit
 def test_config_default_is_picklable() -> None:
     import pickle
+
     c = Config.default()
     restored: Config = pickle.loads(pickle.dumps(c))
     assert restored.start_dirs == c.start_dirs
@@ -64,6 +67,7 @@ def test_config_to_toml_str_roundtrip(tmp_path: Path) -> None:
     c = Config(
         start_dirs=[tmp_path],
         data_handlers=["pan"],
+        performance="fast",
         max_workers=2,
     )
     toml_text = c.to_toml_str()
@@ -72,6 +76,7 @@ def test_config_to_toml_str_roundtrip(tmp_path: Path) -> None:
     restored = Config.from_toml(toml_file)
     assert restored.start_dirs == [tmp_path]
     assert restored.data_handlers == ["pan"]
+    assert restored.performance == "fast"
     assert restored.max_workers == 2
 
 
@@ -101,8 +106,22 @@ def test_from_toml_unknown_field_rejected(tmp_path: Path) -> None:
         f'start_dirs = ["{tmp_path.as_posix()}"]\nunknown_option = true\n',
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="invalid configuration"):
+    with pytest.raises(ValueError, match="Unknown setting 'unknown_option'"):
         Config.from_toml(bad)
+
+
+@pytest.mark.unit
+def test_from_toml_unknown_field_suggests_current_template(tmp_path: Path) -> None:
+    bad = tmp_path / "legacy.toml"
+    bad.write_text(
+        f'start_dirs = ["{tmp_path.as_posix()}"]\ndataHandlers = ["pan"]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Did you mean 'data_handlers'\\?") as exc_info:
+        Config.from_toml(bad)
+
+    assert "piidigger config generate" in str(exc_info.value)
 
 
 @pytest.mark.unit
