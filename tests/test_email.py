@@ -33,7 +33,7 @@ from piidigger.datahandlers import email
 ])
 def test_email_match_and_redaction(data, expected_result):
     """Test email detection and redaction rules"""
-    result = email.find_match(data)
+    result = email.handler.find_matches(data)
     assert result == expected_result
 
 class TestEmailFunctions:
@@ -104,7 +104,7 @@ class TestEmailFunctions:
     def test_find_match_with_multiple_emails(self):
         """Test finding multiple email addresses in a single line"""
         text = "Contact us at info@company.com, support@company.com or ourlongsupportemail@company.com for help"
-        result = email.find_match(text)
+        result = email.handler.find_matches(text)
         assert 'email' in result
         assert len(result['email']) == 3
         assert 'i***@company.com' in result['email']
@@ -113,10 +113,10 @@ class TestEmailFunctions:
 
     def test_empty_and_invalid_inputs(self):
         """Test handling of empty or invalid inputs"""
-        assert email.find_match('') == {}
-        assert email.find_match('No email addresses here') == {}
-        assert email.find_match('Invalid: user@') == {}
-        assert email.find_match('Invalid: @example.com') == {}
+        assert email.handler.find_matches('') == {}
+        assert email.handler.find_matches('No email addresses here') == {}
+        assert email.handler.find_matches('Invalid: user@') == {}
+        assert email.handler.find_matches('Invalid: @example.com') == {}
 
 if __name__ == "__main__":
     # This allows running the tests directly with python
