@@ -22,6 +22,16 @@ _COUNTER_KEYS: tuple[str, ...] = (
 _EVENTS_BUFFER_SIZE = 20
 
 
+def _fmt_bytes(n: int) -> str:
+    """Format a byte count as a human-readable string (e.g. '1.2 MB')."""
+    value: float = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if abs(value) < 1024.0:
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{value:.1f} EB"
+
+
 class ProgressDisplay:
     """Compact rich.Live progress display owned by the coordinator.
 
@@ -62,20 +72,24 @@ class ProgressDisplay:
             return
 
         # Progress bars for paired (scanned / found) counters.
+        # Each bar stores its display label in task.fields["label"] so dirs/files
+        # can show comma-formatted integers while bytes shows human-readable sizes.
         bars = Progress(
             SpinnerColumn(),
             TextColumn("[bold]{task.description:<8}"),
             BarColumn(),
-            TextColumn("{task.completed:>8,.0f} / {task.total:>8,.0f}"),
+            TextColumn("{task.fields[label]}"),
             TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
             TimeElapsedColumn(),
             console=self._console,
             expand=True,
         )
         self._bars = bars
-        self._bar_task_ids["dirs"] = bars.add_task("Dirs", total=0, completed=0)
-        self._bar_task_ids["files"] = bars.add_task("Files", total=0, completed=0)
-        self._bar_task_ids["bytes"] = bars.add_task("Bytes", total=0, completed=0)
+        _int_label = f"{'0':>8} / {'0':>8}"
+        _byte_label = f"{'0.0 B':>8} / {'0.0 B':>8}"
+        self._bar_task_ids["dirs"] = bars.add_task("Dirs", total=0, completed=0, label=_int_label)
+        self._bar_task_ids["files"] = bars.add_task("Files", total=0, completed=0, label=_int_label)
+        self._bar_task_ids["bytes"] = bars.add_task("Bytes", total=0, completed=0, label=_byte_label)
 
         # Spinner-only counter for results (no upper bound, no bar needed).
         text = Progress(
@@ -119,9 +133,24 @@ class ProgressDisplay:
         # Use absolute values so the bar always reflects total state, not deltas.
         # max() guards the brief window where scanned could equal found before
         # the next batch of found values arrives.
-        bars.update(self._bar_task_ids["dirs"], total=max(dirs_found, dirs_scanned), completed=dirs_scanned)
-        bars.update(self._bar_task_ids["files"], total=max(files_found, files_scanned), completed=files_scanned)
-        bars.update(self._bar_task_ids["bytes"], total=max(bytes_found, bytes_scanned), completed=bytes_scanned)
+        bars.update(
+            self._bar_task_ids["dirs"],
+            total=max(dirs_found, dirs_scanned),
+            completed=dirs_scanned,
+            label=f"{dirs_scanned:>8,} / {dirs_found:>8,}",
+        )
+        bars.update(
+            self._bar_task_ids["files"],
+            total=max(files_found, files_scanned),
+            completed=files_scanned,
+            label=f"{files_scanned:>8,} / {files_found:>8,}",
+        )
+        bars.update(
+            self._bar_task_ids["bytes"],
+            total=max(bytes_found, bytes_scanned),
+            completed=bytes_scanned,
+            label=f"{_fmt_bytes(bytes_scanned):>8} / {_fmt_bytes(bytes_found):>8}",
+        )
 
         for key, task_id in self._text_task_ids.items():
             delta = counters.get(key, 0)
@@ -149,6 +178,10 @@ class ProgressDisplay:
             live.stop()
 
         if not self._is_tty:
-            parts = [f"{k}={v:,}" for k, v in self._counters.items() if v > 0]
+            parts = []
+            for k, v in self._counters.items():
+                if v <= 0:
+                    continue
+                parts.append(f"{k}={_fmt_bytes(v)}" if "bytes" in k else f"{k}={v:,}")
             summary = "Scan complete. " + ("  ".join(parts) if parts else "No results.")
             print(summary, file=sys.stdout)  # noqa: T201 — intentional user-facing output

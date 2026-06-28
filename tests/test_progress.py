@@ -56,7 +56,7 @@ def test_stop_prints_summary_in_non_tty(
     captured = capsys.readouterr()
     assert "Scan complete" in captured.out
     assert "files_scanned=7" in captured.out
-    assert "bytes_scanned=2,048" in captured.out
+    assert "bytes_scanned=2.0 KB" in captured.out
 
 
 @pytest.mark.unit

@@ -394,6 +394,12 @@ Preset → worker count formula:
 - [ ] Log contains an explicit `"timeout"` record for the offending file — not a silent skip
 - [ ] Run with 1 deliberately hung worker (synthetic): other workers continue; hung worker is terminated and replaced; scan completes
 
+### UI Improvements
+
+- [ ] Improve timeout warning message readability: replace terse `timeout task=<id>` output with structured context including task_type, source/path member, and retry/replacement action in the event table.  Ensure that full details (`task_type`, source path/member, worker pid, configured timeout, elapsed time, retry/replacement action) are captured in the log.
+- [ ] Update the Progress Bar display to provide an ETA for each of the Directory, File, and Bytes progress bars
+- [ ] Add a check to ensure that the user is an administrator/root before running PIIDigger.  Log the status of the check in the log file.  If not an admin, report that "Admin user not detected.  A full disk scan may not be possible.  Continue (Y/n)" with a timeout of 10 seconds.  Add a configuration option `admin_check = true` as the default in the TOML file.  `admin_check = false` will bypass the confirmation (but not the check and log actions above).  Check `globalfuncs` for `is_admin` for existing code to implement the check or recommend a better implementation.  This code can be moved (e.g. to `progress.py`) if needed.
+
 ### Baseline comparison
 
 - [ ] Generate 1.x baseline output: run the current `main` branch against `testdata/` and save CSV, JSON, text to `tests/fixtures/baseline_results/`
@@ -412,6 +418,7 @@ Preset → worker count formula:
 - [x] Delete `src/piidigger/logmanager.py`
 - [x] Delete `src/piidigger/globalvars.SENTINEL` (and remaining dead vars)
 - [x] `grep -r "SENTINEL\|ProcessManager\|LogManager\|queuefuncs\|filescan\|logmanager"` returns no hits in `src/` — enforced by `test_phase4.py::test_no_legacy_orchestration_references`
+- [ ] Review `globalfuncs` and `globalvars` to ensure that all remaining code is still used.  Delete all unused functions and variables.  Identify if all remaining/in-use items are better located in other modules.
 
 ### Coverage and quality gate
 
