@@ -32,11 +32,7 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
     if "all" in ctx.config.data_handlers:
         enabled_handlers = list(HANDLER_REGISTRY.values())
     else:
-        enabled_handlers = [
-            HANDLER_REGISTRY[name]
-            for name in ctx.config.data_handlers
-            if name in HANDLER_REGISTRY
-        ]
+        enabled_handlers = [HANDLER_REGISTRY[name] for name in ctx.config.data_handlers if name in HANDLER_REGISTRY]
 
     item = FilesystemItem(payload.file_path, mime=payload.mime)
 

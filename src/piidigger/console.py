@@ -25,45 +25,45 @@ from rich.console import Console
 _out = Console(highlight=False)
 _err = Console(stderr=True, highlight=False)
 
-__all__ = ['get_terminal_size', 'warn', 'error', 'normal', 'status']
+__all__ = ["get_terminal_size", "warn", "error", "normal", "status"]
 
 
 def get_terminal_size() -> tuple[int, int]:
-    '''Return the terminal as a (width, height) tuple (Rich falls back to 80x25).'''
+    """Return the terminal as a (width, height) tuple (Rich falls back to 80x25)."""
     size = _err.size
     return (size.width, size.height)
 
 
 def normal(s: str) -> None:
-    '''Print an informational message to stdout.'''
+    """Print an informational message to stdout."""
     _out.print(s, markup=False, highlight=False)
 
 
 def status(s: str) -> None:
-    '''Write an in-place (carriage-return) progress line to stderr.
+    """Write an in-place (carriage-return) progress line to stderr.
 
     Skipped when stderr is not a terminal so redirected logs are not spammed
     with partial carriage-return updates.
-    '''
+    """
     if not _err.is_terminal:
         return
-    sys.stderr.write('\r' + s)
+    sys.stderr.write("\r" + s)
     sys.stderr.flush()
 
 
 def warn(s: str) -> None:
-    '''Print a warning (prefixed and yellow) to stderr.'''
-    _err.print(f'[warn] {s}', style='yellow', markup=False, highlight=False)
+    """Print a warning (prefixed and yellow) to stderr."""
+    _err.print(f"[warn] {s}", style="yellow", markup=False, highlight=False)
 
 
 def error(s: str) -> None:
-    '''Print an error (prefixed and red) to stderr.'''
-    _err.print(f'[error] {s}', style='red', markup=False, highlight=False)
+    """Print an error (prefixed and red) to stderr."""
+    _err.print(f"[error] {s}", style="red", markup=False, highlight=False)
 
 
 if __name__ == "__main__":
     size_x, size_y = get_terminal_size()
-    normal(f'width = {size_x} height = {size_y}')
-    error('This is error text')
-    warn('This is warning text')
-    normal('This is normal text')
+    normal(f"width = {size_x} height = {size_y}")
+    error("This is error text")
+    warn("This is warning text")
+    normal("This is normal text")

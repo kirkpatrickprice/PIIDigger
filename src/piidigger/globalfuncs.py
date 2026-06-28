@@ -218,10 +218,7 @@ def make_chunks(s: str, chunk_size: int = MAX_CHUNK_SIZE) -> list:
         while len(chunk) < chunk_size and word_num < len(words):
             if len(words[word_num]) > chunk_size:
                 # Break up super-long strings into shorter words and add them to the word list
-                chunk_list = [
-                    words[word_num][i : i + chunk_size]
-                    for i in range(0, len(words[word_num]), chunk_size)
-                ]
+                chunk_list = [words[word_num][i : i + chunk_size] for i in range(0, len(words[word_num]), chunk_size)]
                 words = [*words, *chunk_list]
             else:
                 # Add the next word to the current chunk

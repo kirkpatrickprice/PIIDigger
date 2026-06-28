@@ -11,11 +11,16 @@ from piidigger.models.tasks import Task, TaskResult, TaskStarted, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
 from piidigger.orchestration.progress import ProgressDisplay
-from piidigger.orchestration.worker import broadcast_shutdown, join_workers, worker_loop
+from piidigger.orchestration.worker import MAX_RETRIES, broadcast_shutdown, join_workers, worker_loop
 
 # How often (seconds) the coordinator checks for worker deadline violations
 # when the result queue is empty.
 HEARTBEAT_CHECK_INTERVAL: float = 1.0
+
+# A task that has been in _pending_tasks but not in _in_flight (no heartbeat)
+# for longer than this many seconds is a candidate for crash-orphan re-queue,
+# provided at least one worker process has died unexpectedly.
+_CRASH_DETECT_TIMEOUT: float = 30.0
 
 _ACCESS_DENIED_PHRASES: tuple[str, ...] = ("Access is denied", "Permission denied", "WinError 5", "Errno 13")
 
@@ -105,9 +110,18 @@ def run_coordinator(
     # pid → Process for fast lookup during deadline termination.
     _pid_to_proc: dict[int, mp.Process] = {p.pid: p for p in workers if p.pid is not None}
 
-    def _enqueue(task: Task) -> None:
+    # task_id → monotonic time when the task was enqueued; used to detect
+    # tasks that have been waiting too long without a heartbeat (crash orphans).
+    _task_enqueue_time: dict[str, float] = {}
+
+    # task_id → number of times this task has been re-queued after a crash.
+    _task_retries: dict[str, int] = {}
+
+    def _enqueue(task: Task, retry_count: int = 0) -> None:
         ctx.task_queue.put(task)
         _pending_tasks[task.task_id] = task
+        _task_enqueue_time[task.task_id] = time.monotonic()
+        _task_retries[task.task_id] = retry_count
 
     def _record_heartbeat(msg: TaskStarted) -> None:
         task = _pending_tasks.get(msg.task_id)
@@ -117,14 +131,15 @@ def run_coordinator(
         _in_flight[msg.task_id] = (msg.worker_pid, time.monotonic(), task.timeout_seconds)
 
     def _check_worker_deadlines(pending: int) -> int:
-        """Scan in-flight tasks for deadline violations; synthesise timeout results.
+        """Scan for deadline violations and crashed workers; synthesise results as needed.
 
         Returns the updated pending count after any synthesised results.
 
-        Phase 4 extension point: add crash-before-heartbeat detection here —
-        check for worker processes that are dead (not proc.is_alive()) but whose
-        task_id has no entry in _in_flight (never sent a heartbeat).  Re-queue
-        those tasks up to MAX_RETRIES times before synthesising an error result.
+        Two detection paths:
+        1. Timeout: task in _in_flight past 2 × timeout_seconds — terminate worker,
+           spawn replacement, synthesise status='timeout', decrement pending.
+        2. Crash-before-heartbeat: worker dead but its task has no heartbeat entry —
+           re-queue up to MAX_RETRIES times; after that synthesise status='error'.
         """
         now = time.monotonic()
         timed_out: list[str] = []
@@ -143,6 +158,8 @@ def run_coordinator(
         for task_id in timed_out:
             pid, _, _ = _in_flight.pop(task_id)
             _pending_tasks.pop(task_id, None)
+            _task_enqueue_time.pop(task_id, None)
+            _task_retries.pop(task_id, None)
 
             # Terminate the hung worker and spawn a replacement
             old_proc = _pid_to_proc.pop(pid, None)
@@ -162,6 +179,62 @@ def run_coordinator(
 
             progress.log_event("WARNING", f"timeout task={task_id}")
             pending -= 1
+
+        # --- Crash-before-heartbeat detection ---
+        # A worker that died without our explicit terminate() may have dequeued a
+        # task before crashing, leaving that task orphaned (no heartbeat, no result).
+        dead_pids = [pid for pid, proc in _pid_to_proc.items() if not proc.is_alive()]
+        if dead_pids:
+            for pid in dead_pids:
+                old_proc = _pid_to_proc.pop(pid)
+                if old_proc in workers:
+                    workers.remove(old_proc)
+                new_proc = mp.Process(target=worker_loop, args=(ctx,))
+                new_proc.start()
+                if new_proc.pid is not None:
+                    _pid_to_proc[new_proc.pid] = new_proc
+                workers.append(new_proc)
+                logger.warning("worker pid=%d crashed; replacement pid=%s", pid, new_proc.pid)
+                progress.log_event("WARNING", f"Worker pid={pid} crashed unexpectedly")
+
+            # Any task pending without a heartbeat for > _CRASH_DETECT_TIMEOUT may
+            # have been dequeued by the crashed worker.  Re-queue up to MAX_RETRIES.
+            crash_orphans = [
+                task_id
+                for task_id in _pending_tasks
+                if task_id not in _in_flight and now - _task_enqueue_time.get(task_id, now) > _CRASH_DETECT_TIMEOUT
+            ]
+            for task_id in crash_orphans:
+                task = _pending_tasks.pop(task_id)
+                _task_enqueue_time.pop(task_id, None)
+                retries = _task_retries.pop(task_id, 0)
+                pending -= 1
+
+                if retries < MAX_RETRIES:
+                    new_task = Task(
+                        task_type=task.task_type,
+                        payload=task.payload,
+                        timeout_seconds=task.timeout_seconds,
+                    )
+                    logger.warning(
+                        "crash-orphan: re-queuing %s as %s (retry %d/%d)",
+                        task_id,
+                        new_task.task_id,
+                        retries + 1,
+                        MAX_RETRIES,
+                    )
+                    _enqueue(new_task, retries + 1)
+                    pending += 1
+                else:
+                    logger.error(
+                        "crash-orphan: task %s exceeded MAX_RETRIES=%d; dropping",
+                        task_id,
+                        MAX_RETRIES,
+                    )
+                    progress.log_event(
+                        "ERROR",
+                        f"Crash orphan: task={task_id[:8]}… exceeded {MAX_RETRIES} retries",
+                    )
 
         return pending
 
@@ -231,6 +304,8 @@ def run_coordinator(
             result: TaskResult = raw
             _in_flight.pop(result.task_id, None)
             pending_task = _pending_tasks.pop(result.task_id, None)
+            _task_enqueue_time.pop(result.task_id, None)
+            _task_retries.pop(result.task_id, None)
             pending -= 1
 
             if result.status == "error":

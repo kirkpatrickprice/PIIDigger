@@ -128,7 +128,7 @@ def test_enum_dir_skips_symlinks(tmp_path: Path) -> None:
     link = root / "link"
     try:
         link.symlink_to(target)
-    except (OSError, NotImplementedError):
+    except OSError, NotImplementedError:
         pytest.skip("symlinks not supported on this platform")
 
     ctx = _make_ctx(tmp_path)

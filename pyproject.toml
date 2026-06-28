@@ -45,12 +45,14 @@ classifiers = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4.4",
+    "pytest-cov>=5.0",
     "ruff>=0.6",
     "mypy>=1.11",
     "types-PyYAML",
     ]
 test = [
     "pytest>=7.4.4",
+    "pytest-cov>=5.0",
     ]
 win = [
     "pywin32",
@@ -102,15 +104,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Legacy camelCase files that have not been renamed yet (deleted in Phase 4).
-# New packages (orchestration/, models/, cli/) are NOT exempted.
-"src/piidigger/classes.py" = ["N"]
-"src/piidigger/piidigger.py" = ["N"]
-"src/piidigger/queuefuncs.py" = ["N"]
-"src/piidigger/filescan.py" = ["N"]
-"src/piidigger/logmanager.py" = ["N"]
 "src/piidigger/__main__.py" = ["N"]
-"piidigger.py" = ["N"]  # legacy repo-root PyInstaller entry wrapper
 "tests/**" = ["S101", "S108", "S301", "N"]  # asserts, /tmp strings, and pickle are expected in tests
 # Handler packages re-export submodules so the dynamic __dir__() discovery in
 # globalfuncs can find them; the imports are intentional, not dead code.
@@ -130,14 +124,9 @@ disable_error_code = ["no-untyped-call"]
 # (console, getencoding, future orchestration) are type-checked normally.
 [[tool.mypy.overrides]]
 module = [
-    "piidigger.piidigger",
     "piidigger.run",
     "piidigger.__main__",
-    "piidigger.classes",
     "piidigger.globalfuncs",
-    "piidigger.filescan",
-    "piidigger.queuefuncs",
-    "piidigger.logmanager",
     "piidigger.getmime",
     "piidigger.filehandlers.*",
     "piidigger.outputhandlers.*",

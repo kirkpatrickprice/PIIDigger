@@ -48,6 +48,7 @@ def _is_cloud_placeholder(path: Path) -> bool:
     offline_bit = 0x001000
     try:
         from win32api import GetFileAttributes
+
         attr = GetFileAttributes(str(path))
         return bool(attr & recall_bit) or bool(attr & offline_bit)
     except Exception:
@@ -97,11 +98,13 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
             if entry.is_dir():
                 if _is_excluded(entry, config.exclude_dirs):
                     continue
-                new_tasks.append({
-                    "task_type": TaskType.ENUM_DIR,
-                    "payload": {"path": str(entry), "depth": payload.depth},
-                    "timeout_seconds": config.default_timeout_seconds,
-                })
+                new_tasks.append(
+                    {
+                        "task_type": TaskType.ENUM_DIR,
+                        "payload": {"path": str(entry), "depth": payload.depth},
+                        "timeout_seconds": config.default_timeout_seconds,
+                    }
+                )
                 dirs_found += 1
             elif entry.is_file():
                 if config.local_files_only and _is_cloud_placeholder(entry):
@@ -125,18 +128,20 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
                 except OSError:
                     size = 0
 
-                new_tasks.append({
-                    "task_type": TaskType.SCAN_FILE,
-                    "payload": {
-                        "display_path": str(entry),
-                        "file_path": str(entry),
-                        "ext": ext,
-                        "mime": mime,
-                        "size": size,
-                        "depth": payload.depth,
-                    },
-                    "timeout_seconds": config.default_timeout_seconds,
-                })
+                new_tasks.append(
+                    {
+                        "task_type": TaskType.SCAN_FILE,
+                        "payload": {
+                            "display_path": str(entry),
+                            "file_path": str(entry),
+                            "ext": ext,
+                            "mime": mime,
+                            "size": size,
+                            "depth": payload.depth,
+                        },
+                        "timeout_seconds": config.default_timeout_seconds,
+                    }
+                )
                 files_found += 1
                 bytes_found += size
         except OSError:

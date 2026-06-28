@@ -61,7 +61,6 @@ def test_config_default_is_picklable() -> None:
     assert restored.max_workers == c.max_workers
 
 
-
 # ---------------------------------------------------------------------------
 # Config.from_toml — error paths
 # ---------------------------------------------------------------------------
@@ -129,6 +128,7 @@ def test_from_toml_multi_os_format(tmp_path: Path) -> None:
 def test_generate_toml_template_is_valid_toml() -> None:
     """generate_toml_template() produces TOML that tomllib can parse."""
     import tomllib
+
     text = generate_toml_template()
     data = tomllib.loads(text)
     assert isinstance(data["start_dirs"], dict)

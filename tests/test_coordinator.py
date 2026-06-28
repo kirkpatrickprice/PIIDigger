@@ -55,8 +55,6 @@ def _non_tty_progress() -> ProgressDisplay:
     return d
 
 
-
-
 # ---------------------------------------------------------------------------
 # Unit: Config.start_dirs
 # ---------------------------------------------------------------------------
@@ -207,6 +205,40 @@ def test_ctrl_c_exits_within_5_seconds(tmp_path: Path) -> None:
 
     coord_proc.join(timeout=5.0)
     assert not coord_proc.is_alive(), "coordinator did not exit within 5 seconds after interrupt"
+
+
+# ---------------------------------------------------------------------------
+# Integration: queue.Empty fires → _check_worker_deadlines is called
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_coordinator_calls_deadline_check_on_queue_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a 1 ms HEARTBEAT_CHECK_INTERVAL, queue.Empty fires on almost every
+    iteration, exercising the _check_worker_deadlines body with no expired tasks.
+    """
+    import piidigger.orchestration.coordinator as coord_mod
+
+    monkeypatch.setattr(coord_mod, "HEARTBEAT_CHECK_INTERVAL", 0.001)
+
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    (scan_root / "file.txt").write_text("hello world")
+
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    log_queue: mp.Queue[object] = mp.Queue()
+    stop_event = mp.Event()
+
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [scan_root])
+    listener = start_listener(log_queue, tmp_path / "heartbeat.log", "WARNING")
+    workers = start_worker_pool(ctx, 2)
+    progress = _non_tty_progress()
+
+    run_coordinator(ctx, workers, listener, [], progress)
+
+    assert all(not w.is_alive() for w in workers)
+    assert progress._counters.get("files_scanned", 0) == 1
 
 
 # ---------------------------------------------------------------------------

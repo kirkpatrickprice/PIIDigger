@@ -1,19 +1,18 @@
-from queue import Queue
+from pathlib import Path
 
 import pytest
 
-from piidigger.getencoding import get_encoding
-from piidigger.logmanager import LogManager
+from piidigger.getencoding import detect_encoding
 
 
-@pytest.mark.filehandlers
-@pytest.mark.parametrize('testFile, expected_result', [
-                                ('testdata/pan/sample-pans.json', 'ascii'),
-                                ('testdata/binary-json.json', None),
-                            ]
-                        )
-def test_getEncoding(testFile, expected_result):
-    logManager=LogManager(logFile='test.log', logLevel='INFO', logQueue=Queue())
-    result=get_encoding(testFile, logManager)
-
-    assert result==expected_result
+@pytest.mark.utils
+@pytest.mark.parametrize(
+    "filename, expected",
+    [
+        ("testdata/pan/sample-pans.json", "ascii"),
+        ("testdata/binary-json.json", None),
+    ],
+)
+def test_detect_encoding(filename: str, expected: str | None) -> None:
+    data = Path(filename).read_bytes()
+    assert detect_encoding(data) == expected

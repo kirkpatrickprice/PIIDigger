@@ -11,16 +11,18 @@ import logging.handlers
 import multiprocessing as mp
 import pickle
 import queue
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
 from piidigger.models.config import Config
-from piidigger.models.tasks import Task, TaskResult, TaskType
+from piidigger.models.tasks import SHUTDOWN, Task, TaskResult, TaskStarted, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
-from piidigger.orchestration.worker import broadcast_shutdown, join_workers, start_worker_pool
+from piidigger.orchestration.worker import broadcast_shutdown, join_workers, start_worker_pool, worker_loop
+from piidigger.orchestration.worker._loop import DISPATCH, _dispatch, _handle_noop
 
 # ---------------------------------------------------------------------------
 # Logging unit test
@@ -172,3 +174,134 @@ def test_worker_logs_reach_file(tmp_path: Path) -> None:
     assert "worker started" in content or "noop task" in content, (
         f"expected worker log records in file; got:\n{content}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Thread-based worker_loop coverage
+# (Runs worker_loop in a thread so pytest-cov can see its lines.
+#  Subprocess-based tests exercise correctness; this exercises coverage.)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_worker_loop_in_thread_dispatches_task() -> None:
+    """worker_loop() runs correctly in a thread; covers its body for pytest-cov."""
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    log_queue: mp.Queue[object] = mp.Queue()
+    stop_event = mp.Event()
+
+    ctx = WorkerContext(
+        config=Config(),
+        task_queue=task_queue,
+        result_queue=result_queue,
+        log_queue=log_queue,
+        stop_event=stop_event,
+    )
+
+    task_queue.put(Task(task_type=TaskType.NOOP))
+    task_queue.put(SHUTDOWN)
+
+    t = threading.Thread(target=worker_loop, args=(ctx,), daemon=True)
+    t.start()
+    t.join(timeout=10.0)
+    assert not t.is_alive(), "worker_loop thread did not exit within 10 s"
+
+    msgs = []
+    while not result_queue.empty():
+        msgs.append(result_queue.get_nowait())
+
+    task_results = [m for m in msgs if isinstance(m, TaskResult)]
+    heartbeats = [m for m in msgs if isinstance(m, TaskStarted)]
+    assert len(task_results) == 1
+    assert task_results[0].status == "ok"
+    assert task_results[0].task_type is TaskType.NOOP
+    assert len(heartbeats) == 1
+
+
+# ---------------------------------------------------------------------------
+# _dispatch unit tests (no subprocess needed)
+# ---------------------------------------------------------------------------
+
+
+def _make_minimal_ctx() -> WorkerContext:
+    return WorkerContext(
+        config=Config(),
+        task_queue=mp.Queue(),
+        result_queue=mp.Queue(),
+        log_queue=mp.Queue(),
+        stop_event=mp.Event(),
+    )
+
+
+@pytest.mark.unit
+def test_dispatch_no_handler_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_dispatch returns status='error' when no handler is registered for the task type."""
+    log_queue: mp.Queue[object] = mp.Queue()
+    logger = build_worker_logger(log_queue, name="dispatch-test-no-handler")
+    ctx = _make_minimal_ctx()
+    task = Task(task_type=TaskType.NOOP)
+
+    monkeypatch.delitem(DISPATCH, TaskType.NOOP)
+
+    result = _dispatch(task, ctx, logger)
+    assert result.status == "error"
+    assert result.error_message is not None
+    assert "no handler registered" in result.error_message
+
+
+@pytest.mark.unit
+def test_dispatch_handler_exception_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_dispatch wraps an unhandled handler exception into a status='error' result."""
+    log_queue: mp.Queue[object] = mp.Queue()
+    logger = build_worker_logger(log_queue, name="dispatch-test-exc")
+    ctx = _make_minimal_ctx()
+    task = Task(task_type=TaskType.NOOP)
+
+    def _fail(_t: object, _c: object, _lg: object) -> None:
+        raise RuntimeError("deliberate failure for test")
+
+    monkeypatch.setitem(DISPATCH, TaskType.NOOP, _fail)  # type: ignore[arg-type]
+
+    result = _dispatch(task, ctx, logger)
+    assert result.status == "error"
+    assert "deliberate failure" in (result.error_message or "")
+    assert result.duration_seconds is not None
+
+
+@pytest.mark.unit
+def test_handle_noop_with_delay() -> None:
+    """_handle_noop with delay_seconds > 0 sleeps and still returns ok."""
+    log_queue: mp.Queue[object] = mp.Queue()
+    logger = build_worker_logger(log_queue, name="noop-delay-test")
+    ctx = _make_minimal_ctx()
+    task = Task(task_type=TaskType.NOOP, payload={"delay_seconds": 0.01})
+
+    result = _handle_noop(task, ctx, logger)
+    assert result.status == "ok"
+    assert result.task_type is TaskType.NOOP
+
+
+# ---------------------------------------------------------------------------
+# join_workers straggler path
+# ---------------------------------------------------------------------------
+
+
+def _sleepy_worker() -> None:
+    """Target for a process that sleeps indefinitely; used to test straggler path."""
+    import time
+
+    time.sleep(60)
+
+
+@pytest.mark.unit
+def test_join_workers_terminates_straggler() -> None:
+    """join_workers force-terminates a process that does not exit within timeout."""
+    p = mp.Process(target=_sleepy_worker)
+    p.start()
+    assert p.is_alive()
+
+    join_workers([p], timeout=0.1)
+
+    assert not p.is_alive(), "straggler process was not terminated by join_workers"
+    p.join()

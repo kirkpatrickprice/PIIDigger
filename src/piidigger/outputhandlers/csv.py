@@ -42,15 +42,17 @@ class CsvSink:
         try:
             for match_type, values in record.matches.items():
                 for value in values:
-                    self._writer.writerow({
-                        "source_path": record.source_path,
-                        "source_member_path": record.source_member_path,
-                        "source_depth": record.source_depth,
-                        "source_container_type": record.source_container_type,
-                        "handler": record.handler,
-                        "match_type": match_type,
-                        "value": value,
-                    })
+                    self._writer.writerow(
+                        {
+                            "source_path": record.source_path,
+                            "source_member_path": record.source_member_path,
+                            "source_depth": record.source_depth,
+                            "source_container_type": record.source_container_type,
+                            "handler": record.handler,
+                            "match_type": match_type,
+                            "value": value,
+                        }
+                    )
         except OSError as e:
             self._logger.error("CsvSink: write error: %s", e)
 
