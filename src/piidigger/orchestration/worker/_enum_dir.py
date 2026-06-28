@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-from piidigger.filehandlers import get_handler_for
 from piidigger.getmime import get_mime, test_magic
 from piidigger.models.payloads import EnumDirPayload
 from piidigger.models.tasks import Task, TaskResult, TaskType
@@ -57,6 +56,8 @@ def _is_cloud_placeholder(path: Path) -> bool:
 
 def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
     """Enumerate one directory: produce ENUM_DIR tasks for subdirs and SCAN_FILE tasks for files."""
+    from piidigger.filehandlers import get_handler_for  # lazy: xlrd import triggers SyntaxWarning
+
     payload = EnumDirPayload(**task.payload)
     path = payload.path
 

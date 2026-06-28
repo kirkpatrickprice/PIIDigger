@@ -9,7 +9,7 @@ from typing import Any
 
 from piidigger.models.tasks import SHUTDOWN, ShutdownSentinel, Task, TaskResult, TaskStarted, TaskType
 from piidigger.orchestration.context import WorkerContext
-from piidigger.orchestration.logging_setup import build_worker_logger
+from piidigger.orchestration.logging_setup import build_worker_logger, setup_warning_capture
 from piidigger.orchestration.worker._enum_dir import handle_enum_dir
 from piidigger.orchestration.worker._scan_file import handle_scan_file
 
@@ -89,6 +89,7 @@ def worker_loop(ctx: WorkerContext) -> None:
     ctx.result_queue.  Exits cleanly on ShutdownSentinel or KeyboardInterrupt.
     """
     logger = build_worker_logger(ctx.log_queue, f"worker-{os.getpid()}")
+    setup_warning_capture(ctx.log_queue)
     logger.debug("worker started (pid=%d)", os.getpid())
 
     try:

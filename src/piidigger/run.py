@@ -13,7 +13,7 @@ import psutil
 from piidigger.models.config import Config
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.coordinator import run_coordinator
-from piidigger.orchestration.logging_setup import start_listener
+from piidigger.orchestration.logging_setup import setup_warning_capture, start_listener
 from piidigger.orchestration.progress import ProgressDisplay
 from piidigger.orchestration.worker import start_worker_pool
 from piidigger.outputhandlers import CsvSink, JsonSink, TextSink
@@ -83,6 +83,7 @@ def run_scan(config: Config) -> int:
 
     config.log_file.parent.mkdir(parents=True, exist_ok=True)
     listener = start_listener(log_queue, config.log_file, config.log_level)
+    setup_warning_capture(log_queue)
 
     ctx = WorkerContext(
         config=config,

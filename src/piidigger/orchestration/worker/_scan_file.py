@@ -4,8 +4,6 @@ import logging
 import os
 from typing import Any
 
-from piidigger.datahandlers import HANDLER_REGISTRY
-from piidigger.filehandlers import get_handler_for
 from piidigger.models.payloads import ScanFilePayload
 from piidigger.models.results import ResultRecord
 from piidigger.models.tasks import Task, TaskResult
@@ -15,6 +13,9 @@ from piidigger.orchestration.sources import FilesystemItem
 
 def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
     """Scan one file: run all enabled data handlers over each text chunk."""
+    from piidigger.datahandlers import HANDLER_REGISTRY  # lazy: deferred past warning-capture setup
+    from piidigger.filehandlers import get_handler_for  # lazy: xlrd import triggers SyntaxWarning
+
     payload = ScanFilePayload(**task.payload)
 
     file_handler = get_handler_for(payload.ext, payload.mime)

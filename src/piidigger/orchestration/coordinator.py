@@ -17,6 +17,56 @@ from piidigger.orchestration.worker import broadcast_shutdown, join_workers, wor
 # when the result queue is empty.
 HEARTBEAT_CHECK_INTERVAL: float = 1.0
 
+_ACCESS_DENIED_PHRASES: tuple[str, ...] = ("Access is denied", "Permission denied", "WinError 5", "Errno 13")
+
+
+def _truncate_path(path: str, max_len: int = 60) -> str:
+    """Truncate path to max_len chars, keeping the filename and as much of the start as fits."""
+    if len(path) <= max_len:
+        return path
+    sep = "\\" if "\\" in path else "/"
+    if sep in path:
+        filename = path.rsplit(sep, 1)[1]
+        tail = sep + filename
+        head_len = max_len - len(tail) - 3  # 3 for "..."
+        if head_len > 0:
+            return f"{path[:head_len]}...{tail}"
+    return path[: max_len - 3] + "..."
+
+
+def _is_access_denied(error_message: str) -> bool:
+    return any(phrase in error_message for phrase in _ACCESS_DENIED_PHRASES)
+
+
+def _denied_path(error_message: str) -> str:
+    """Extract the filesystem path from an OS access-denied error string."""
+    if ": '" in error_message:
+        return error_message.rsplit(": '", 1)[-1].rstrip("'")
+    return error_message
+
+
+def _short_error(error_message: str) -> str:
+    """Condense an error message for display, stripping any embedded file path."""
+    first_line = error_message.split("\n")[0]
+    # OS errors end with ": 'path'" — strip that since the path is shown separately
+    if ": '" in first_line:
+        first_line = first_line.rsplit(": '", 1)[0]
+    return first_line[:80]
+
+
+def _findings_summary(findings: list[dict[str, Any]]) -> str:
+    """Return 'truncated/path — HANDLER: N  HANDLER: N' for a list of ResultRecord dicts."""
+    if not findings:
+        return ""
+    source_path = findings[0].get("source_path", "")
+    handler_counts: dict[str, int] = {}
+    for f in findings:
+        name = f.get("handler", "?")
+        count = sum(len(v) for v in f.get("matches", {}).values())
+        handler_counts[name] = handler_counts.get(name, 0) + count
+    counts = "  ".join(f"{n.upper()}: {c}" for n, c in sorted(handler_counts.items()))
+    return f"{_truncate_path(source_path)} — {counts}"
+
 
 def run_coordinator(
     ctx: WorkerContext,
@@ -180,15 +230,17 @@ def run_coordinator(
 
             result: TaskResult = raw
             _in_flight.pop(result.task_id, None)
-            _pending_tasks.pop(result.task_id, None)
+            pending_task = _pending_tasks.pop(result.task_id, None)
             pending -= 1
 
             if result.status == "error":
-                logger.error(
-                    "task %s failed: %s",
-                    result.task_id,
-                    result.error_message or "(no message)",
-                )
+                msg = result.error_message or "(no message)"
+                logger.error("task %s failed: %s", result.task_id, msg)
+                if _is_access_denied(msg):
+                    progress.log_event("WARNING", f"Access denied: {_truncate_path(_denied_path(msg))}")
+                elif result.task_type == TaskType.SCAN_FILE:
+                    file_path = pending_task.payload.get("display_path", "") if pending_task else ""
+                    progress.log_event("ERROR", f"Error: {_truncate_path(file_path)} — {_short_error(msg)}")
 
             for new_task_dict in result.new_tasks:
                 new_task = Task(**new_task_dict)
@@ -196,6 +248,8 @@ def run_coordinator(
                 pending += 1
 
             _route_to_sinks(result.findings, sinks)
+            if result.findings:
+                progress.log_event("INFO", _findings_summary(result.findings))
             progress.update(result.counters)
 
         logger.info("coordinator: all tasks complete (pending=0)")

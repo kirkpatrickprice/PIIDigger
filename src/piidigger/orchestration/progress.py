@@ -95,6 +95,7 @@ class ProgressDisplay:
             console=self._console,
             refresh_per_second=4,
         )
+        self._console.clear()
         live.start()
         self._live = live
 
