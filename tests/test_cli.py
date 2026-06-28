@@ -47,15 +47,15 @@ def test_root_version_exits_0() -> None:
 def test_inspect_help_exits_0() -> None:
     result = CliRunner().invoke(cli, ["inspect", "--help"])
     assert result.exit_code == 0
-    assert "handlers" in result.output
+    assert "datatypes" in result.output
     assert "filetypes" in result.output
     assert "mime" in result.output
     assert "encoding" in result.output
 
 
 @pytest.mark.unit
-def test_inspect_handlers_exits_0() -> None:
-    result = CliRunner().invoke(cli, ["inspect", "handlers"])
+def test_inspect_datatypes_exits_0() -> None:
+    result = CliRunner().invoke(cli, ["inspect", "datatypes"])
     assert result.exit_code == 0
     assert "pan" in result.output
 
