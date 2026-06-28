@@ -257,19 +257,49 @@ def run_coordinator(
     except KeyboardInterrupt:
         _interrupted = True
         logger.warning("scan interrupted by user (KeyboardInterrupt)")
+        progress.log_event(
+            "WARNING",
+            "Scan interrupted — shutting down gracefully  (CTRL-C again to force-quit)",
+        )
 
     finally:
-        broadcast_shutdown(ctx.task_queue, len(workers))
         if _interrupted:
-            # Workers may be mid-task and won't drain the shutdown queue promptly;
-            # terminate immediately so the process exits within the expected window.
+            # Cancel feeder-thread joins NOW, before any teardown step that could
+            # block.  If a second CTRL-C breaks out of this finally block, the
+            # atexit handler will see _joincancelled=True and skip thread.join(),
+            # so no unhandled KeyboardInterrupt from the multiprocessing atexit hook.
+            ctx.task_queue.cancel_join_thread()
+            ctx.result_queue.cancel_join_thread()
+            ctx.log_queue.cancel_join_thread()
             for p in workers:
                 if p.is_alive():
                     p.terminate()
-        join_workers(workers, timeout=5.0, logger=logger)
-        _flush_sinks(sinks)
-        stop_listener(listener)
-        progress.stop()
+        else:
+            # Graceful completion: signal workers to exit cleanly.
+            broadcast_shutdown(ctx.task_queue, len(workers))
+
+        try:
+            if _interrupted:
+                progress.log_event("INFO", "Waiting for workers to stop…")
+            join_workers(workers, timeout=2.0 if _interrupted else 5.0, logger=logger)
+
+            if _interrupted:
+                progress.log_event("INFO", "Saving results to output files…")
+            _flush_sinks(sinks)
+            stop_listener(listener)
+
+        except KeyboardInterrupt:
+            # Second CTRL-C: force-quit without waiting for clean teardown.
+            for p in workers:
+                if p.is_alive():
+                    p.terminate()
+            ctx.task_queue.cancel_join_thread()
+            ctx.result_queue.cancel_join_thread()
+            ctx.log_queue.cancel_join_thread()
+            progress.log_event("WARNING", "Force-quit — remaining output abandoned")
+
+        finally:
+            progress.stop()
 
 
 # ---------------------------------------------------------------------------
