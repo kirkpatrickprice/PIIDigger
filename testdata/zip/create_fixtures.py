@@ -146,7 +146,8 @@ def _oversize_member() -> None:
     # Verify ZipFile can open it and sees the faked size
     with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
         info = zf.getinfo("big-file.txt")
-        assert info.file_size == 200 * 1024 * 1024, f"unexpected file_size={info.file_size}"
+        if info.file_size != 200 * 1024 * 1024:
+            raise RuntimeError(f"unexpected file_size={info.file_size}")
     _write("oversize-member.zip", data)
 
 
@@ -170,7 +171,8 @@ def _encrypted_member() -> None:
     ])
     with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
         info = zf.getinfo("secret.txt")
-        assert info.flag_bits & 0x1, "encryption flag was not set"
+        if not (info.flag_bits & 0x1):
+            raise RuntimeError("encryption flag was not set")
     _write("encrypted-member.zip", data)
 
 
@@ -191,7 +193,8 @@ def _traversal_member() -> None:
     ])
     with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
         names = zf.namelist()
-        assert "../traversal.txt" in names, f"traversal path missing from {names}"
+        if "../traversal.txt" not in names:
+            raise RuntimeError(f"traversal path missing from {names}")
     _write("traversal-member.zip", data)
 
 
@@ -213,9 +216,10 @@ def _zip_bomb_simulated() -> None:
     with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
         info = zf.getinfo("bomb.txt")
         ratio = info.file_size / max(info.compress_size, 1)
-        assert ratio > 1000, (
-            f"bomb ratio {ratio:.0f}:1 is not > 1000:1 — increase content or compression level"
-        )
+        if ratio <= 1000:
+            raise RuntimeError(
+                f"bomb ratio {ratio:.0f}:1 is not > 1000:1 — increase content or compression level"
+            )
         print(f"    bomb.txt: {info.file_size:,} / {info.compress_size:,} = {ratio:.0f}:1")
     _write("zip-bomb-simulated.zip", data)
 
