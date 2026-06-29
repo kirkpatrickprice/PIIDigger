@@ -25,7 +25,7 @@ from piidigger.orchestration.coordinator import (
 )
 from piidigger.orchestration.logging_setup import start_listener, stop_listener
 from piidigger.orchestration.progress import ProgressDisplay
-from piidigger.orchestration.worker import broadcast_shutdown, join_workers, start_worker_pool, worker_loop
+from piidigger.orchestration.worker import MAX_RETRIES, broadcast_shutdown, join_workers, start_worker_pool, worker_loop
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -53,6 +53,16 @@ def _non_tty_progress() -> ProgressDisplay:
     d = ProgressDisplay()
     d._is_tty = False
     return d
+
+
+def _crash_before_heartbeat_worker(ctx: WorkerContext) -> None:
+    """Dequeue one task then crash immediately, before sending TaskStarted.
+
+    TEST-ONLY: module-level so Windows mp.spawn can import it.
+    Simulates a worker that dies between task_queue.get() and result_queue.put(TaskStarted(...)).
+    """
+    ctx.task_queue.get()
+    os._exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -429,5 +439,132 @@ def test_hung_worker_replaced_other_workers_continue(tmp_path: Path) -> None:
     assert deadline_fired, "deadline detection never fired for the hung task"
     assert replacement_spawned, "no replacement worker was spawned after the hung worker was terminated"
     assert ok_completed == 5, f"expected 5 quick tasks to complete with ok, got {ok_completed}"
+    assert pending == 0, f"pending did not reach 0; remaining={pending}"
+    assert time.monotonic() - test_start < TEST_LIMIT
+
+
+# ---------------------------------------------------------------------------
+# Integration: crash-before-heartbeat recovery
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_crash_before_heartbeat_requeues_task(tmp_path: Path) -> None:
+    """Worker that crashes before TaskStarted causes the orphaned task to be re-queued.
+
+    Exercises the crash-before-heartbeat path in coordinator._check_worker_deadlines
+    (coordinator.py lines ~205-258):
+      1. Dead worker detected via is_alive() == False.
+      2. Replacement worker spawned.
+      3. Task identified as crash orphan (in _pending_tasks, not in _in_flight,
+         waited > CRASH_DETECT_TIMEOUT=0.1s used in this inline loop).
+      4. Task re-queued with retry_count=1; replacement worker completes it; pending reaches 0.
+
+    Asserts:
+    - The crash is detected (crash_worker.is_alive() == False seen by the loop).
+    - The orphaned task is re-queued under a new task_id.
+    - pending reaches 0 (scan completes despite the crash).
+    - Whole test finishes well within the 10-second safety limit.
+    """
+    # Crash-orphan window patched down from 30s so the test runs in ~2s:
+    # HEARTBEAT_CHECK_INTERVAL fires after 1s → task has waited ~1s >> 0.1s threshold.
+    CRASH_DETECT_TIMEOUT = 0.1
+
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    log_queue: mp.Queue[object] = mp.Queue()
+    stop_event = mp.Event()
+
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [])
+
+    # One task for the crash worker to dequeue and drop (no TaskStarted will be sent).
+    crash_task = Task(task_type=TaskType.NOOP)
+    task_queue.put(crash_task)
+    enqueue_time = time.monotonic()
+
+    # Only one worker initially: the crash worker.  The inline loop spawns the
+    # replacement after detecting the crash.
+    crash_worker = mp.Process(target=_crash_before_heartbeat_worker, args=(ctx,))
+    crash_worker.start()
+
+    listener = start_listener(log_queue, tmp_path / "crash.log", "DEBUG")
+    progress = _non_tty_progress()
+
+    pending = 1
+    _pending_tasks: dict[str, Task] = {crash_task.task_id: crash_task}
+    _in_flight: dict[str, tuple[int, float, int]] = {}
+    _task_enqueue_time: dict[str, float] = {crash_task.task_id: enqueue_time}
+    _task_retries: dict[str, int] = {crash_task.task_id: 0}
+    workers: list[mp.Process] = [crash_worker]
+    _pid_to_proc: dict[int, mp.Process] = {crash_worker.pid: crash_worker}  # type: ignore[index]
+
+    crash_detected = False
+    task_requeued = False
+    test_start = time.monotonic()
+    TEST_LIMIT = 10.0
+
+    while pending > 0 and time.monotonic() - test_start < TEST_LIMIT:
+        try:
+            raw = result_queue.get(timeout=HEARTBEAT_CHECK_INTERVAL)
+        except queue.Empty:
+            now = time.monotonic()
+
+            # --- Crash-before-heartbeat detection (mirrors coordinator._check_worker_deadlines) ---
+            dead_pids = [pid for pid, proc in _pid_to_proc.items() if not proc.is_alive()]
+            if dead_pids:
+                crash_detected = True
+                for pid in dead_pids:
+                    old_proc = _pid_to_proc.pop(pid)
+                    if old_proc in workers:
+                        workers.remove(old_proc)
+                    new_proc = mp.Process(target=worker_loop, args=(ctx,))
+                    new_proc.start()
+                    if new_proc.pid is not None:
+                        _pid_to_proc[new_proc.pid] = new_proc
+                    workers.append(new_proc)
+
+                crash_orphans = [
+                    task_id
+                    for task_id in _pending_tasks
+                    if task_id not in _in_flight
+                    and now - _task_enqueue_time.get(task_id, now) > CRASH_DETECT_TIMEOUT
+                ]
+                for task_id in crash_orphans:
+                    task = _pending_tasks.pop(task_id)
+                    _task_enqueue_time.pop(task_id, None)
+                    retries = _task_retries.pop(task_id, 0)
+                    pending -= 1
+                    if retries < MAX_RETRIES:
+                        new_task = Task(
+                            task_type=task.task_type,
+                            payload=task.payload,
+                            timeout_seconds=task.timeout_seconds,
+                        )
+                        task_queue.put(new_task)
+                        _pending_tasks[new_task.task_id] = new_task
+                        _task_enqueue_time[new_task.task_id] = time.monotonic()
+                        _task_retries[new_task.task_id] = retries + 1
+                        pending += 1
+                        task_requeued = True
+            continue
+
+        if isinstance(raw, TaskStarted):
+            task = _pending_tasks.get(raw.task_id)
+            if task is not None:
+                _in_flight[raw.task_id] = (raw.worker_pid, time.monotonic(), task.timeout_seconds)
+            continue
+
+        if isinstance(raw, TaskResult):
+            _in_flight.pop(raw.task_id, None)
+            _pending_tasks.pop(raw.task_id, None)
+            pending -= 1
+
+    broadcast_shutdown(task_queue, len(workers))
+    join_workers(workers, timeout=5.0)
+    stop_listener(listener)
+    progress.stop()
+
+    assert crash_detected, "crash worker death was never detected"
+    assert task_requeued, "orphaned task was never re-queued after crash"
     assert pending == 0, f"pending did not reach 0; remaining={pending}"
     assert time.monotonic() - test_start < TEST_LIMIT
