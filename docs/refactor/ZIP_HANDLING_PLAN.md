@@ -35,16 +35,19 @@ Result: ZIP can be added safely after Task Queue + Worker Pool is in place.
 
 - Writing back modified archive content
 - Password-protected ZIP decryption
-- Non-ZIP archive formats (`.7z`, `.rar`, `.tar.*`) - although these should follow the same pattern once appropriate libraries are added to PIIDigger
+- Non-ZIP archive formats (`.7z`, `.rar`, `.tar.*`) - although these should follow the same pattern once appropriate libraries are added to PIIDigger.  
 - Cross-archive deduplication by content hash
 
 ## 4. Design Principles
 
-1. **Task-first expansion**: Archive scanning creates new tasks, not recursive local loops.
-2. **Boundary isolation**: Extraction logic stays in an archive service/adapter layer.
-3. **Deterministic limits**: Depth, size, and member count are hard-bounded by config.
-4. **Fail-open for scan continuity**: A bad archive member logs and skips without stopping run.
-5. **No shared temp state**: Workers use isolated temp paths and explicit cleanup.
+1. Design and implementation decisions made to add ZIP support must facilitate implementation of other archive formats (7z, RAR, tar*, etc).
+2. **Task-first expansion**: Archive scanning creates new tasks, not recursive local loops.
+3. **Boundary isolation**: Extraction logic stays in an archive service/adapter layer.
+4. **Deterministic limits**: Depth, size, and member count are hard-bounded by config.
+5. **Fail-open for scan continuity**: A bad archive member logs and skips without stopping run.
+6. **In-memory archive extraction**: Archive extraction should not consume disk resources unless unavoidable.  A memory-based (maybe using streaming) implementation is preferred.
+7. **No shared temp state**: If disk resources are required, archive members are extracted only when needed, and workers use isolated temp paths and explicit cleanup.
+8. **Secure deletion**: If disk resources are required, temp files must be securely deleted (file overwrite before delete) immediately.  Under no circumstances will extracted archive members persist on disk as this could potentially create additional, permanant copies of unmanaged PII.
 
 ## 5. Proposed Task Model Additions
 
