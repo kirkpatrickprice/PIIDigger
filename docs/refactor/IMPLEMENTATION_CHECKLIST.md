@@ -391,14 +391,15 @@ Preset → worker count formula:
 ### Reliability validation
 
 - [ ] `base64-xml-test.xml` with email handler and `timeout_seconds=30` completes in < 5 minutes total
-- [ ] Log contains an explicit `"timeout"` record for the offending file — not a silent skip
+- [x] Log contains an explicit `"timeout"` record for the offending file — not a silent skip
 - [ ] Run with 1 deliberately hung worker (synthetic): other workers continue; hung worker is terminated and replaced; scan completes
 
 ### UI Improvements
 
-- [ ] Improve timeout warning message readability: replace terse `timeout task=<id>` output with structured context including task_type, source/path member, and retry/replacement action in the event table.  Ensure that full details (`task_type`, source path/member, worker pid, configured timeout, elapsed time, retry/replacement action) are captured in the log.
-- [ ] Update the Progress Bar display to provide an ETA for each of the Directory, File, and Bytes progress bars
-- [ ] Add a check to ensure that the user is an administrator/root before running PIIDigger.  Log the status of the check in the log file.  If not an admin, report that "Admin user not detected.  A full disk scan may not be possible.  Continue (Y/n)" with a timeout of 10 seconds.  Add a configuration option `admin_check = true` as the default in the TOML file.  `admin_check = false` will bypass the confirmation (but not the check and log actions above).  Check `globalfuncs` for `is_admin` for existing code to implement the check or recommend a better implementation.  This code can be moved (e.g. to `progress.py`) if needed.
+- [x] Improve timeout warning message readability: replace terse `timeout task=<id>` output with structured context including task_type, source/path member, and retry/replacement action in the event table.  Ensure that full details (`task_type`, source path/member, worker pid, configured timeout, elapsed time, retry/replacement action) are captured in the log.
+- [x] Update the Progress Bar display to provide an ETA for each of the Directory, File, and Bytes progress bars
+- [x] Add a check to ensure that the user is an administrator/root before running PIIDigger.  Log the status of the check in the log file.  If not an admin, report that "Admin user not detected.  A full disk scan may not be possible.  Continue (Y/n)" with a timeout of 10 seconds.  Add a configuration option `admin_check = true` as the default in the TOML file.  `admin_check = false` will bypass the confirmation (but not the check and log actions above).  Check `globalfuncs` for `is_admin` for existing code to implement the check or recommend a better implementation.  This code can be moved (e.g. to `progress.py`) if needed.
+- [x] Emit configuration confirmation messages to the Event table on start-up.  Include: Performance profile, Number of worker threads, seed directories/Windows drive letters, Sleep Prevention (wake.py) status, and a message to "Press CTRL-C to terminate the scan"
 
 ### Baseline comparison
 

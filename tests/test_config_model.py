@@ -47,7 +47,6 @@ def test_config_default_returns_config() -> None:
     assert len(c.start_dirs) >= 1
     assert len(c.exclude_dirs) >= 1
     assert c.performance == "balanced"
-    assert c.max_workers == 0
     assert c.local_files_only is True
 
 
@@ -58,7 +57,7 @@ def test_config_default_is_picklable() -> None:
     c = Config.default()
     restored: Config = pickle.loads(pickle.dumps(c))
     assert restored.start_dirs == c.start_dirs
-    assert restored.max_workers == c.max_workers
+    assert restored.performance == c.performance
 
 
 # ---------------------------------------------------------------------------

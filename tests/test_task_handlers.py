@@ -112,6 +112,33 @@ def test_enum_dir_respects_exclude_dirs(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_enum_dir_exclude_dirs_forward_slash_pattern(tmp_path: Path) -> None:
+    """Exclude patterns with forward slashes must work on all platforms.
+
+    The default config stores Windows paths as 'C:/Program Files' (forward
+    slashes) while Path.resolve() returns backslash paths on Windows.
+    _is_excluded must normalise both sides so the exclusion fires correctly.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    excluded = root / "skip_me"
+    excluded.mkdir()
+    kept = root / "keep"
+    kept.mkdir()
+
+    # Simulate a config entry written with forward slashes (as the default
+    # TOML template generates on Windows).
+    forward_slash_pattern = str(excluded).replace("\\", "/")
+    ctx = _make_ctx(tmp_path, exclude_dirs=[forward_slash_pattern])
+    result = handle_enum_dir(_enum_dir_task(root), ctx, _logger())
+
+    assert result.status == "ok"
+    task_paths = [t["payload"].get("path", "") for t in result.new_tasks]
+    assert not any("skip_me" in p for p in task_paths), "forward-slash exclude pattern was not honoured"
+    assert any("keep" in p for p in task_paths)
+
+
+@pytest.mark.unit
 def test_enum_dir_nonexistent_path_returns_error(tmp_path: Path) -> None:
     ctx = _make_ctx(tmp_path)
     result = handle_enum_dir(_enum_dir_task(tmp_path / "no_such_dir"), ctx, _logger())

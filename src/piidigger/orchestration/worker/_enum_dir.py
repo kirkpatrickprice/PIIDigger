@@ -14,18 +14,24 @@ from piidigger.orchestration.context import WorkerContext
 def _is_excluded(path: Path, exclude_dirs: list[str]) -> bool:
     """Return True if path matches any exclude pattern.
 
-    Patterns that start with '*' are treated as name-suffix/contains checks.
-    All others are prefix-matched against the resolved path string.
+    Patterns that start with '*' are suffix-matched against the resolved path
+    (e.g. '*/.vscode-server' matches any directory ending with that component).
+    All others are exact- or prefix-matched against the resolved path.
+
+    os.path.normcase() is applied to both sides so that on Windows, config
+    entries written with forward slashes (e.g. 'C:/Program Files') correctly
+    match the backslash paths returned by Path.resolve(), and case differences
+    are tolerated.  On POSIX normcase is a no-op so behaviour is unchanged.
     """
-    resolved = str(path.resolve())
-    name = path.name
+    resolved = os.path.normcase(str(path.resolve()))
     for pattern in exclude_dirs:
         if pattern.startswith("*"):
-            suffix = pattern[1:]
-            if resolved.endswith(suffix) or name == suffix.lstrip("/\\"):
+            if resolved.endswith(os.path.normcase(pattern[1:])):
                 return True
-        elif resolved == pattern or resolved.startswith(pattern + os.sep):
-            return True
+        else:
+            norm = os.path.normcase(pattern)
+            if resolved == norm or resolved.startswith(norm + os.sep):
+                return True
     return False
 
 

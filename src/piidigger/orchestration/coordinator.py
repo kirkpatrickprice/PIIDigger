@@ -144,22 +144,39 @@ def run_coordinator(
         now = time.monotonic()
         timed_out: list[str] = []
 
-        for task_id, (pid, dispatch_time, timeout_seconds) in _in_flight.items():
+        for task_id, (_pid, dispatch_time, timeout_seconds) in _in_flight.items():
             if now - dispatch_time > 2 * timeout_seconds:
                 timed_out.append(task_id)
-                logger.warning(
-                    "deadline exceeded: task=%s pid=%d elapsed=%.1fs timeout=%ds",
-                    task_id,
-                    pid,
-                    now - dispatch_time,
-                    timeout_seconds,
-                )
 
         for task_id in timed_out:
-            pid, _, _ = _in_flight.pop(task_id)
-            _pending_tasks.pop(task_id, None)
+            pid, dispatch_time, timeout_sec = _in_flight.pop(task_id)
+            task = _pending_tasks.pop(task_id, None)
             _task_enqueue_time.pop(task_id, None)
             _task_retries.pop(task_id, None)
+            elapsed = now - dispatch_time
+
+            # Extract source path and task type for structured messages
+            task_type_str = task.task_type.value if task is not None else "unknown"
+            if task is not None:
+                if task.task_type == TaskType.SCAN_FILE:
+                    source_path = task.payload.get("display_path", task.payload.get("file_path", ""))
+                elif task.task_type == TaskType.ENUM_DIR:
+                    source_path = task.payload.get("path", "")
+                else:
+                    source_path = ""
+            else:
+                source_path = ""
+
+            logger.warning(
+                "deadline exceeded: task=%s type=%s path=%r pid=%d elapsed=%.1fs"
+                " timeout=%ds — worker terminated; replacement spawned",
+                task_id,
+                task_type_str,
+                source_path,
+                pid,
+                elapsed,
+                timeout_sec,
+            )
 
             # Terminate the hung worker and spawn a replacement
             old_proc = _pid_to_proc.pop(pid, None)
@@ -177,7 +194,12 @@ def run_coordinator(
             workers.append(new_proc)
             logger.info("spawned replacement worker pid=%s", new_proc.pid)
 
-            progress.log_event("WARNING", f"timeout task={task_id}")
+            short_path = _truncate_path(source_path) if source_path else f"task {task_id[:8]}…"
+            progress.log_event(
+                "WARNING",
+                f"Timeout [{task_type_str}] {short_path}"
+                f" — pid={pid}, {elapsed:.0f}s/{timeout_sec}s, replacement spawned",
+            )
             pending -= 1
 
         # --- Crash-before-heartbeat detection ---
@@ -325,7 +347,10 @@ def run_coordinator(
             _route_to_sinks(result.findings, sinks)
             if result.findings:
                 progress.log_event("INFO", _findings_summary(result.findings))
-            progress.update(result.counters)
+            # Merge ETA counters with the result's own counters in one call so
+            # the display refreshes once per result.  tasks_pending is the
+            # post-adjustment snapshot (after new tasks were enqueued above).
+            progress.update({**result.counters, "tasks_completed": 1, "tasks_pending": pending})
 
         logger.info("coordinator: all tasks complete (pending=0)")
 

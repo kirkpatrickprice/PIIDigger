@@ -69,9 +69,9 @@ _KNOWN_CONFIG_KEYS: tuple[str, ...] = (
     "include_mime",
     "data_handlers",
     "performance",
-    "max_workers",
     "default_timeout_seconds",
     "local_files_only",
+    "admin_check",
     "log_file",
     "log_level",
     "results.path",
@@ -158,9 +158,9 @@ def generate_toml_template() -> str:
         'include_mime = ["all"]',
         'data_handlers = ["all"]',
         'performance = "balanced"',
-        "max_workers = 0",
         "default_timeout_seconds = 30",
         "local_files_only = true",
+        "admin_check = true",
         'log_file = "logs/piidigger.log"',
         'log_level = "INFO"',
         "",
@@ -215,9 +215,9 @@ class Config(PiiDiggerModel):
     # ["all"] means all data handlers in datahandlers.HANDLER_REGISTRY
     data_handlers: list[str] = Field(default_factory=lambda: ["all"])
     performance: Literal["fast", "balanced", "slow"] = "balanced"
-    max_workers: int = Field(default=0, ge=0)
     default_timeout_seconds: int = Field(default=30, ge=1, le=600)
     local_files_only: bool = True
+    admin_check: bool = True
     log_file: Path = Path("logs/piidigger.log")
     log_level: str = "INFO"
     results: ResultsConfig = Field(default_factory=ResultsConfig)
@@ -258,10 +258,23 @@ class Config(PiiDiggerModel):
         # rest of validation sees a plain list.
         system = platform.system().lower()
         os_key = "macos" if system == "darwin" else system
-        if isinstance(data.get("start_dirs"), dict):
-            data["start_dirs"] = data["start_dirs"].get(os_key, [])
-        if isinstance(data.get("exclude_dirs"), dict):
-            data["exclude_dirs"] = data["exclude_dirs"].get(os_key, [])
+        _os_keys = frozenset({"windows", "macos", "linux"})
+        for _table in ("start_dirs", "exclude_dirs"):
+            _val = data.get(_table)
+            if not isinstance(_val, dict):
+                continue
+            _stray = [k for k in _val if k not in _os_keys]
+            if _stray:
+                # Keys that aren't OS names ended up here because flat root-level
+                # settings were written after a [section] header in the TOML file.
+                # TOML absorbs them into that section; they would be silently lost.
+                raise ValueError(
+                    f"invalid configuration in {path}:\n"
+                    f"- Unexpected keys found inside [{_table}]: {', '.join(sorted(_stray))}.\n"
+                    f"  Root-level settings must appear before any [section] header in the TOML file.\n"
+                    f"  Run 'piidigger config generate' to create a correctly structured template."
+                )
+            data[_table] = _val.get(os_key, [])
 
         # "all" expands to every available drive/mount point on the current OS.
         if data.get("start_dirs") == ["all"]:

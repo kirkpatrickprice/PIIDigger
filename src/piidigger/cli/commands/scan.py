@@ -26,19 +26,9 @@ from piidigger.run import run_scan
     is_flag=True,
     help="Ignore any config file and use built-in defaults.",
 )
-@click.option(
-    "-w",
-    "--max-workers",
-    "max_workers",
-    default=None,
-    type=int,
-    hidden=True,
-    help="Expert override for the number of worker processes.",
-)
 def scan(
     config_file: str,
     use_default: bool,
-    max_workers: int | None,
 ) -> None:
     """Scan directories for PII."""
     if use_default:
@@ -54,8 +44,5 @@ def scan(
         else:
             click.echo(f"Config file {config_file!r} not found — using built-in defaults.", err=True)
             config = Config.default()
-
-    if max_workers is not None:
-        config = config.model_copy(update={"max_workers": max_workers})
 
     sys.exit(run_scan(config))

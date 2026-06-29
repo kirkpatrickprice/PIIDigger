@@ -99,23 +99,6 @@ def test_inspect_encoding_exits_0(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert "utf-8" in result.output
 
 
-@pytest.mark.unit
-def test_scan_max_workers_override_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
-
-    def fake_run_scan(config: object) -> int:
-        captured["config"] = config
-        return 0
-
-    monkeypatch.setattr("piidigger.cli.commands.scan.run_scan", fake_run_scan)
-
-    result = CliRunner().invoke(cli, ["scan", "--default-config", "--max-workers", "3"])
-
-    assert result.exit_code == 0
-    config = captured["config"]
-    assert config.performance == "balanced"
-    assert config.max_workers == 3
-
 
 @pytest.mark.unit
 def test_config_generate_creates_file(tmp_path: Path) -> None:

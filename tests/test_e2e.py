@@ -18,7 +18,7 @@ def _config(start_dir: Path, tmp_path: Path, **kwargs: object) -> Config:
     """Build a minimal Config suitable for a test scan."""
     return Config(
         start_dirs=[start_dir],
-        max_workers=1,
+        performance="slow",
         log_file=tmp_path / "logs" / "test.log",
         results=ResultsConfig(path=tmp_path / "output", **kwargs),  # type: ignore[arg-type]
     )
@@ -57,7 +57,7 @@ def test_run_scan_pan_all_formats_non_empty(tmp_path: Path) -> None:
 
     config = Config(
         start_dirs=[start],
-        max_workers=1,
+        performance="slow",
         data_handlers=["pan"],
         log_file=tmp_path / "logs" / "test.log",
         results=ResultsConfig(path=tmp_path / "output", formats=["all"]),

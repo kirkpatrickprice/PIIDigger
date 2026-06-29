@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import collections
 import sys
+import time
 
 from rich.console import Console, Group
 from rich.live import Live
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
-# Counter keys accumulated by the progress display
+# Counter keys accumulated into self._counters (display values only).
+# tasks_completed / tasks_pending are handled separately for ETA and are
+# NOT accumulated in _counters.
 _COUNTER_KEYS: tuple[str, ...] = (
     "dirs_found",
     "dirs_scanned",
@@ -21,6 +24,11 @@ _COUNTER_KEYS: tuple[str, ...] = (
 
 _EVENTS_BUFFER_SIZE = 20
 
+# Minimum completed tasks before showing an ETA.  Below this threshold the
+# rate estimate is too noisy, and scans that finish this quickly are already
+# done before the user cares about a countdown.
+_ETA_MIN_COMPLETED: int = 200
+
 
 def _fmt_bytes(n: int) -> str:
     """Format a byte count as a human-readable string (e.g. '1.2 MB')."""
@@ -32,13 +40,28 @@ def _fmt_bytes(n: int) -> str:
     return f"{value:.1f} EB"
 
 
+def _fmt_eta(seconds: float) -> str:
+    """Format a duration in seconds as ~H:MM:SS or ~M:SS."""
+    total = int(seconds)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"~{h}:{m:02d}:{s:02d}"
+    return f"~{m}:{s:02d}"
+
+
 class ProgressDisplay:
     """Compact rich.Live progress display owned by the coordinator.
 
     Uses rich.console.Group to stack elements without fixed space allocation:
       - Three progress bars: Dirs, Files, Bytes (scanned / found  pct%)
       - One text counter:    Results Found (monotonically increasing)
+      - One ETA row:         task-rate-based estimated time remaining
       - Events log:          last N warnings/errors, rebuilt on each event
+
+    ETA is computed from completed-task rate (all task types combined) and is
+    suppressed until _ETA_MIN_COMPLETED tasks have finished so the early
+    estimate is meaningful.
 
     Non-TTY mode: start/update/log_event are no-ops; stop() always prints
     a plain-text summary so CI and piped runs still see a result line.
@@ -50,10 +73,20 @@ class ProgressDisplay:
         self._counters: dict[str, int] = {k: 0 for k in _COUNTER_KEYS}
         self._events: collections.deque[tuple[str, str]] = collections.deque(maxlen=_EVENTS_BUFFER_SIZE)
 
+        # ETA state — updated by update() from tasks_completed / tasks_pending
+        # counters emitted by the coordinator.  Not stored in _counters because
+        # tasks_pending is a snapshot (not cumulative) and neither key is a
+        # display counter.
+        self._tasks_completed: int = 0
+        self._tasks_pending: int = 0
+        self._scan_start: float = time.monotonic()
+
         self._bars: Progress | None = None
         self._text: Progress | None = None
+        self._eta_row: Progress | None = None
         self._bar_task_ids: dict[str, TaskID] = {}
         self._text_task_ids: dict[str, TaskID] = {}
+        self._eta_task_id: TaskID | None = None
         self._live: Live | None = None
 
     def _build_events_table(self) -> Table:
@@ -66,10 +99,29 @@ class ProgressDisplay:
             table.add_row(f"[{color}]{level}[/{color}]", message)
         return table
 
+    def _compute_eta(self) -> str:
+        """Return a human-readable ETA string based on task completion rate.
+
+        Returns '--:--' until _ETA_MIN_COMPLETED tasks have finished.
+        The formula is: ETA = elapsed * pending / completed, where 'pending'
+        is the snapshot from the last coordinator update.
+        """
+        if self._tasks_completed < _ETA_MIN_COMPLETED:
+            return "--:--"
+        elapsed = time.monotonic() - self._scan_start
+        if elapsed <= 0 or self._tasks_completed == 0:
+            return "--:--"
+        pending = self._tasks_pending
+        if pending == 0:
+            return "~0:00"
+        return _fmt_eta(elapsed * pending / self._tasks_completed)
+
     def start(self) -> None:
         """Open the rich.Live display.  No-op when not connected to a TTY."""
         if not self._is_tty:
             return
+
+        self._scan_start = time.monotonic()
 
         # Progress bars for paired (scanned / found) counters.
         # Each bar stores its display label in task.fields["label"] so dirs/files
@@ -102,10 +154,22 @@ class ProgressDisplay:
         self._text = text
         self._text_task_ids["results_found"] = text.add_task("Results Found", total=None)
 
+        # Single ETA row — task-rate-based; shows "--:--" until the threshold
+        # is reached, then "~H:MM:SS" or "~M:SS".
+        eta_row = Progress(
+            SpinnerColumn(),
+            TextColumn("[bold]{task.description:<16}"),
+            TextColumn("{task.fields[label]}"),
+            console=self._console,
+            expand=True,
+        )
+        self._eta_row = eta_row
+        self._eta_task_id = eta_row.add_task("ETA", total=None, label="--:--")
+
         # Group stacks renderables with no fixed space allocation — elements
         # sit immediately below each other with no gap.
         live = Live(
-            Group(bars, text, self._build_events_table()),
+            Group(bars, text, eta_row, self._build_events_table()),
             console=self._console,
             refresh_per_second=4,
         )
@@ -114,13 +178,23 @@ class ProgressDisplay:
         self._live = live
 
     def update(self, counters: dict[str, int]) -> None:
-        """Accumulate counters and refresh the bars.  No-op when not a TTY."""
+        """Accumulate counters and refresh the display.  No-op when not a TTY."""
+        # tasks_completed is cumulative; tasks_pending is a snapshot — replace,
+        # not add.  Neither belongs in self._counters (not display values).
+        if "tasks_completed" in counters:
+            self._tasks_completed += counters["tasks_completed"]
+        if "tasks_pending" in counters:
+            self._tasks_pending = counters["tasks_pending"]
+
         for key, val in counters.items():
-            self._counters[key] = self._counters.get(key, 0) + val
+            if key not in ("tasks_completed", "tasks_pending"):
+                self._counters[key] = self._counters.get(key, 0) + val
 
         bars = self._bars
         text = self._text
-        if not self._is_tty or bars is None or text is None:
+        eta_row = self._eta_row
+        eta_task_id = self._eta_task_id
+        if not self._is_tty or bars is None or text is None or eta_row is None or eta_task_id is None:
             return
 
         dirs_found = self._counters["dirs_found"]
@@ -157,6 +231,8 @@ class ProgressDisplay:
             if delta:
                 text.advance(task_id, delta)
 
+        eta_row.update(eta_task_id, label=self._compute_eta())
+
     def log_event(self, level: str, message: str) -> None:
         """Append an event and rebuild the events table.  No-op when not a TTY."""
         self._events.append((level, message))
@@ -164,12 +240,13 @@ class ProgressDisplay:
         live = self._live
         bars = self._bars
         text = self._text
-        if not self._is_tty or live is None or bars is None or text is None:
+        eta_row = self._eta_row
+        if not self._is_tty or live is None or bars is None or text is None or eta_row is None:
             return
 
         # Rebuild the Group so the events table reflects the current deque
         # (bounded to _EVENTS_BUFFER_SIZE — oldest entries are dropped).
-        live.update(Group(bars, text, self._build_events_table()))
+        live.update(Group(bars, text, eta_row, self._build_events_table()))
 
     def stop(self) -> None:
         """Close the rich.Live display and print a plain-text summary to stdout."""
