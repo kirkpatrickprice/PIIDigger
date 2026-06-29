@@ -15,84 +15,84 @@ Use this checklist to track progress. Mark items `[x]` as completed. Each phase 
 
 ### snake_case rename — retained business logic
 
-- [ ] Run `ruff check --select N src/` to enumerate all naming violations
-- [ ] `datahandlers/`: rename all functions, variables, and module-level names to `snake_case`
-  - [ ] `pan.py`
-  - [ ] `email.py`
-  - [ ] `phonenum.py`
-  - [ ] `trackdata.py`
-  - [ ] `__init__.py` exports
-- [ ] `filehandlers/`: rename all functions, variables, and module-level names to `snake_case`
-  - [ ] `plaintext.py`
-  - [ ] `pdf.py`
-  - [ ] `docx.py`
-  - [ ] `xlsx.py`
-  - [ ] `xls.py`
-  - [ ] `_sharedfuncs.py`
-  - [ ] `__init__.py` exports
-- [ ] `outputhandlers/`: rename all functions, variables, and module-level names to `snake_case`
-  - [ ] `csv.py`
-  - [ ] `json.py`
-  - [ ] `text.py`
-  - [ ] `__init__.py` exports
-- [ ] `console.py`: verify already snake_case (it was rewritten in a prior commit); fix any remaining violations
-- [ ] `getencoding.py`, `getmime.py`: rename as needed
-- [ ] `globalfuncs.py`: rename all functions and variables to `snake_case`
-- [ ] `globalvars.py`: rename variables to `snake_case`; constants to `UPPER_CASE`
+- [x] Run `ruff check --select N src/` to enumerate all naming violations
+- [x] `datahandlers/`: rename all functions, variables, and module-level names to `snake_case`
+  - [x] `pan.py`
+  - [x] `email.py`
+  - [x] `phonenum.py`
+  - [x] `trackdata.py`
+  - [x] `__init__.py` exports
+- [x] `filehandlers/`: rename all functions, variables, and module-level names to `snake_case`
+  - [x] `plaintext.py`
+  - [x] `pdf.py`
+  - [x] `docx.py`
+  - [x] `xlsx.py`
+  - [x] `xls.py`
+  - [x] `_sharedfuncs.py`
+  - [x] `__init__.py` exports
+- [x] `outputhandlers/`: rename all functions, variables, and module-level names to `snake_case`
+  - [x] `csv.py`
+  - [x] `json.py`
+  - [x] `text.py`
+  - [x] `__init__.py` exports
+- [x] `console.py`: verify already snake_case (it was rewritten in a prior commit); fix any remaining violations
+- [x] `getencoding.py`, `getmime.py`: rename as needed
+- [x] `globalfuncs.py`: rename all functions and variables to `snake_case`
+- [x] `globalvars.py`: rename variables to `snake_case`; constants to `UPPER_CASE`
 
 ### Linting — enable `N` ruleset and reach zero violations
 
-- [ ] Add `"N"` to `ruff` `select` list in `pyproject.toml`
-- [ ] Run `ruff check src/ --select N` and fix all violations
-- [ ] Run full `ruff check src/` (all enabled rulesets) — zero violations
-- [ ] Run `mypy src/` — zero errors (or confirm existing suppressions are documented)
-- [ ] Confirm CI passes (`ruff` + `mypy` gates both green)
+- [x] Add `"N"` to `ruff` `select` list in `pyproject.toml`
+- [x] Run `ruff check src/ --select N` and fix all violations
+- [x] Run full `ruff check src/` (all enabled rulesets) — zero violations
+- [x] Run `mypy src/` — zero errors (or confirm existing suppressions are documented)
+- [x] Confirm CI passes (`ruff` + `mypy` gates both green)
 
 ### Extract `run_scan()` — make the core testable
 
-- [ ] Create `src/piidigger/run.py` with a `run_scan(config: Config) -> int` function
-  - [ ] Move the scan orchestration body out of the Click `main()` into `run_scan()`
-  - [ ] `main()` in `piidigger.py` becomes: load config → call `run_scan(config)` → `sys.exit(code)`
-  - [ ] `run_scan` must be importable and callable in a test without invoking Click
+- [x] Create `src/piidigger/run.py` with a `run_scan(config: Config) -> int` function
+  - [x] Move the scan orchestration body out of the Click `main()` into `run_scan()`
+  - [x] `main()` in `piidigger.py` becomes: load config → call `run_scan(config)` → `sys.exit(code)`
+  - [x] `run_scan` must be importable and callable in a test without invoking Click
 
 ### Fix `errorCodes` bugs
 
-- [ ] `classes.py:66`: replace `globalfuncs.errorCodes['invalidConfig']` with `globalvars.errorCodes['invalidConfig']`
-- [ ] `classes.py:110`: same fix
-- [ ] `piidigger.py:288`: replace non-existent key `errorCodes['unknown']` with `errorCodes['unknownError']`
-- [ ] Add a test that exercises both invalid-config paths and verifies clean exit (no `AttributeError`)
+- [x] `classes.py:66`: replace `globalfuncs.errorCodes['invalidConfig']` with `globalvars.errorCodes['invalidConfig']` — **moot: `classes.py` deleted in Phase 4**
+- [x] `classes.py:110`: same fix — **moot: `classes.py` deleted in Phase 4**
+- [x] `piidigger.py:288`: replace non-existent key `errorCodes['unknown']` with `errorCodes['unknownError']` — **moot: old `src/piidigger/piidigger.py` deleted in Phase 4**
+- [x] Add a test that exercises both invalid-config paths and verifies clean exit (no `AttributeError`) — **moot: code path no longer exists; `Config.from_toml()` raises `ValueError` with clear message instead**
 
 ### Scaffold new module stubs
 
 Create empty-but-importable stubs (docstring + `__all__ = []` or equivalent) so import paths are established before Phase 1 fills them in:
 
-- [ ] `src/piidigger/cli/__init__.py`
-- [ ] `src/piidigger/cli/main.py` (empty `click.group()`)
-- [ ] `src/piidigger/cli/commands/__init__.py`
-- [ ] `src/piidigger/cli/commands/scan.py`
-- [ ] `src/piidigger/cli/commands/config.py`
-- [ ] `src/piidigger/models/__init__.py`
-- [ ] `src/piidigger/models/config.py`
-- [ ] `src/piidigger/models/tasks.py`
-- [ ] `src/piidigger/models/payloads.py`
-- [ ] `src/piidigger/models/results.py`
-- [ ] `src/piidigger/protocols.py`
-- [ ] `src/piidigger/orchestration/__init__.py`
-- [ ] `src/piidigger/orchestration/context.py`
-- [ ] `src/piidigger/orchestration/worker.py`
-- [ ] `src/piidigger/orchestration/coordinator.py`
-- [ ] `src/piidigger/orchestration/logging_setup.py`
-- [ ] `src/piidigger/orchestration/progress.py`
-- [ ] `src/piidigger/orchestration/sources.py`
-- [ ] `src/piidigger/run.py`
+- [x] `src/piidigger/cli/__init__.py`
+- [x] `src/piidigger/cli/main.py` (empty `click.group()`)
+- [x] `src/piidigger/cli/commands/__init__.py`
+- [x] `src/piidigger/cli/commands/scan.py`
+- [x] `src/piidigger/cli/commands/config.py`
+- [x] `src/piidigger/models/__init__.py`
+- [x] `src/piidigger/models/config.py`
+- [x] `src/piidigger/models/tasks.py`
+- [x] `src/piidigger/models/payloads.py`
+- [x] `src/piidigger/models/results.py`
+- [x] `src/piidigger/protocols.py`
+- [x] `src/piidigger/orchestration/__init__.py`
+- [x] `src/piidigger/orchestration/context.py`
+- [x] `src/piidigger/orchestration/worker/` (refactored into package: `_loop.py`, `_enum_dir.py`, `_scan_file.py`)
+- [x] `src/piidigger/orchestration/coordinator.py`
+- [x] `src/piidigger/orchestration/logging_setup.py`
+- [x] `src/piidigger/orchestration/progress.py`
+- [x] `src/piidigger/orchestration/sources.py`
+- [x] `src/piidigger/run.py`
 
 ### Phase 0 — Exit Criteria
 
-- [ ] `ruff check src/` — zero violations (all rulesets including `N`)
-- [ ] `mypy src/` — zero errors
-- [ ] Existing test suite passes unchanged
-- [ ] `run_scan(config)` is callable in a test without Click
-- [ ] All module stubs importable without error
+- [x] `ruff check src/` — zero violations (all rulesets including `N`)
+- [x] `mypy src/` — zero errors
+- [x] Existing test suite passes unchanged
+- [x] `run_scan(config)` is callable in a test without Click
+- [x] All module stubs importable without error
 
 ---
 
@@ -254,7 +254,7 @@ Create empty-but-importable stubs (docstring + `__all__ = []` or equivalent) so 
   - [x] `include_exts: list[str]`
   - [x] `include_mime: list[str]`
   - [x] `data_handlers: list[str]`
-  - [x] `max_workers: int` (defaults to `cpu_count()`)
+  - [x] `performance: Literal["fast", "balanced", "slow"]` (replaces `max_workers`; removed in Phase 4 cleanup)
   - [x] `default_timeout_seconds: int` (default: 30)
   - [x] `local_files_only: bool`
   - [x] `log_file: Path`
@@ -324,14 +324,14 @@ Create empty-but-importable stubs (docstring + `__all__ = []` or equivalent) so 
 
 ### CLI — second pass (pre-2.0 launch, deferred from Wave 3)
 
-- [ ] Add `piidigger inspect` subcommand group (`cli/commands/inspect.py`); register it on the root group in `cli/main.py`
-- [ ] `piidigger inspect mime <file>` — detect and print the MIME type PIIDigger would assign to a given file (wraps `getmime.get_mime()`)
-- [ ] `piidigger inspect encoding <file>` — detect and print the encoding PIIDigger would use to read a given file (wraps `getencoding.detect_encoding()`)
-- [ ] `piidigger inspect handlers` — list available data handlers; moved from `scan --list-datahandlers`
-- [ ] `piidigger inspect filetypes` — list supported extensions and MIME types; moved from `scan --list-filetypes`
-- [ ] `piidigger inspect cpu` — print logical CPU count; moved from `scan --cpu-count`
-- [ ] Remove `--list-datahandlers`, `--list-filetypes`, and `--cpu-count` from `scan` after `inspect` is in place
-- [ ] Move `--version` / `-v` from `piidigger scan` to the root `piidigger` group (`cli/main.py`); remove `click.version_option` from `scan.py`
+- [x] Add `piidigger inspect` subcommand group (`cli/commands/inspect.py`); register it on the root group in `cli/main.py`
+- [x] `piidigger inspect mime <file>` — detect and print the MIME type PIIDigger would assign to a given file (wraps `getmime.get_mime()`)
+- [x] `piidigger inspect encoding <file>` — detect and print the encoding PIIDigger would use to read a given file (wraps `getencoding.detect_encoding()`)
+- [x] `piidigger inspect datatypes` — list available data handlers; moved from `scan --list-datahandlers` *(implemented as `datatypes`, not `handlers`, to match the internal registry name)*
+- [x] `piidigger inspect filetypes` — list supported extensions and MIME types; moved from `scan --list-filetypes`
+- [x] `piidigger inspect cpu` — print physical and logical CPU counts; moved from `scan --cpu-count`
+- [x] Remove `--list-datahandlers`, `--list-filetypes`, and `--cpu-count` from `scan` after `inspect` is in place
+- [x] Move `--version` / `-v` from `piidigger scan` to the root `piidigger` group (`cli/main.py`); remove `click.version_option` from `scan.py`
 
 ### CLI — performance preset (pre-2.0 launch, deferred from Wave 3)
 
@@ -345,12 +345,12 @@ Preset → worker count formula:
 | `balanced` | `max(1, ceil(physical_cores × 0.75))` | Default — leaves ~25% of physical cores free for other work |
 | `fast` | `os.cpu_count()` (logical cores) | Full throughput; HT benefit is real for PIIDigger's mixed I/O+CPU profile |
 
-- [ ] Add `psutil` to project dependencies (`pyproject.toml`)
-- [ ] Add `performance: Literal["fast", "balanced", "slow"] = "balanced"` field to `Config`; include in `to_toml_str()` and `from_toml()` round-trip
-- [ ] Implement `_resolve_workers(performance: str, physical_cores: int, logical_cores: int) -> int` in `run.py`; `psutil.cpu_count(logical=False)` provides physical cores with `os.cpu_count()` as logical fallback
-- [ ] Replace `--max-workers` as the primary CLI option with `--performance fast|balanced|slow` (default `balanced`) on `piidigger scan`
-- [ ] Retain `--max-workers N` as a hidden expert override; when provided it takes precedence over `--performance`
-- [ ] Unit tests for `_resolve_workers()`: each preset on a range of physical/logical core counts, including the 2-core edge case
+- [x] Add `psutil` to project dependencies (`pyproject.toml`)
+- [x] Add `performance: Literal["fast", "balanced", "slow"] = "balanced"` field to `Config`; included in `generate_toml_template()` and `from_toml()` round-trip
+- [x] Implement `_resolve_workers(performance: str, physical_cores: int, logical_cores: int) -> int` in `run.py`; `psutil.cpu_count(logical=False)` provides physical cores with `os.cpu_count()` as logical fallback
+- [x] `--performance` CLI flag on `piidigger scan` — **omitted by design**: performance is a config-only setting; no CLI worker-count override of any kind (decision made during Phase 4 cleanup)
+- [x] `--max-workers N` hidden expert override — **intentionally removed**: `max_workers` field deleted from `Config` and all CLI surfaces; performance profiles are the sole control
+- [x] Unit tests for `_resolve_workers()`: each preset on a range of physical/logical core counts, including the 2-core edge case (`test_run.py`)
 
 ### Phase 3 — Tests
 
