@@ -5,12 +5,16 @@ import multiprocessing as mp
 import os
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from piidigger.models.tasks import SHUTDOWN, ShutdownSentinel, Task, TaskResult, TaskStarted, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger, setup_warning_capture
+from piidigger.orchestration.secure_delete import secure_delete
+from piidigger.orchestration.worker._enum_archive import handle_enum_archive_members
 from piidigger.orchestration.worker._enum_dir import handle_enum_dir
+from piidigger.orchestration.worker._scan_archive_member import handle_scan_archive_member
 from piidigger.orchestration.worker._scan_file import handle_scan_file
 
 type _HandlerFn = Callable[[Task, WorkerContext, logging.Logger], TaskResult]
@@ -20,7 +24,7 @@ type _HandlerFn = Callable[[Task, WorkerContext, logging.Logger], TaskResult]
 MAX_RETRIES: int = 3
 
 
-def _handle_noop(task: Task, _ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
+def _handle_noop(task: Task, _ctx: WorkerContext, logger: logging.Logger) -> TaskResult:  # noqa: ARG001
     """Return an ok result; used only for integration testing.
 
     Pass {"delay_seconds": N} in the task payload to simulate a slow task for
@@ -44,17 +48,26 @@ DISPATCH: dict[TaskType, _HandlerFn] = {
     TaskType.NOOP: _handle_noop,
     TaskType.ENUM_DIR: handle_enum_dir,
     TaskType.SCAN_FILE: handle_scan_file,
+    TaskType.ENUM_ARCHIVE_MEMBERS: handle_enum_archive_members,
+    TaskType.SCAN_ARCHIVE_MEMBER: handle_scan_archive_member,
 }
 
 
-def _cleanup_temp_workspace() -> None:
-    """Remove per-task temp files after each task completes.
+def _cleanup_temp_workspace(temp_base: Path, task_id: str) -> None:
+    """Securely delete per-task temp files created by ArchiveMemberItem.materialize().
 
-    No-op in Phase 1.  Phase 5 (archive support) will populate this:
-    each task that calls ScannableItem.materialize() creates a temp
-    workspace directory here.  Cleanup uses the secure-deletion library
-    selected in Open Decision 6 (overwrite-then-delete, not os.unlink).
+    Creates no-ops gracefully when the task never called materialize() (the
+    common case for non-archive tasks and archive tasks that used open_bytes()).
     """
+    task_temp = temp_base / task_id
+    if not task_temp.exists():
+        return
+    for path in task_temp.iterdir():
+        secure_delete(path)
+    try:
+        task_temp.rmdir()
+    except OSError:
+        pass
 
 
 def _dispatch(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
@@ -107,7 +120,7 @@ def worker_loop(ctx: WorkerContext) -> None:
             try:
                 result = _dispatch(task, ctx, logger)
             finally:
-                _cleanup_temp_workspace()
+                _cleanup_temp_workspace(ctx.temp_base, task.task_id)
             ctx.result_queue.put(result)
     except KeyboardInterrupt:
         logger.debug("worker interrupted; exiting after current task")

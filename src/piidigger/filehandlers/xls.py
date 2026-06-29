@@ -26,14 +26,20 @@ handles = HANDLES
 class XlsHandler:
     """FileHandler for legacy XLS files.
 
-    Uses source.materialize() to get a real filesystem path because xlrd's
-    open_workbook() requires a filename string.
-    For FilesystemItem this is a no-op (returns the path itself).
+    Preferred path (archive members): source.open_bytes() returns bytes which
+    are passed directly to xlrd via the file_contents parameter — no temp file.
+
+    Fallback path (on-disk files): source.open_bytes() returns None, so
+    source.materialize() is called to obtain a filesystem path.  For
+    FilesystemItem materialize() is a no-op (returns the path itself).
     """
 
     def read(self, source) -> Iterator[str]:  # source: ScannableItem
-        path = source.materialize()
-        book = xlrd.open_workbook(str(path), on_demand=True, formatting_info=False)
+        data = source.open_bytes()
+        if data is not None:
+            book = xlrd.open_workbook(file_contents=data, on_demand=True, formatting_info=False)
+        else:
+            book = xlrd.open_workbook(str(source.materialize()), on_demand=True, formatting_info=False)
         try:
             for sheet_name in book.sheet_names():
                 active_sheet = book.sheet_by_name(sheet_name)

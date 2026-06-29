@@ -25,9 +25,17 @@ from piidigger.run import run_scan
     is_flag=True,
     help="Ignore any config file and use built-in defaults.",
 )
+@click.option(
+    "--no-archives",
+    "disable_archives",
+    is_flag=True,
+    default=False,
+    help="Skip all archive files (ZIP etc.) for this run, regardless of the config file setting.",
+)
 def scan(
     config_file: str | None,
     use_default: bool,
+    disable_archives: bool,
 ) -> None:
     """Scan directories for PII."""
     if use_default:
@@ -54,5 +62,8 @@ def scan(
                 sys.exit(1)
         else:
             config = Config.default()
+
+    if disable_archives:
+        config = config.model_copy(update={"archives": config.archives.model_copy(update={"enabled": False})})
 
     sys.exit(run_scan(config))

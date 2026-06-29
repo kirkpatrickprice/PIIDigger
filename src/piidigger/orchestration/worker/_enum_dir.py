@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from piidigger.getmime import get_mime, test_magic
+from piidigger.models.config import Config
 from piidigger.models.payloads import EnumDirPayload
 from piidigger.models.tasks import Task, TaskResult, TaskType
 from piidigger.orchestration.context import WorkerContext
@@ -33,6 +34,14 @@ def _is_excluded(path: Path, exclude_dirs: list[str]) -> bool:
             if resolved == norm or resolved.startswith(norm + os.sep):
                 return True
     return False
+
+
+def _is_archive_format(ext: str, config: Config) -> bool:
+    """Return True when ext matches a configured archive format and archives are enabled."""
+    if not config.archives.enabled:
+        return False
+    ext_bare = ext.lstrip(".").lower()
+    return ext_bare in {fmt.lower().lstrip(".") for fmt in config.archives.formats}
 
 
 def _is_cloud_placeholder(path: Path) -> bool:
@@ -117,6 +126,27 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
                     continue
                 ext = entry.suffix
                 mime: str | None = get_mime(str(entry)) if test_magic() else None
+
+                # Archive files are enumerated separately — emit before the regular
+                # handler check so they are not silently skipped (no FileHandler
+                # is registered for .zip).
+                if _is_archive_format(ext, config):
+                    new_tasks.append(
+                        {
+                            "task_type": TaskType.ENUM_ARCHIVE_MEMBERS,
+                            "payload": {
+                                "archive_path": str(entry),
+                                "depth": 0,
+                            },
+                            "timeout_seconds": config.default_timeout_seconds,
+                        }
+                    )
+                    files_found += 1
+                    try:
+                        bytes_found += entry.stat().st_size
+                    except OSError:
+                        pass
+                    continue
 
                 # Filter by include_exts / include_mime
                 include_all_exts = "all" in config.include_exts

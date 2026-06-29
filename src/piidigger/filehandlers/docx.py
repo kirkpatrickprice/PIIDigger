@@ -2,6 +2,7 @@
 
 import warnings
 from collections.abc import Iterator
+from io import BytesIO
 from zipfile import BadZipFile
 
 from docx2python import docx2python
@@ -27,17 +28,21 @@ handles = HANDLES
 class DocxHandler:
     """FileHandler for DOCX files.
 
-    Uses source.materialize() to get a real filesystem path because
-    docx2python does not accept a stream — it requires an openable file path.
-    For FilesystemItem this is a no-op (returns the path itself).
+    Preferred path (archive members): source.open_bytes() returns bytes which
+    are wrapped in BytesIO and passed directly to docx2python — no temp file.
+
+    Fallback path (on-disk files): source.open_bytes() returns None, so
+    source.materialize() is called to obtain a filesystem path.  For
+    FilesystemItem materialize() is a no-op (returns the path itself).
     """
 
     def read(self, source) -> Iterator[str]:  # source: ScannableItem
-        path = source.materialize()
+        data = source.open_bytes()
+        docx_arg: BytesIO | str = BytesIO(data) if data is not None else str(source.materialize())
         chunk_handler: ContentHandler = ContentHandler(max_content_size=MAX_CHUNK_SIZE * DEFAULT_CHUNK_COUNT)
 
         try:
-            docx_content = docx2python(str(path))
+            docx_content = docx2python(docx_arg)
             # .document is a lazy property that opens the ZIP — catch corruption here
             document_lines = list(iter_paragraphs(docx_content.document))
         except BadZipFile:

@@ -254,11 +254,22 @@ class ProgressDisplay:
         if self._is_tty and live is not None:
             live.stop()
 
-        if not self._is_tty:
-            parts = []
-            for k, v in self._counters.items():
-                if v <= 0:
-                    continue
-                parts.append(f"{k}={_fmt_bytes(v)}" if "bytes" in k else f"{k}={v:,}")
-            summary = "Scan complete. " + ("  ".join(parts) if parts else "No results.")
+        parts = []
+        for k, v in self._counters.items():
+            if v <= 0:
+                continue
+            parts.append(f"{k}={_fmt_bytes(v)}" if "bytes" in k else f"{k}={v:,}")
+
+        # Archive diagnostic counters are not in _COUNTER_KEYS (they don't drive
+        # progress bars) but are accumulated via update() into _counters with a
+        # default-0 fallback.  Surface them in the summary when non-zero.
+        for arc_key in ("archive_members_skipped", "archive_errors"):
+            v = self._counters.get(arc_key, 0)
+            if v > 0:
+                parts.append(f"{arc_key}={v:,}")
+
+        summary = "Scan complete. " + ("  ".join(parts) if parts else "No results.")
+        if self._is_tty:
+            self._console.print(summary)
+        else:
             print(summary, file=sys.stdout)  # noqa: T201 — intentional user-facing output

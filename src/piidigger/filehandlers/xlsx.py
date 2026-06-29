@@ -1,5 +1,6 @@
 import warnings
 from collections.abc import Iterator
+from io import BytesIO
 
 import openpyxl
 from openpyxl.cell.cell import MergedCell
@@ -35,14 +36,22 @@ handles = HANDLES
 class XlsxHandler:
     """FileHandler for XLSX/XLSM/XLTM files.
 
-    Uses source.materialize() to get a real filesystem path because openpyxl's
-    load_workbook() does not reliably accept seekable streams in read_only mode.
-    For FilesystemItem this is a no-op (returns the path itself).
+    Preferred path (archive members): source.open_bytes() returns bytes which
+    are wrapped in BytesIO and passed to load_workbook with read_only=False.
+    Members are bounded by max_member_uncompressed_size_mb so full buffering
+    is safe.
+
+    Fallback path (on-disk files): source.open_bytes() returns None, so
+    source.materialize() is called for a filesystem path and read_only=True
+    is used for memory-efficient streaming of potentially large files.
     """
 
     def read(self, source) -> Iterator[str]:  # source: ScannableItem
-        path = source.materialize()
-        book = openpyxl.load_workbook(filename=str(path), read_only=True, data_only=True)
+        data = source.open_bytes()
+        if data is not None:
+            book = openpyxl.load_workbook(filename=BytesIO(data), read_only=False, data_only=True)
+        else:
+            book = openpyxl.load_workbook(filename=str(source.materialize()), read_only=True, data_only=True)
         try:
             for sheet_name in book.sheetnames:
                 active_sheet = book[sheet_name]

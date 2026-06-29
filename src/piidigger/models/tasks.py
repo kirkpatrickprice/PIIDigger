@@ -14,9 +14,8 @@ class TaskType(StrEnum):
     ENUM_DIR = "enum_dir"
     SCAN_FILE = "scan_file"
     NOOP = "noop"  # kept for integration tests; pass {"delay_seconds": N} in payload to simulate slow tasks
-    # Archive types arrive with ZIP (Phase 5) — no orchestration change required:
-    # ENUM_ARCHIVE_MEMBERS = "enum_archive_members"
-    # SCAN_ARCHIVE_MEMBER = "scan_archive_member"
+    ENUM_ARCHIVE_MEMBERS = "enum_archive_members"
+    SCAN_ARCHIVE_MEMBER = "scan_archive_member"
 
 
 class Task(PiiDiggerModel):

@@ -62,6 +62,18 @@ _LINUX_EXCLUDE_DIRS: list[str] = [
     "/wsl",
 ]
 
+# Defaults — single source of truth shared by model field definitions and
+# generate_toml_template().  Changing a value here updates both automatically.
+_DEFAULT_PERFORMANCE: Literal["balanced"] = "balanced"
+_DEFAULT_TIMEOUT_SECONDS: int = 30
+_DEFAULT_LOG_FILE: str = "logs/piidigger.log"
+_DEFAULT_LOG_LEVEL: str = "INFO"
+_DEFAULT_RESULTS_PATH: str = "piidigger-results"
+_ARCHIVE_MAX_DEPTH: int = 1
+_ARCHIVE_MAX_MEMBERS: int = 10_000
+_ARCHIVE_MAX_MEMBER_SIZE_MB: int = 64
+_ARCHIVE_MAX_TOTAL_SIZE_MB: int = 1024
+
 _KNOWN_CONFIG_KEYS: tuple[str, ...] = (
     "start_dirs",
     "exclude_dirs",
@@ -76,6 +88,12 @@ _KNOWN_CONFIG_KEYS: tuple[str, ...] = (
     "log_level",
     "results.path",
     "results.formats",
+    "archives.enabled",
+    "archives.formats",
+    "archives.max_depth",
+    "archives.max_members",
+    "archives.max_member_uncompressed_size_mb",
+    "archives.max_total_uncompressed_size_mb",
 )
 
 
@@ -157,12 +175,12 @@ def generate_toml_template() -> str:
         'include_exts = ["all"]',
         'include_mime = ["all"]',
         'data_handlers = ["all"]',
-        'performance = "balanced"',
-        "default_timeout_seconds = 30",
+        f'performance = "{_DEFAULT_PERFORMANCE}"',
+        f"default_timeout_seconds = {_DEFAULT_TIMEOUT_SECONDS}",
         "local_files_only = true",
         "admin_check = true",
-        'log_file = "logs/piidigger.log"',
-        'log_level = "INFO"',
+        f'log_file = "{_DEFAULT_LOG_FILE}"',
+        f'log_level = "{_DEFAULT_LOG_LEVEL}"',
         "",
         "[start_dirs]",
         f"windows = {_toml_list(_WINDOWS_START_DIRS)}",
@@ -175,8 +193,16 @@ def generate_toml_template() -> str:
         f"linux = {_toml_list(_LINUX_EXCLUDE_DIRS)}",
         "",
         "[results]",
-        'path = "piidigger-results"',
+        f'path = "{_DEFAULT_RESULTS_PATH}"',
         'formats = ["all"]',
+        "",
+        "[archives]",
+        "enabled = true",
+        'formats = ["zip"]',
+        f"max_depth = {_ARCHIVE_MAX_DEPTH}",
+        f"max_members = {_ARCHIVE_MAX_MEMBERS}",
+        f"max_member_uncompressed_size_mb = {_ARCHIVE_MAX_MEMBER_SIZE_MB}",
+        f"max_total_uncompressed_size_mb = {_ARCHIVE_MAX_TOTAL_SIZE_MB}",
     ]
     return "\n".join(lines) + "\n"
 
@@ -184,6 +210,22 @@ def generate_toml_template() -> str:
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
+
+
+class ArchiveConfig(PiiDiggerModel):
+    """Archive scanning configuration.
+
+    Controls ZIP (and future format) scanning behaviour.  Defaults permit
+    ZIP scanning with conservative safety limits.  Set enabled=False to skip
+    all archive files without any other change.
+    """
+
+    enabled: bool = True
+    formats: list[str] = Field(default_factory=lambda: ["zip"])
+    max_depth: int = Field(default=_ARCHIVE_MAX_DEPTH, ge=0, le=3)
+    max_members: int = Field(default=_ARCHIVE_MAX_MEMBERS, ge=1)
+    max_member_uncompressed_size_mb: int = Field(default=_ARCHIVE_MAX_MEMBER_SIZE_MB, ge=1)
+    max_total_uncompressed_size_mb: int = Field(default=_ARCHIVE_MAX_TOTAL_SIZE_MB, ge=1)
 
 
 class ResultsConfig(PiiDiggerModel):
@@ -195,7 +237,7 @@ class ResultsConfig(PiiDiggerModel):
     Filenames are generated automatically: piidigger-<timestamp>.<ext>
     """
 
-    path: Path = Path("piidigger-results")
+    path: Path = Path(_DEFAULT_RESULTS_PATH)
     formats: list[str] = Field(default_factory=lambda: ["all"])
 
 
@@ -214,13 +256,14 @@ class Config(PiiDiggerModel):
     include_mime: list[str] = Field(default_factory=lambda: ["all"])
     # ["all"] means all data handlers in datahandlers.HANDLER_REGISTRY
     data_handlers: list[str] = Field(default_factory=lambda: ["all"])
-    performance: Literal["fast", "balanced", "slow"] = "balanced"
-    default_timeout_seconds: int = Field(default=30, ge=1, le=600)
+    performance: Literal["fast", "balanced", "slow"] = _DEFAULT_PERFORMANCE
+    default_timeout_seconds: int = Field(default=_DEFAULT_TIMEOUT_SECONDS, ge=1, le=600)
     local_files_only: bool = True
     admin_check: bool = True
-    log_file: Path = Path("logs/piidigger.log")
-    log_level: str = "INFO"
+    log_file: Path = Path(_DEFAULT_LOG_FILE)
+    log_level: str = _DEFAULT_LOG_LEVEL
     results: ResultsConfig = Field(default_factory=ResultsConfig)
+    archives: ArchiveConfig = Field(default_factory=ArchiveConfig)
 
     @field_validator("data_handlers")
     @classmethod

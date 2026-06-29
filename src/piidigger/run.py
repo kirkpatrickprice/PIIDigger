@@ -5,10 +5,13 @@ import math
 import multiprocessing as mp
 import os
 import re
+import shutil
 import socket
 import sys
+import tempfile
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import psutil
@@ -182,12 +185,20 @@ def run_scan(config: Config) -> int:
         listener.stop()
         return 1
 
+    # Create a PIIDigger-owned temp root and exclude it from directory scanning
+    # so ENUM_DIR workers never attempt to scan extracted archive members.
+    temp_base: Path = Path(tempfile.mkdtemp(prefix="piidigger_"))
+    runtime_config = config.model_copy(
+        update={"exclude_dirs": [*config.exclude_dirs, str(temp_base)]}
+    )
+
     ctx = WorkerContext(
-        config=config,
+        config=runtime_config,
         task_queue=task_queue,
         result_queue=result_queue,
         log_queue=log_queue,
         stop_event=stop_event,
+        temp_base=temp_base,
     )
     logical_cores = os.cpu_count() or 1
     physical_cores = psutil.cpu_count(logical=False) or logical_cores
@@ -200,4 +211,5 @@ def run_scan(config: Config) -> int:
 
     run_coordinator(ctx, workers, listener, sinks, progress)
 
+    shutil.rmtree(temp_base, ignore_errors=True)
     return 0
