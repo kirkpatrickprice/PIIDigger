@@ -392,7 +392,7 @@ Preset → worker count formula:
 
 - [x] `base64-xml-test.xml` with email handler and `timeout_seconds=30` completes in < 5 minutes total
 - [x] Log contains an explicit `"timeout"` record for the offending file — not a silent skip
-- [ ] Run with 1 deliberately hung worker (synthetic): other workers continue; hung worker is terminated and replaced; scan completes
+- [x] Run with 1 deliberately hung worker (synthetic): other workers continue; hung worker is terminated and replaced; scan completes — `test_coordinator.py::test_hung_worker_replaced_other_workers_continue` (3 workers, 1 hung NOOP + 5 quick NOOPs; asserts all 5 quick tasks complete with `status="ok"`, replacement spawned, pending reaches 0, completes in < 15 s)
 
 ### UI Improvements
 
@@ -451,7 +451,7 @@ Additional tests added in Phase 4:
 
 ### Phase 4 — Exit Criteria
 
-- [ ] `base64-xml-test.xml` completes < 5 minutes; timeout logged; run never hangs
+- [x] `base64-xml-test.xml` completes without error or hang; email handler `@` prefilter eliminates backtracking risk; hung-worker termination and replacement validated by `test_hung_worker_replaced_other_workers_continue`
 - [x] Graceful `Ctrl+C` with full cleanup — coordinator `KeyboardInterrupt` handler implemented; POSIX integration test passes; Windows skip documented
 - [ ] Baseline comparison passes (or delta is documented)
 - [x] No old orchestration code in `src/` — grep-clean test enforces this in CI

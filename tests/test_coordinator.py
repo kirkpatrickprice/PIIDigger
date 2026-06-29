@@ -329,3 +329,105 @@ def test_deadline_detection_terminates_hung_worker(tmp_path: Path) -> None:
     assert deadline_fired, "deadline detection never fired for the slow NOOP task"
     assert pending == 0, f"pending did not reach 0; remaining={pending}"
     assert time.monotonic() - test_start < TEST_LIMIT
+
+
+# ---------------------------------------------------------------------------
+# Integration: hung worker replaced while other workers continue
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_hung_worker_replaced_other_workers_continue(tmp_path: Path) -> None:
+    """3 workers, 1 hung task + 5 quick tasks: the hung worker is terminated and
+    replaced while the other workers process the quick tasks uninterrupted.
+
+    Asserts:
+    - All 5 quick NOOP tasks complete with status='ok' (other workers kept running).
+    - The deadline fires, the hung worker is terminated, and a replacement is spawned.
+    - pending reaches 0 (scan completes despite the hung worker).
+    - Whole test finishes well within the 15-second safety limit.
+
+    Uses the same coordinator-like inline loop as test_deadline_detection_terminates_hung_worker
+    because run_coordinator() seeds tasks only from start_dirs; pre-injecting arbitrary
+    task types requires driving the queue directly.
+    """
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    log_queue: mp.Queue[object] = mp.Queue()
+    stop_event = mp.Event()
+
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [])
+
+    # One task that will hang (120 s delay, 2 s timeout → deadline fires at ~4 s).
+    hung_task = Task(task_type=TaskType.NOOP, payload={"delay_seconds": 120}, timeout_seconds=2)
+    # Five tasks that complete normally — their ok results prove the other workers
+    # kept running while the hung worker was being detected and replaced.
+    quick_tasks = [Task(task_type=TaskType.NOOP) for _ in range(5)]
+    all_tasks = [hung_task, *quick_tasks]
+
+    for t in all_tasks:
+        task_queue.put(t)
+
+    workers = start_worker_pool(ctx, 3)
+    listener = start_listener(log_queue, tmp_path / "hung.log", "DEBUG")
+    progress = _non_tty_progress()
+
+    pending = len(all_tasks)
+    _pending_tasks: dict[str, Task] = {t.task_id: t for t in all_tasks}
+    _in_flight: dict[str, tuple[int, float, int]] = {}
+    _pid_to_proc: dict[int, mp.Process] = {p.pid: p for p in workers if p.pid is not None}
+
+    deadline_fired = False
+    replacement_spawned = False
+    ok_completed = 0
+    test_start = time.monotonic()
+    TEST_LIMIT = 15.0
+
+    while pending > 0 and time.monotonic() - test_start < TEST_LIMIT:
+        try:
+            raw = result_queue.get(timeout=HEARTBEAT_CHECK_INTERVAL)
+        except queue.Empty:
+            now = time.monotonic()
+            for task_id, (pid, dispatch_time, timeout_secs) in list(_in_flight.items()):
+                if now - dispatch_time > 2 * timeout_secs:
+                    deadline_fired = True
+                    _in_flight.pop(task_id)
+                    _pending_tasks.pop(task_id, None)
+                    old_proc = _pid_to_proc.pop(pid, None)
+                    if old_proc is not None:
+                        old_proc.terminate()
+                        old_proc.join(timeout=2.0)
+                        if old_proc in workers:
+                            workers.remove(old_proc)
+                    new_proc = mp.Process(target=worker_loop, args=(ctx,))
+                    new_proc.start()
+                    replacement_spawned = True
+                    if new_proc.pid is not None:
+                        _pid_to_proc[new_proc.pid] = new_proc
+                    workers.append(new_proc)
+                    pending -= 1
+            continue
+
+        if isinstance(raw, TaskStarted):
+            task = _pending_tasks.get(raw.task_id)
+            if task is not None:
+                _in_flight[raw.task_id] = (raw.worker_pid, time.monotonic(), task.timeout_seconds)
+            continue
+
+        if isinstance(raw, TaskResult):
+            _in_flight.pop(raw.task_id, None)
+            _pending_tasks.pop(raw.task_id, None)
+            if raw.status == "ok":
+                ok_completed += 1
+            pending -= 1
+
+    broadcast_shutdown(task_queue, len(workers))
+    join_workers(workers, timeout=5.0)
+    stop_listener(listener)
+    progress.stop()
+
+    assert deadline_fired, "deadline detection never fired for the hung task"
+    assert replacement_spawned, "no replacement worker was spawned after the hung worker was terminated"
+    assert ok_completed == 5, f"expected 5 quick tasks to complete with ok, got {ok_completed}"
+    assert pending == 0, f"pending did not reach 0; remaining={pending}"
+    assert time.monotonic() - test_start < TEST_LIMIT
