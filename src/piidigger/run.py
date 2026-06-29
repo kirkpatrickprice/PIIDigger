@@ -26,6 +26,16 @@ _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 _ADMIN_PROMPT_TIMEOUT: int = 10
 
 
+def _is_admin() -> bool:
+    """Return True if the current process has administrator/root privileges."""
+    import ctypes
+
+    try:
+        return os.geteuid() == 0
+    except AttributeError:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0  # type: ignore[attr-defined]
+
+
 def _prompt_admin_continue(timeout: int = _ADMIN_PROMPT_TIMEOUT) -> bool:
     """Prompt the user to continue when PIIDigger is not running as administrator.
 
@@ -64,9 +74,7 @@ def _check_admin(config: Config, logger: logging.Logger) -> bool:
     is True and the process is not elevated, the user is prompted to confirm
     before scanning proceeds.  Returns True to proceed, False to abort.
     """
-    from piidigger.globalfuncs import is_admin  # local: avoids circular import
-
-    admin = is_admin()
+    admin = _is_admin()
     logger.info("admin check: running as %s", "administrator" if admin else "standard user")
     if admin:
         return True

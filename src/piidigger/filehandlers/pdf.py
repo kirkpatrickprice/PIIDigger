@@ -7,8 +7,8 @@ from pypdf.errors import (
     PdfReadError,
 )
 
+from piidigger.filehandlers._constants import DEFAULT_CHUNK_COUNT, MAX_CHUNK_SIZE
 from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.globalvars import DEFAULT_CHUNK_COUNT, MAX_CHUNK_SIZE
 
 HANDLES = {
     "ext": [

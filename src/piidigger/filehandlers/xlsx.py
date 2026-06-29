@@ -4,8 +4,13 @@ from collections.abc import Iterator
 import openpyxl
 from openpyxl.cell.cell import MergedCell
 
+from piidigger.filehandlers._constants import (
+    DEFAULT_CHUNK_COUNT,
+    EXCEL_BLANK_COL_LIMIT,
+    EXCEL_BLANK_ROW_LIMIT,
+    MAX_CHUNK_SIZE,
+)
 from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.globalvars import DEFAULT_CHUNK_COUNT, EXCEL_BLANK_COL_LIMIT, EXCEL_BLANK_ROW_LIMIT, MAX_CHUNK_SIZE
 
 # Ignore the UserWarning message from OpenPyXL that seem to pop up here and there
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")

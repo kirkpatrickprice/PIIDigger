@@ -7,8 +7,8 @@ from zipfile import BadZipFile
 from docx2python import docx2python
 from docx2python.iterators import iter_paragraphs
 
+from piidigger.filehandlers._constants import DEFAULT_CHUNK_COUNT, MAX_CHUNK_SIZE
 from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.globalvars import DEFAULT_CHUNK_COUNT, MAX_CHUNK_SIZE
 
 warnings.filterwarnings("ignore", category=UserWarning, module="docx2python")
 

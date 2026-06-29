@@ -2,8 +2,13 @@ from collections.abc import Iterator
 
 import xlrd
 
+from piidigger.filehandlers._constants import (
+    DEFAULT_CHUNK_COUNT,
+    EXCEL_BLANK_COL_LIMIT,
+    EXCEL_BLANK_ROW_LIMIT,
+    MAX_CHUNK_SIZE,
+)
 from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.globalvars import DEFAULT_CHUNK_COUNT, EXCEL_BLANK_COL_LIMIT, EXCEL_BLANK_ROW_LIMIT, MAX_CHUNK_SIZE
 
 HANDLES = {
     "ext": [
