@@ -79,9 +79,9 @@ def _task_path(task: Task | None) -> str:
         return ""
     p = task.payload
     if task.task_type == TaskType.SCAN_FILE:
-        return p.get("display_path", p.get("file_path", ""))
+        return str(p.get("display_path", p.get("file_path", "")))
     if task.task_type == TaskType.ENUM_DIR:
-        return p.get("path", "")
+        return str(p.get("path", ""))
     if task.task_type == TaskType.ENUM_ARCHIVE_MEMBERS:
         return str(p.get("archive_path", ""))
     if task.task_type == TaskType.SCAN_ARCHIVE_MEMBER:
@@ -340,11 +340,11 @@ def run_coordinator(
 
             if result.status == "error":
                 msg = result.error_message or "(no message)"
-                path = _task_path(pending_task)
+                err_path = _task_path(pending_task)
                 logger.error(
                     "[%s]%s: %s",
                     result.task_type.value,
-                    f" path={path!r}" if path else "",
+                    f" path={err_path!r}" if err_path else "",
                     msg,
                 )
                 if _is_access_denied(msg):
