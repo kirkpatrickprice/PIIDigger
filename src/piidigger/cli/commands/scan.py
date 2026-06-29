@@ -11,13 +11,12 @@ from piidigger.run import run_scan
 
 @click.command(name="scan")
 @click.option(
-    "-c",
+    "-f",
     "--config",
     "config_file",
-    default="piidigger.toml",
+    default=None,
     type=click.Path(),
-    show_default=True,
-    help="Path to TOML configuration file.  Falls back to built-in defaults if not found.",
+    help="Path to TOML configuration file.  Defaults to 'piidigger.toml' in the current directory if it exists.",
 )
 @click.option(
     "-d",
@@ -27,22 +26,33 @@ from piidigger.run import run_scan
     help="Ignore any config file and use built-in defaults.",
 )
 def scan(
-    config_file: str,
+    config_file: str | None,
     use_default: bool,
 ) -> None:
     """Scan directories for PII."""
     if use_default:
         config = Config.default()
-    else:
+    elif config_file is not None:
+        # User explicitly specified a file — treat a missing file as an error.
         p = Path(config_file)
-        if p.exists():
+        if not p.exists():
+            click.echo(f"Error: config file {config_file!r} not found.", err=True)
+            sys.exit(1)
+        try:
+            config = Config.from_toml(p)
+        except ValueError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            sys.exit(1)
+    else:
+        # No file specified — silently check for piidigger.toml in the current directory.
+        default_path = Path("piidigger.toml")
+        if default_path.exists():
             try:
-                config = Config.from_toml(p)
+                config = Config.from_toml(default_path)
             except ValueError as exc:
                 click.echo(f"Error: {exc}", err=True)
                 sys.exit(1)
         else:
-            click.echo(f"Config file {config_file!r} not found — using built-in defaults.", err=True)
             config = Config.default()
 
     sys.exit(run_scan(config))

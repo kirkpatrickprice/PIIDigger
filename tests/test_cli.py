@@ -138,3 +138,51 @@ def test_config_validate_invalid_file_shows_friendly_error(tmp_path: Path) -> No
     assert "Did you mean 'data_handlers'?" in result.output
     assert "piidigger config generate" in result.output
     assert "validation errors for Config" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# scan -f / auto-detect piidigger.toml
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_scan_f_flag_is_recognized() -> None:
+    """-f short flag and --config long flag both appear in scan help."""
+    result = CliRunner().invoke(cli, ["scan", "--help"])
+    assert result.exit_code == 0
+    assert "-f" in result.output
+    assert "--config" in result.output
+
+
+@pytest.mark.unit
+def test_scan_auto_detects_piidigger_toml_in_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No -f flag: piidigger.toml found in CWD is loaded silently (no 'not found' message)."""
+    toml = tmp_path / "piidigger.toml"
+    toml.write_text(f'start_dirs = ["{tmp_path.as_posix()}"]\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("piidigger.cli.commands.scan.run_scan", lambda _: 0)
+
+    result = CliRunner().invoke(cli, ["scan"])
+
+    assert result.exit_code == 0
+    assert "not found" not in result.output
+
+
+@pytest.mark.unit
+def test_scan_uses_defaults_silently_when_no_toml_in_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No -f flag and no piidigger.toml in CWD: built-in defaults used, no warning emitted."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("piidigger.cli.commands.scan.run_scan", lambda _: 0)
+
+    result = CliRunner().invoke(cli, ["scan"])
+
+    assert result.exit_code == 0
+    assert "not found" not in result.output
+
+
+@pytest.mark.unit
+def test_scan_f_flag_errors_on_missing_file(tmp_path: Path) -> None:
+    """Explicit -f with a non-existent path exits non-zero with an error message."""
+    result = CliRunner().invoke(cli, ["scan", "-f", str(tmp_path / "missing.toml")])
+    assert result.exit_code != 0
+    assert "Error" in result.output
