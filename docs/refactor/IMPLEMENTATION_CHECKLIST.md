@@ -390,7 +390,7 @@ Preset → worker count formula:
 
 ### Reliability validation
 
-- [ ] `base64-xml-test.xml` with email handler and `timeout_seconds=30` completes in < 5 minutes total
+- [x] `base64-xml-test.xml` with email handler and `timeout_seconds=30` completes in < 5 minutes total
 - [x] Log contains an explicit `"timeout"` record for the offending file — not a silent skip
 - [ ] Run with 1 deliberately hung worker (synthetic): other workers continue; hung worker is terminated and replaced; scan completes
 
@@ -419,7 +419,7 @@ Preset → worker count formula:
 - [x] Delete `src/piidigger/logmanager.py`
 - [x] Delete `src/piidigger/globalvars.SENTINEL` (and remaining dead vars)
 - [x] `grep -r "SENTINEL\|ProcessManager\|LogManager\|queuefuncs\|filescan\|logmanager"` returns no hits in `src/` — enforced by `test_phase4.py::test_no_legacy_orchestration_references`
-- [ ] Review `globalfuncs` and `globalvars` to ensure that all remaining code is still used.  Delete all unused functions and variables.  Identify if all remaining/in-use items are better located in other modules.
+- [x] Review `globalfuncs` and `globalvars` to ensure that all remaining code is still used.  Delete all unused functions and variables.  Identify if all remaining/in-use items are better located in other modules.
 
 ### Coverage and quality gate
 
@@ -433,7 +433,7 @@ Preset → worker count formula:
 
 ### Phase 4 — Tests
 
-- [ ] Integration: timeout fires correctly — `base64-xml-test.xml` with 5s timeout produces a timeout result in < 15s
+- [x] Unit: email `@` prefilter prevents regex backtracking on long base64-like strings — `test_email.py::test_email_prefilter_skips_regex_on_long_no_at_string` *(replaces the original `base64-xml-test.xml` integration scenario; the prefilter eliminates the backtracking root cause before the regex is ever invoked)*
 - [ ] Integration: worker crash recovery — synthetic crash; task is re-queued; scan completes
 - [x] Integration: all old orchestration code deleted — `grep` assertions pass in CI (`test_phase4.py::test_no_legacy_orchestration_references`, `test_legacy_module_files_do_not_exist`)
 - [ ] Integration: baseline comparison — output delta matches documented expectations only

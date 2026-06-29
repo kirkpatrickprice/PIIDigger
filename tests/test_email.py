@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from piidigger.datahandlers import email
@@ -36,14 +38,14 @@ from piidigger.datahandlers import email
         ("4012001037140001514E100010003220121800000011150", {}),  # Not an email
     ],
 )
-def test_email_match_and_redaction(data, expected_result):
+def test_email_match_and_redaction(data: str, expected_result: dict[str, set[str]]) -> None:
     """Test email detection and redaction rules"""
     result = email.handler.find_matches(data)
     assert result == expected_result
 
 
 class TestEmailFunctions:
-    def test_is_valid(self):
+    def test_is_valid(self) -> None:
         """Test email validation function"""
         # Valid emails
         assert email._is_valid("user@example.com") is True
@@ -70,7 +72,7 @@ class TestEmailFunctions:
             is False
         )  # Domain part too long
 
-    def test_redact_rule1(self):
+    def test_redact_rule1(self) -> None:
         """Test redaction rule 1: 10+ characters before @ - retain first 3 and last 1"""
         test_emails = {
             "johndoe1234@example.com": "joh*******4@example.com",
@@ -81,7 +83,7 @@ class TestEmailFunctions:
         for original, expected in test_emails.items():
             assert email._redact(original) == expected
 
-    def test_redact_rule2(self):
+    def test_redact_rule2(self) -> None:
         """Test redaction rule 2: <10 characters before @ - retain first and last"""
         test_emails = {
             "midlen@no.such.domain.co.uk": "m****n@no.such.domain.co.uk",
@@ -91,7 +93,7 @@ class TestEmailFunctions:
         for original, expected in test_emails.items():
             assert email._redact(original) == expected
 
-    def test_redact_rule3(self):
+    def test_redact_rule3(self) -> None:
         """Test redaction Rule 3: If <=5 chars, keep only the first character in the local part"""
         test_emails = {
             "short@test.org": "s****@test.org",
@@ -104,14 +106,14 @@ class TestEmailFunctions:
         for original, expected in test_emails.items():
             assert email._redact(original) == expected
 
-    def test_redact_rule4(self):
+    def test_redact_rule4(self) -> None:
         """Test redaction Rule 4: If exactly one character, redact it"""
         test_emails = {"a@b.co": "*@b.co"}
 
         for original, expected in test_emails.items():
             assert email._redact(original) == expected
 
-    def test_find_match_with_multiple_emails(self):
+    def test_find_match_with_multiple_emails(self) -> None:
         """Test finding multiple email addresses in a single line"""
         text = "Contact us at info@company.com, support@company.com or ourlongsupportemail@company.com for help"
         result = email.handler.find_matches(text)
@@ -121,12 +123,33 @@ class TestEmailFunctions:
         assert "s*****t@company.com" in result["email"]
         assert "our***************l@company.com" in result["email"]
 
-    def test_empty_and_invalid_inputs(self):
+    def test_empty_and_invalid_inputs(self) -> None:
         """Test handling of empty or invalid inputs"""
         assert email.handler.find_matches("") == {}
         assert email.handler.find_matches("No email addresses here") == {}
         assert email.handler.find_matches("Invalid: user@") == {}
         assert email.handler.find_matches("Invalid: @example.com") == {}
+
+
+def test_email_prefilter_skips_regex_on_long_no_at_string() -> None:
+    """Regression: long base64-like strings with no '@' must return {} without invoking the
+    RFC5322 regex.  The regex's nested quantifiers can catastrophically backtrack on strings
+    of this shape; the '@' prefilter in find_matches() prevents that entirely.
+    Reproduces the base64-xml-test.xml scenario that originally caused worker timeouts.
+
+    The elapsed-time assertion is the critical check: removing the prefilter would cause
+    catastrophic backtracking that runs for minutes, not milliseconds.
+    """
+    # ~2 KB of base64 alphabet characters — no '@' — mirrors a typical XML CDATA block
+    base64_block = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" * 32
+    assert "@" not in base64_block  # sanity-check the fixture itself
+
+    start = time.perf_counter()
+    result = email.handler.find_matches(base64_block)
+    elapsed = time.perf_counter() - start
+
+    assert result == {}
+    assert elapsed < 1.0, f"prefilter took {elapsed:.3f}s — regex backtracking may have occurred"
 
 
 if __name__ == "__main__":
