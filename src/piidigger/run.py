@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+from wakepy import keep
 
 from piidigger.models.config import Config
 from piidigger.orchestration.context import WorkerContext
@@ -98,13 +99,15 @@ def _emit_startup_info(
     logger: logging.Logger,
     config: Config,
     worker_count: int,
+    wake_mode: Any,
 ) -> None:
     """Emit a startup configuration summary to the event log and run logger."""
     plural = "es" if worker_count != 1 else ""
+    sleep_status = "Active" if getattr(wake_mode, "active", False) else "Unavailable on this platform"
     entries = [
         f"Performance: {config.performance} — {worker_count} worker process{plural}",
         "Scan directories: " + ", ".join(str(d) for d in config.start_dirs),
-        "Sleep prevention: Not configured",
+        f"Sleep prevention: {sleep_status}",
         "Press CTRL-C to terminate the scan",
     ]
     for msg in entries:
@@ -207,9 +210,10 @@ def run_scan(config: Config) -> int:
 
     progress = ProgressDisplay()
     progress.start()
-    _emit_startup_info(progress, run_logger, config, worker_count)
 
-    run_coordinator(ctx, workers, listener, sinks, progress)
+    with keep.running(on_fail="pass") as wake_mode:
+        _emit_startup_info(progress, run_logger, config, worker_count, wake_mode)
+        run_coordinator(ctx, workers, listener, sinks, progress)
 
     shutil.rmtree(temp_base, ignore_errors=True)
     return 0
