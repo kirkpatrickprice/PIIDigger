@@ -103,15 +103,26 @@ def _emit_startup_info(
 ) -> None:
     """Emit a startup configuration summary to the event log and run logger."""
     plural = "es" if worker_count != 1 else ""
-    sleep_status = "Active" if getattr(wake_mode, "active", False) else "Unavailable on this platform"
-    entries = [
+    sleep_active = getattr(wake_mode, "active", False)
+    sleep_status = "Active" if sleep_active else "Unavailable on this platform"
+    sleep_markup = "[green]Active[/green]" if sleep_active else "[yellow]Unavailable on this platform[/yellow]"
+    dirs = ", ".join(str(d) for d in config.start_dirs)
+
+    log_entries = [
         f"Performance: {config.performance} — {worker_count} worker process{plural}",
-        "Scan directories: " + ", ".join(str(d) for d in config.start_dirs),
+        f"Scan directories: {dirs}",
         f"Sleep prevention: {sleep_status}",
         "Press CTRL-C to terminate the scan",
     ]
-    for msg in entries:
-        progress.log_event("INFO", msg)
+    display_entries = [
+        f"[bold white]Performance:[/bold white] [cyan]{config.performance} — {worker_count} worker process{plural}[/cyan]",
+        f"[bold white]Scan directories:[/bold white] [cyan]{dirs}[/cyan]",
+        f"[bold white]Sleep prevention:[/bold white] {sleep_markup}",
+        "Press CTRL-C to terminate the scan",
+    ]
+
+    progress.set_startup_info(display_entries)
+    for msg in log_entries:
         logger.info(msg)
 
 

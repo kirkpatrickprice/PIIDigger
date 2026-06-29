@@ -73,6 +73,24 @@ def _findings_summary(findings: list[dict[str, Any]]) -> str:
     return f"{_truncate_path(source_path)} — {counts}"
 
 
+def _task_path(task: Task | None) -> str:
+    """Return the most human-readable path from a task's payload, or '' if unavailable."""
+    if task is None:
+        return ""
+    p = task.payload
+    if task.task_type == TaskType.SCAN_FILE:
+        return p.get("display_path", p.get("file_path", ""))
+    if task.task_type == TaskType.ENUM_DIR:
+        return p.get("path", "")
+    if task.task_type == TaskType.ENUM_ARCHIVE_MEMBERS:
+        return str(p.get("archive_path", ""))
+    if task.task_type == TaskType.SCAN_ARCHIVE_MEMBER:
+        archive = p.get("archive_path", "")
+        member = p.get("member_path", "")
+        return f"{archive}::{member}" if member else str(archive)
+    return ""
+
+
 def run_coordinator(
     ctx: WorkerContext,
     workers: list[mp.Process],
@@ -155,22 +173,12 @@ def run_coordinator(
             _task_retries.pop(task_id, None)
             elapsed = now - dispatch_time
 
-            # Extract source path and task type for structured messages
             task_type_str = task.task_type.value if task is not None else "unknown"
-            if task is not None:
-                if task.task_type == TaskType.SCAN_FILE:
-                    source_path = task.payload.get("display_path", task.payload.get("file_path", ""))
-                elif task.task_type == TaskType.ENUM_DIR:
-                    source_path = task.payload.get("path", "")
-                else:
-                    source_path = ""
-            else:
-                source_path = ""
+            source_path = _task_path(task)
 
             logger.warning(
-                "deadline exceeded: task=%s type=%s path=%r pid=%d elapsed=%.1fs"
+                "deadline exceeded: type=%s path=%r pid=%d elapsed=%.1fs"
                 " timeout=%ds — worker terminated; replacement spawned",
-                task_id,
                 task_type_str,
                 source_path,
                 pid,
@@ -332,7 +340,13 @@ def run_coordinator(
 
             if result.status == "error":
                 msg = result.error_message or "(no message)"
-                logger.error("task %s failed: %s", result.task_id, msg)
+                path = _task_path(pending_task)
+                logger.error(
+                    "[%s]%s: %s",
+                    result.task_type.value,
+                    f" path={path!r}" if path else "",
+                    msg,
+                )
                 if _is_access_denied(msg):
                     progress.log_event("WARNING", f"Access denied: {_truncate_path(_denied_path(msg))}")
                 elif result.task_type == TaskType.SCAN_FILE:

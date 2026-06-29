@@ -6,8 +6,10 @@ import time
 
 from rich.console import Console, Group
 from rich.live import Live
+from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 from rich.table import Table
+from rich.text import Text
 
 # Counter keys accumulated into self._counters (display values only).
 # tasks_completed / tasks_pending are handled separately for ETA and are
@@ -72,6 +74,7 @@ class ProgressDisplay:
         self._is_tty: bool = self._console.is_terminal
         self._counters: dict[str, int] = {k: 0 for k in _COUNTER_KEYS}
         self._events: collections.deque[tuple[str, str]] = collections.deque(maxlen=_EVENTS_BUFFER_SIZE)
+        self._startup_lines: list[str] = []
 
         # ETA state — updated by update() from tasks_completed / tasks_pending
         # counters emitted by the coordinator.  Not stored in _counters because
@@ -115,6 +118,43 @@ class ProgressDisplay:
         if pending == 0:
             return "~0:00"
         return _fmt_eta(elapsed * pending / self._tasks_completed)
+
+    def _build_config_panel(self) -> Panel:
+        content = Text.from_markup("\n".join(self._startup_lines)) if self._startup_lines else Text()
+        return Panel(content, title="[bold]Scan Configuration[/bold]", border_style="blue", expand=True)
+
+    def _build_progress_panel(self) -> Panel:
+        bars = self._bars
+        text = self._text
+        eta_row = self._eta_row
+        if bars is None or text is None or eta_row is None:
+            return Panel("", title="[bold]Progress[/bold]", border_style="blue", expand=True)
+        return Panel(Group(bars, text, eta_row), title="[bold]Progress[/bold]", border_style="blue", expand=True)
+
+    def _build_events_panel(self) -> Panel:
+        return Panel(self._build_events_table(), title="[bold]Events[/bold]", border_style="blue", expand=True)
+
+    def _build_live_renderable(self) -> Group:
+        return Group(
+            self._build_config_panel(),
+            self._build_progress_panel(),
+            self._build_events_panel(),
+        )
+
+    def _rebuild_live(self) -> None:
+        """Replace the Live renderable with fresh panels; no-op if the display is not active."""
+        live = self._live
+        bars = self._bars
+        text = self._text
+        eta_row = self._eta_row
+        if not self._is_tty or live is None or bars is None or text is None or eta_row is None:
+            return
+        live.update(self._build_live_renderable())
+
+    def set_startup_info(self, lines: list[str]) -> None:
+        """Populate the static configuration panel.  No-op when not a TTY."""
+        self._startup_lines = list(lines)
+        self._rebuild_live()
 
     def start(self) -> None:
         """Open the rich.Live display.  No-op when not connected to a TTY."""
@@ -166,10 +206,8 @@ class ProgressDisplay:
         self._eta_row = eta_row
         self._eta_task_id = eta_row.add_task("ETA", total=None, label="--:--")
 
-        # Group stacks renderables with no fixed space allocation — elements
-        # sit immediately below each other with no gap.
         live = Live(
-            Group(bars, text, eta_row, self._build_events_table()),
+            self._build_live_renderable(),
             console=self._console,
             refresh_per_second=4,
         )
@@ -234,19 +272,9 @@ class ProgressDisplay:
         eta_row.update(eta_task_id, label=self._compute_eta())
 
     def log_event(self, level: str, message: str) -> None:
-        """Append an event and rebuild the events table.  No-op when not a TTY."""
+        """Append an event and rebuild the events panel.  No-op when not a TTY."""
         self._events.append((level, message))
-
-        live = self._live
-        bars = self._bars
-        text = self._text
-        eta_row = self._eta_row
-        if not self._is_tty or live is None or bars is None or text is None or eta_row is None:
-            return
-
-        # Rebuild the Group so the events table reflects the current deque
-        # (bounded to _EVENTS_BUFFER_SIZE — oldest entries are dropped).
-        live.update(Group(bars, text, eta_row, self._build_events_table()))
+        self._rebuild_live()
 
     def stop(self) -> None:
         """Close the rich.Live display and print a plain-text summary to stdout."""

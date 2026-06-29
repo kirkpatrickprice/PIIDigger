@@ -50,7 +50,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             task_type=task.task_type,
             status="error",
             error_message=str(exc),
-            counters={"archive_errors": 1},
+            counters={"files_scanned": 1, "archive_errors": 1},
             worker_pid=os.getpid(),
         )
     except OSError as exc:
@@ -60,7 +60,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             task_type=task.task_type,
             status="error",
             error_message=str(exc),
-            counters={"archive_errors": 1},
+            counters={"files_scanned": 1, "archive_errors": 1},
             worker_pid=os.getpid(),
         )
 
@@ -185,6 +185,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
         status="ok",
         new_tasks=new_tasks,
         counters={
+            "files_scanned": 1,
             "files_found": files_found,
             "archive_members_skipped": members_skipped,
             "archive_errors": archive_errors,
