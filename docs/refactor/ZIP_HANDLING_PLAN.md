@@ -1,8 +1,10 @@
 # ZIP File Handling Plan for Refactor
 
 **Branch**: `refactor`  
-**Status**: Design Ready for Future Implementation  
-**Last Updated**: 2026-06-14
+**Status**: Superseded in part — see [ADR-multi-format-archives.md](./ADR-multi-format-archives.md)  
+**Last Updated**: 2026-06-30
+
+> **Note — Design Principle 6 superseded**: The original principle 6 (*"In-memory archive extraction is preferred"*) proved unimplementable uniformly. `py7zr` 1.1.x (and likely other future formats such as `tarfile` with certain compression methods) has no per-member in-memory read API; it requires extraction to disk. Maintaining two separate code paths (streaming for ZIP, temp-file for others) was rejected in favour of a single unified temp-dir extraction path. The revised design is documented in `ADR-multi-format-archives.md § 4.9` and the new Closed Decision entry. Principles 7 and 8 (managed temp paths; immediate secure deletion) are now the primary constraints and apply without exception to all archive formats.
 
 ## 1. Purpose
 

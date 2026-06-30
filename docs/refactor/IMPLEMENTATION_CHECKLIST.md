@@ -1,8 +1,8 @@
 # Implementation Checklist
 
 **Branch**: `refactor`
-**Status**: Phase 4 complete — all exit criteria met; Phase 5 (archives + ZIP) is next
-**Last Updated**: 2026-06-28
+**Status**: Phase 5 substantially complete — design revision 3 approved; implementation pending
+**Last Updated**: 2026-06-30
 **Reference**: [ARCHITECTURE_REDESIGN.md](./ARCHITECTURE_REDESIGN.md)
 
 Use this checklist to track progress. Mark items `[x]` as completed. Each phase ends with an exit-criteria gate — do not start the next phase until all exit criteria are met.
@@ -469,110 +469,109 @@ Additional tests added in Phase 4:
 
 ---
 
-## Phase 5 — ZIP Support
+## Phase 5 — Multi-Format Archive Support (ZIP + 7z)
 
-*Proves Goal 2: ZIP adds task types and a `ScannableItem` producer with zero changes to `coordinator.py` or `worker.py`.*
+*Proves Goal 2: archive support adds task types and a `ScannableItem` producer with zero changes to `coordinator.py` or `worker.py`.*
 
-**Pre-requisite:** resolve Open Decision 6 (secure deletion library) before writing any `materialize()` implementation that extracts archive members.
+> **Design revision in progress** — The implementation below is largely complete, but the I/O architecture is being revised to use a unified temp-dir extraction path for all archive formats. See [ADR-multi-format-archives.md](./ADR-multi-format-archives.md) for the revised design. Items marked with `⟳` require changes after ADR is re-approved.
 
-### Open Decision 6 — secure deletion library
+### Open Decision 6 — secure deletion
 
-- [ ] Research PyPI packages: evaluate maintenance status, cross-platform support (Windows/macOS/Linux), SSD vs. HDD behavior, license
-- [ ] Select package; add to project dependencies
-- [ ] Document the choice and its trade-offs in a comment at the call site
+- [x] Implemented `src/piidigger/orchestration/secure_delete.py`: 2-pass overwrite (zeros then random) + `os.fsync()` + `unlink`; cross-platform, no external dependency
+- [x] `_cleanup_temp_workspace()` in `_loop.py` calls `secure_delete()` on all files in `task_temp` at end of every task (try/finally)
 
-### Archive source — `src/piidigger/orchestration/sources.py`
+### Shared types
 
-- [ ] `ArchiveMemberItem(ScannableItem)`: wraps a `zipfile.ZipFile` + member name
-  - [ ] `display_path`: `f"{archive_path}::{member_name}"`
-  - [ ] `ext`: suffix of `member_name`
-  - [ ] `mime`: sniffed from stream header (or `None`)
-  - [ ] `size`: `ZipInfo.file_size` (uncompressed)
-  - [ ] `depth`: parent archive depth + 1
-  - [ ] `open_stream()`: `zipfile.open(member)` — stream, no extraction
-  - [ ] `materialize()`: extract member to per-task temp dir using secure deletion on cleanup
+- [x] `src/piidigger/exceptions.py` — `ArchiveReadError` (no internal imports; cycle-safe)
+- [x] `src/piidigger/models/archive.py` — `MemberInfo` Pydantic frozen model (`name`, `uncompressed_size`, `compressed_size`, `is_dir`, `is_encrypted`)
+
+### `protocols.py` — `ArchiveHandler`
+
+- [x] `ArchiveHandler(Protocol)` added with `list_members()`, `open_bytes()`, `open_stream()` — **⟳ pending revision to `extract_member()` after ADR re-approval**
+
+### `archivehandlers/` package
+
+- [x] `archivehandlers/__init__.py` — `HANDLER_REGISTRY`, `get_handler()`, auto-registration loop
+- [x] `archivehandlers/_zip.py` — `ZipArchiveHandler`: `list_members()`, `open_bytes()`, `open_stream()` — **⟳ pending revision: replace I/O methods with `extract_member()`**
+- [x] `archivehandlers/_7z.py` — `SevenZArchiveHandler`: `list_members()`, `open_bytes()` (uses `tempfile.TemporaryDirectory()` — wrong pattern), `open_stream()` — **⟳ pending revision: replace with `extract_member()` using managed `task_temp`**
+- [x] `pyproject.toml`: `py7zr>=1.1.3,<1.2` dependency added; `piidigger.archivehandlers.*` added to mypy strict overrides
 
 ### Task types and handlers
 
-- [ ] Add to `TaskType` enum: `ENUM_ARCHIVE_MEMBERS`, `SCAN_ARCHIVE_MEMBER`
-- [ ] `models/payloads.py`: `EnumArchiveMembersPayload`, `ScanArchiveMemberPayload` (per [ZIP_HANDLING_PLAN.md](./ZIP_HANDLING_PLAN.md))
-- [ ] `handle_enum_archive_members(task, ctx, logger) -> TaskResult`:
-  - [ ] Validates payload; opens archive
-  - [ ] Enumerates members with all safety checks (path traversal, encryption, size, member count, compression ratio)
-  - [ ] Returns `new_tasks`: one `SCAN_ARCHIVE_MEMBER` per accepted member
-  - [ ] Returns `counters`: `{"archives_scanned": 1, "archive_members_found": N, "archive_members_skipped": K}`
-- [ ] `handle_scan_archive_member(task, ctx, logger) -> TaskResult`:
-  - [ ] Constructs `ArchiveMemberItem`
-  - [ ] Routes through `FileHandler` + `DataHandler` chain (same as `handle_scan_file`)
-  - [ ] Returns findings with lineage fields populated
-- [ ] Add both handlers to `DISPATCH` table — confirm `coordinator.py` and `worker.py` needed no other changes
+- [x] `TaskType` enum: `ENUM_ARCHIVE_MEMBERS`, `SCAN_ARCHIVE_MEMBER` added
+- [x] `models/payloads.py`: `EnumArchiveMembersPayload`, `ScanArchiveMemberPayload` — both include `archive_type: str = "zip"` field
+- [x] `handle_enum_archive_members()` in `orchestration/worker/_enum_archive.py`:
+  - [x] Format-agnostic via `get_handler(payload.archive_type)` registry lookup
+  - [x] All 8 safety checks (path traversal, dir, encrypted, extension block, individual size, total size, bomb ratio, member count)
+  - [x] Returns `new_tasks`: one `SCAN_ARCHIVE_MEMBER` per accepted member, with `archive_type` propagated
+  - [x] Returns `counters`: `{"archives_scanned": 1, "archive_members_found": N, "archive_members_skipped": K}`
+  - [x] `_NESTED_ARCHIVE_EXTS` derived from `HANDLER_REGISTRY` keys (not hardcoded)
+- [x] `handle_scan_archive_member()` in `orchestration/worker/_scan_archive_member.py`:
+  - [x] Constructs `ArchiveMemberItem` with `archive_type=payload.archive_type`
+  - [x] Routes through `FileHandler` + `DataHandler` chain (same as `handle_scan_file`)
+  - [x] `source_container_type=payload.archive_type` in `ResultRecord` — **⟳ already correct; no change needed**
+- [x] Both handlers added to `DISPATCH` table — `coordinator.py` and `worker.py` unchanged
+
+### Archive source — `src/piidigger/orchestration/sources.py`
+
+- [x] `ArchiveMemberItem(ScannableItem)`: format-agnostic, delegates to `get_handler(archive_type)`
+  - [x] `display_path`: `f"{archive_path}::{member_path}"`
+  - [x] `ext`, `mime`, `size`, `depth`, `task_temp` all wired correctly
+  - [x] `open_bytes()`, `open_stream()`, `materialize()` implemented — **⟳ pending revision: `open_bytes()` extracts+reads+`secure_delete()`; `open_stream()` → `BytesIO(open_bytes())`; `materialize()` extracts+returns path**
 
 ### Configuration additions
 
-- [ ] Add `ArchiveConfig` nested model to `Config`:
-  - [ ] `enabled: bool = True`
-  - [ ] `formats: list[str] = ["zip"]`
-  - [ ] `max_depth: int = Field(default=1, ge=0, le=3)`
-  - [ ] `max_members: int = 10_000`
-  - [ ] `max_member_uncompressed_size_mb: int = 50`
-  - [ ] `max_total_uncompressed_size_mb: int = 1024`
-  - [ ] `task_timeout_seconds: int = 30`
-- [ ] Add TOML section `[archives]` to default config template
-
-### CLI additions
-
-- [ ] `--archives-enabled / --no-archives`
-- [ ] `--archive-max-depth INT`
-- [ ] `--archive-max-members INT`
-- [ ] `--archive-max-member-size-mb INT`
-
-### Safety controls (all must be tested)
-
-- [ ] Reject path-traversal member names (`../`, absolute paths)
-- [ ] Reject encrypted members
-- [ ] Reject members exceeding `max_member_uncompressed_size_mb`
-- [ ] Stop enumeration when `max_members` exceeded
-- [ ] Stop when running total uncompressed size exceeds `max_total_uncompressed_size_mb`
-- [ ] Reject members with compression ratio > 1000× (bomb heuristic)
-- [ ] Reject archives with invalid central directory
+- [x] `ArchiveConfig` nested model in `models/config.py`:
+  - [x] `enabled: bool = True`
+  - [x] `formats: list[str] = ["all"]` (expands to all `HANDLER_REGISTRY` keys at runtime)
+  - [x] `max_depth: int = Field(default=1, ge=0, le=3)`
+  - [x] `max_members: int = 10_000`
+  - [x] `max_member_uncompressed_size_mb: int = 64`
+  - [x] `max_total_uncompressed_size_mb: int = 2048`
+  - [x] `task_timeout_seconds: int = 30`
+- [x] `[archives]` TOML section in `generate_toml_template()`
+- [x] `_is_archive_format()` in `_enum_dir.py` handles `"all"` sentinel; passes `archive_type` in payload
 
 ### Progress counters
 
-- [ ] Add to `ProgressDisplay`: `archives_found`, `archives_scanned`, `archive_members_found`, `archive_members_scanned`, `archive_members_skipped`, `archive_errors`
+- [x] `ProgressDisplay` extended: `archives_found`, `archives_scanned`, `archive_members_found`, `archive_members_scanned`, `archive_members_skipped`
 
-### Test fixtures — `testdata/zip/`
+### Test fixtures
 
-- [ ] `simple-pii.zip` — known PII findings
-- [ ] `nested-depth-2.zip` — nested archive
-- [ ] `oversize-member.zip` — triggers size limit
-- [ ] `many-members.zip` — triggers member count limit
-- [ ] `traversal-member.zip` — triggers path-traversal rejection
-- [ ] `encrypted-member.zip` — triggers encryption rejection
-- [ ] `corrupt.zip` — triggers bad central directory handling
-- [ ] `zip-bomb-simulated.zip` — triggers compression ratio rejection (safe synthetic)
+- [x] `testdata/zip/` — `simple-pii.zip`, `nested-depth-2.zip`, `oversize-member.zip`, `many-members.zip`, `traversal-member.zip`, `encrypted-member.zip`, `corrupt.zip`, `zip-bomb-simulated.zip`
+- [x] `testdata/7z/create_fixtures.py` — `simple-pii.7z`, `many-members.7z`, `oversize-member.7z`, `corrupt.7z`, `encrypted.7z`
 
-### Phase 5 — Tests
+### Tests — `tests/test_archives.py`
 
-All per [ZIP_HANDLING_PLAN.md § 12](./ZIP_HANDLING_PLAN.md).
+- [x] 52 tests passing (all ZIP + 7z enumeration/scan scenarios)
+- [x] Safety check unit tests for all 8 rejection rules
+- [x] `test_archive_config_defaults` — asserts `formats == ["all"]`
+- [x] 14 7z-specific tests (list_members, encrypted, corrupt, oversize, member count)
+- [ ] **⟳ `extract_member()` unit tests** — replace `open_bytes`/`open_stream` handler tests (pending ADR revision)
+- [ ] **⟳ `ArchiveMemberItem.open_bytes()` secure-delete assertion** — confirm no file remains in `task_temp` after `open_bytes()` returns (pending ADR revision)
 
-- [ ] Unit: each safety rejection rule fires independently
-- [ ] Unit: `ArchiveMemberItem.open_stream()` yields correct bytes
-- [ ] Unit: `ArchiveMemberItem.materialize()` creates temp file; cleanup deletes it securely
-- [ ] Integration: scan `simple-pii.zip` — findings include correct `display_path` and lineage fields
-- [ ] Integration: scan `nested-depth-2.zip` with `max_depth=1` — nested members skipped and logged
-- [ ] Integration: scan ZIP containing docx/xlsx members — binary members extracted and scanned correctly
-- [ ] Resilience: `corrupt.zip` — handled without crash
-- [ ] Resilience: timeout during member scan — task times out; scan continues
-- [ ] Resilience: `Ctrl+C` during large archive — cleans up temp files
-- [ ] Proof: confirm `coordinator.py` and `worker.py` have zero diff vs. end of Phase 4
+### Phase 5 — Pending steps (revision 3 design)
+
+- [ ] `protocols.py`: remove `open_bytes()`/`open_stream()` from `ArchiveHandler`; add `extract_member(archive_path, member_path, dest_dir) -> Path`
+- [ ] `archivehandlers/_zip.py`: replace `open_bytes`/`open_stream` with `extract_member()`
+- [ ] `archivehandlers/_7z.py`: remove `open_bytes`/`open_stream` and `tempfile`/`io` imports; add `extract_member()`
+- [ ] `orchestration/sources.py`: **delete** `ArchiveMemberItem`; add `archive_path: Path | None` and `member_path: str | None` kwargs to `FilesystemItem.__init__()`; override `display_path` to return `archive::member` when set
+- [ ] `orchestration/worker/_scan_archive_member.py`: replace `ArchiveMemberItem` construction with `get_handler()` → `extract_member()` → `FilesystemItem(..., archive_path=..., member_path=...)`
+- [ ] `tests/test_archives.py`: delete `ArchiveMemberItem` tests; add `FilesystemItem` archive context tests; replace `open_bytes`/`open_stream` handler tests with `extract_member` tests
+- [ ] `uv run ruff check src/ tests/ && uv run mypy src/ && uv run pytest tests/ -v`
+- [ ] User documentation: Security Considerations entry disclosing archive temp-dir extraction and task-end secure deletion
 
 ### Phase 5 — Exit Criteria
 
-- [ ] ZIP enumeration and member scanning run under the task queue architecture
-- [ ] Zero changes to `coordinator.py` or `worker.py` vs. Phase 4 (verified by `git diff`)
-- [ ] All safety limits active and verified by tests
-- [ ] Findings include lineage fields; output format unchanged for non-archive results
-- [ ] Secure deletion used for all `materialize()` temp files
+- [x] ZIP and 7z enumeration and member scanning run under the task queue architecture
+- [x] Zero changes to `coordinator.py` or `worker.py` vs. Phase 4 (verified by diff)
+- [x] All 8 safety limits active and covered by tests
+- [x] Findings include lineage fields (`source_container_type`, `source_member_path`, `source_depth`); non-archive output unchanged
+- [x] `secure_delete()` used for all temp files at end of each task
+- [ ] `ArchiveMemberItem` deleted — single `FilesystemItem` implementation for all sources
+- [ ] No `tempfile.TemporaryDirectory()` anywhere in archive handling code
+- [ ] `FilesystemItem.display_path` returns `archive::member` form when archive context is set
+- [ ] User documentation updated with Security Considerations
 - [ ] Test coverage ≥ 80% maintained
 - [ ] `ruff` + `mypy` clean
 
