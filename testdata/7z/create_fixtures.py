@@ -47,7 +47,7 @@ def _many_members() -> None:
 
 
 def _oversize_member() -> None:
-    """Member whose uncompressed size exceeds the default 64 MB limit.
+    """Member whose uncompressed size exceeds the default 512 MB limit when configured low.
 
     LZMA2 compresses 100 MB of zeros to ~1 KB, so the archive file stays small.
     The ENUM handler rejects the member at check 4 (individual size limit)
@@ -76,7 +76,7 @@ def _encrypted() -> None:
     SevenZipFile.needs_password() returns True for this fixture.
     """
     buf = io.BytesIO()
-    with py7zr.SevenZipFile(buf, "w", password="test-password") as szf:
+    with py7zr.SevenZipFile(buf, "w", password="test-password") as szf:  # noqa: S106
         szf.writestr(b"secret content", "secret.txt")
     _write("encrypted.7z", buf.getvalue())
 
@@ -91,20 +91,25 @@ def _verify() -> None:
 
     with py7zr.SevenZipFile(_HERE / "simple-pii.7z", "r") as szf:
         members = szf.list()
-        assert any(m.filename == "readme.txt" for m in members), "simple-pii member missing"
+        if not any(m.filename == "readme.txt" for m in members):
+            raise RuntimeError("simple-pii member missing")
 
     with py7zr.SevenZipFile(_HERE / "many-members.7z", "r") as szf:
         members = szf.list()
-        assert len(members) == 5, f"many-members: expected 5 members, got {len(members)}"
+        if len(members) != 5:
+            raise RuntimeError(f"many-members: expected 5 members, got {len(members)}")
 
     with py7zr.SevenZipFile(_HERE / "oversize-member.7z", "r") as szf:
         members = szf.list()
-        assert members[0].uncompressed == 100 * 1024 * 1024, "oversize-member: unexpected size"
+        if members[0].uncompressed != 100 * 1024 * 1024:
+            raise RuntimeError("oversize-member: unexpected size")
 
-    assert py7zr.is_7zfile(_HERE / "corrupt.7z") is False, "corrupt.7z should not be a valid 7z file"
+    if py7zr.is_7zfile(_HERE / "corrupt.7z"):
+        raise RuntimeError("corrupt.7z should not be a valid 7z file")
 
-    with py7zr.SevenZipFile(_HERE / "encrypted.7z", password="test-password") as szf:
-        assert szf.needs_password(), "encrypted.7z should report needs_password()"
+    with py7zr.SevenZipFile(_HERE / "encrypted.7z", password="test-password") as szf:  # noqa: S106
+        if not szf.needs_password():
+            raise RuntimeError("encrypted.7z should report needs_password()")
 
     print("  All fixtures verified OK.")
 
