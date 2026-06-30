@@ -29,6 +29,7 @@ class EnumArchiveMembersPayload(PiiDiggerModel):
     model_config = ConfigDict(frozen=True)
 
     archive_path: Path
+    archive_type: str = "zip"
     depth: int = Field(default=0, ge=0, le=3)
 
 
@@ -37,6 +38,7 @@ class ScanArchiveMemberPayload(PiiDiggerModel):
 
     archive_path: Path
     member_path: str
+    archive_type: str = "zip"
     ext: str
     mime: str | None
     uncompressed_size: int = Field(ge=0)

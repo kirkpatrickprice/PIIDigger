@@ -4,15 +4,19 @@ import logging
 import os
 from pathlib import Path
 from typing import Any
-from zipfile import BadZipFile, ZipFile
 
+from piidigger.archivehandlers import HANDLER_REGISTRY, get_handler
+from piidigger.exceptions import ArchiveReadError
 from piidigger.models.payloads import EnumArchiveMembersPayload
 from piidigger.models.tasks import Task, TaskResult, TaskType
 from piidigger.orchestration.context import WorkerContext
 
+# Extensions of archive formats we recognise as nested archives (skip for now).
+_NESTED_ARCHIVE_EXTS: frozenset[str] = frozenset(f".{k}" for k in HANDLER_REGISTRY)
+
 
 def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
-    """Enumerate one ZIP archive: produce SCAN_ARCHIVE_MEMBER tasks for accepted members.
+    """Enumerate one archive: produce SCAN_ARCHIVE_MEMBER tasks for accepted members.
 
     Safety checks applied per member (in order):
       1. Member count limit
@@ -32,6 +36,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
 
     payload = EnumArchiveMembersPayload(**task.payload)
     archive_path = payload.archive_path
+    archive_type = payload.archive_type
     depth = payload.depth
     arc_cfg = ctx.config.archives
 
@@ -40,21 +45,22 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
     members_skipped = 0
     archive_errors = 0
 
-    try:
-        with ZipFile(archive_path, "r") as zf:
-            member_list = zf.infolist()
-    except BadZipFile as exc:
-        logger.warning("invalid ZIP archive %s: %s", archive_path, exc)
+    handler = get_handler(archive_type)
+    if handler is None:
+        logger.warning("no archive handler registered for type %r (%s)", archive_type, archive_path)
         return TaskResult(
             task_id=task.task_id,
             task_type=task.task_type,
             status="error",
-            error_message=str(exc),
+            error_message=f"no handler for archive_type={archive_type!r}",
             counters={"files_scanned": 1, "archive_errors": 1},
             worker_pid=os.getpid(),
         )
-    except OSError as exc:
-        logger.warning("cannot open archive %s: %s", archive_path, exc)
+
+    try:
+        member_list = handler.list_members(archive_path)
+    except ArchiveReadError as exc:
+        logger.warning("cannot read archive %s: %s", archive_path, exc)
         return TaskResult(
             task_id=task.task_id,
             task_type=task.task_type,
@@ -68,16 +74,16 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
     max_total_bytes = arc_cfg.max_total_uncompressed_size_mb * 1024 * 1024
     total_uncompressed: int = 0
 
-    for i, info in enumerate(member_list):
-        member_name = info.filename
+    for i, member in enumerate(member_list):
+        member_name = member.name
 
         # Skip directory entries
-        if member_name.endswith("/"):
+        if member.is_dir:
             continue
 
         # 1. Member count limit — stop enumeration entirely
         if files_found >= arc_cfg.max_members:
-            remaining = sum(1 for m in member_list[i:] if not m.filename.endswith("/"))
+            remaining = sum(1 for m in member_list[i:] if not m.is_dir)
             members_skipped += remaining
             logger.warning(
                 "archive %s: member count limit (%d) reached; %d member(s) not scanned",
@@ -87,8 +93,8 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             )
             break
 
-        uncompressed_size = info.file_size
-        compressed_size = info.compress_size
+        uncompressed_size = member.uncompressed_size
+        compressed_size = member.compressed_size
         ext = Path(member_name).suffix
 
         # 2. Path traversal
@@ -100,7 +106,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             continue
 
         # 3. Encryption
-        if info.flag_bits & 0x1:
+        if member.is_encrypted:
             logger.warning("archive %s: encrypted member skipped: %r", archive_path, member_name)
             members_skipped += 1
             continue
@@ -142,8 +148,8 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             continue
         total_uncompressed = candidate_total
 
-        # 7. Nested archive — deferred in milestone 1
-        if ext.lower() in {".zip"}:
+        # 7. Nested archive — deferred to a future milestone
+        if ext.lower() in _NESTED_ARCHIVE_EXTS:
             logger.debug(
                 "archive %s: nested archive member %r skipped (nested archives deferred to a future milestone)",
                 archive_path,
@@ -169,6 +175,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
                 "payload": {
                     "archive_path": str(archive_path),
                     "member_path": member_name,
+                    "archive_type": archive_type,
                     "ext": ext,
                     "mime": None,
                     "uncompressed_size": uncompressed_size,

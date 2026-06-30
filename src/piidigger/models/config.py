@@ -198,7 +198,7 @@ def generate_toml_template() -> str:
         "",
         "[archives]",
         "enabled = true",
-        'formats = ["zip"]',
+        'formats = ["all"]',
         f"max_depth = {_ARCHIVE_MAX_DEPTH}",
         f"max_members = {_ARCHIVE_MAX_MEMBERS}",
         f"max_member_uncompressed_size_mb = {_ARCHIVE_MAX_MEMBER_SIZE_MB}",
@@ -215,13 +215,13 @@ def generate_toml_template() -> str:
 class ArchiveConfig(PiiDiggerModel):
     """Archive scanning configuration.
 
-    Controls ZIP (and future format) scanning behaviour.  Defaults permit
-    ZIP scanning with conservative safety limits.  Set enabled=False to skip
-    all archive files without any other change.
+    Controls archive scanning behaviour.  Defaults enable all registered formats
+    with conservative safety limits.  Set enabled=False to skip all archive
+    files without any other change.
     """
 
     enabled: bool = True
-    formats: list[str] = Field(default_factory=lambda: ["zip"])
+    formats: list[str] = Field(default_factory=lambda: ["all"])
     max_depth: int = Field(default=_ARCHIVE_MAX_DEPTH, ge=0, le=3)
     max_members: int = Field(default=_ARCHIVE_MAX_MEMBERS, ge=1)
     max_member_uncompressed_size_mb: int = Field(default=_ARCHIVE_MAX_MEMBER_SIZE_MB, ge=1)

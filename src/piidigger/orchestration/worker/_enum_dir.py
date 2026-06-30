@@ -41,6 +41,10 @@ def _is_archive_format(ext: str, config: Config) -> bool:
     if not config.archives.enabled:
         return False
     ext_bare = ext.lstrip(".").lower()
+    if "all" in config.archives.formats:
+        from piidigger.archivehandlers import HANDLER_REGISTRY  # noqa: PLC0415
+
+        return ext_bare in HANDLER_REGISTRY
     return ext_bare in {fmt.lower().lstrip(".") for fmt in config.archives.formats}
 
 
@@ -136,6 +140,7 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
                             "task_type": TaskType.ENUM_ARCHIVE_MEMBERS,
                             "payload": {
                                 "archive_path": str(entry),
+                                "archive_type": ext.lstrip(".").lower(),
                                 "depth": 0,
                             },
                             "timeout_seconds": config.default_timeout_seconds,

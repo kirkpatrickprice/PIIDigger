@@ -1,12 +1,12 @@
-"""Phase 5 tests: ZIP archive support.
+"""Multi-format archive support tests (ZIP and 7z).
 
 Covers:
   - ArchiveConfig model (defaults, TOML round-trip, unknown-key rejection)
   - ArchiveMemberItem (protocol compliance, open_bytes, open_stream, materialize)
   - FilesystemItem.open_bytes() still returns None
   - secure_delete() utility
-  - handle_enum_dir archive routing (zip → ENUM_ARCHIVE_MEMBERS; archives disabled)
-  - handle_enum_archive_members safety checks (8 scenarios)
+  - handle_enum_dir archive routing (zip/7z → ENUM_ARCHIVE_MEMBERS; archives disabled)
+  - handle_enum_archive_members safety checks (ZIP and 7z scenarios)
   - handle_scan_archive_member (PII found, lineage fields, no-handler defensive path)
   - --no-archives CLI override logic
 """
@@ -23,7 +23,7 @@ from piidigger.models.tasks import Task, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger
 from piidigger.orchestration.secure_delete import secure_delete
-from piidigger.orchestration.sources import ArchiveMemberItem, FilesystemItem
+from piidigger.orchestration.sources import FilesystemItem
 from piidigger.orchestration.worker._enum_archive import handle_enum_archive_members
 from piidigger.orchestration.worker._enum_dir import handle_enum_dir
 from piidigger.orchestration.worker._scan_archive_member import handle_scan_archive_member
@@ -34,17 +34,25 @@ from piidigger.protocols import ScannableItem
 # ---------------------------------------------------------------------------
 
 _LOG_QUEUE: mp.Queue = mp.Queue()  # type: ignore[type-arg]
-_FIXTURES = Path("testdata/zip")
+_ZIP_FIXTURES = Path("testdata/zip")
+_7Z_FIXTURES = Path("testdata/7z")
 
 
 def _logger() -> object:
-    return build_worker_logger(_LOG_QUEUE, "test-phase5")
+    return build_worker_logger(_LOG_QUEUE, "test-archives")
 
 
 def _fixture(name: str) -> Path:
-    p = _FIXTURES / name
+    p = _ZIP_FIXTURES / name
     if not p.exists():
         pytest.skip(f"fixture {p} not found — run testdata/zip/create_fixtures.py")
+    return p
+
+
+def _7z_fixture(name: str) -> Path:
+    p = _7Z_FIXTURES / name
+    if not p.exists():
+        pytest.skip(f"fixture {p} not found — run testdata/7z/create_fixtures.py")
     return p
 
 
@@ -68,10 +76,10 @@ def _make_ctx(
     )
 
 
-def _enum_archive_task(archive_path: Path, depth: int = 0) -> Task:
+def _enum_archive_task(archive_path: Path, depth: int = 0, archive_type: str = "zip") -> Task:
     return Task(
         task_type=TaskType.ENUM_ARCHIVE_MEMBERS,
-        payload={"archive_path": str(archive_path), "depth": depth},
+        payload={"archive_path": str(archive_path), "archive_type": archive_type, "depth": depth},
     )
 
 
@@ -81,12 +89,14 @@ def _scan_archive_task(
     ext: str,
     uncompressed_size: int = 64,
     depth: int = 1,
+    archive_type: str = "zip",
 ) -> Task:
     return Task(
         task_type=TaskType.SCAN_ARCHIVE_MEMBER,
         payload={
             "archive_path": str(archive_path),
             "member_path": member_path,
+            "archive_type": archive_type,
             "ext": ext,
             "mime": None,
             "uncompressed_size": uncompressed_size,
@@ -111,7 +121,7 @@ def _enum_dir_task(path: Path) -> Task:
 def test_archive_config_defaults() -> None:
     cfg = ArchiveConfig()
     assert cfg.enabled is True
-    assert cfg.formats == ["zip"]
+    assert cfg.formats == ["all"]
     assert cfg.max_depth == 1
     assert cfg.max_members == 10_000
     assert cfg.max_member_uncompressed_size_mb == 64
@@ -157,131 +167,34 @@ def test_generate_toml_template_includes_archives_section() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ArchiveMemberItem — protocol compliance and I/O methods
+# FilesystemItem — archive context display_path
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_archive_member_satisfies_protocol(tmp_path: Path) -> None:
-    zp = tmp_path / "a.zip"
-    with zipfile.ZipFile(zp, "w") as zf:
-        zf.writestr("hello.txt", "hello")
-    item = ArchiveMemberItem(
-        archive_path=zp,
-        member_path="hello.txt",
-        uncompressed_size=5,
-        mime=None,
-        depth=1,
-        task_temp=tmp_path,
-    )
-    assert isinstance(item, ScannableItem)
+def test_filesystem_item_display_path_with_archive_context(tmp_path: Path) -> None:
+    """display_path returns archive::member form when archive context is set."""
+    f = tmp_path / "member.txt"
+    f.write_bytes(b"x")
+    archive = tmp_path / "archive.zip"
+    item = FilesystemItem(f, archive_path=archive, member_path="sub/member.txt")
+    assert item.display_path == f"{archive}::sub/member.txt"
 
 
 @pytest.mark.unit
-def test_archive_member_display_path(tmp_path: Path) -> None:
-    zp = tmp_path / "arch.zip"
-    with zipfile.ZipFile(zp, "w") as zf:
-        zf.writestr("sub/file.txt", "x")
-    item = ArchiveMemberItem(
-        archive_path=zp,
-        member_path="sub/file.txt",
-        uncompressed_size=1,
-        mime=None,
-        depth=1,
-        task_temp=tmp_path,
-    )
-    assert item.display_path == f"{zp}::sub/file.txt"
+def test_filesystem_item_display_path_without_archive_context(tmp_path: Path) -> None:
+    """display_path returns plain file path when no archive context is set."""
+    f = tmp_path / "plain.txt"
+    f.write_bytes(b"x")
+    item = FilesystemItem(f)
+    assert item.display_path == str(f)
 
 
 @pytest.mark.unit
-def test_archive_member_open_bytes_returns_correct_content(tmp_path: Path) -> None:
-    payload = b"hello from archive"
-    zp = tmp_path / "test.zip"
-    with zipfile.ZipFile(zp, "w") as zf:
-        zf.writestr("data.bin", payload)
-    item = ArchiveMemberItem(
-        archive_path=zp,
-        member_path="data.bin",
-        uncompressed_size=len(payload),
-        mime=None,
-        depth=1,
-        task_temp=tmp_path,
-    )
-    assert item.open_bytes() == payload
-
-
-@pytest.mark.unit
-def test_archive_member_open_bytes_returns_bytes_not_none(tmp_path: Path) -> None:
-    """ArchiveMemberItem.open_bytes() always returns bytes, never None."""
-    zp = tmp_path / "test.zip"
-    with zipfile.ZipFile(zp, "w") as zf:
-        zf.writestr("x.txt", "x")
-    item = ArchiveMemberItem(
-        archive_path=zp, member_path="x.txt",
-        uncompressed_size=1, mime=None, depth=1, task_temp=tmp_path,
-    )
-    result = item.open_bytes()
-    assert result is not None
-    assert isinstance(result, bytes)
-
-
-@pytest.mark.unit
-def test_archive_member_open_stream_reads_correct_content(tmp_path: Path) -> None:
-    payload = b"stream content"
-    zp = tmp_path / "s.zip"
-    with zipfile.ZipFile(zp, "w") as zf:
-        zf.writestr("member.txt", payload)
-    item = ArchiveMemberItem(
-        archive_path=zp, member_path="member.txt",
-        uncompressed_size=len(payload), mime=None, depth=1, task_temp=tmp_path,
-    )
-    stream = item.open_stream()
-    try:
-        assert stream.read() == payload
-    finally:
-        stream.close()
-
-
-@pytest.mark.unit
-def test_archive_member_materialize_creates_file_in_task_temp(tmp_path: Path) -> None:
-    payload = b"materialized bytes"
-    zp = tmp_path / "m.zip"
-    with zipfile.ZipFile(zp, "w") as zf:
-        zf.writestr("report.txt", payload)
-    task_temp = tmp_path / "task123"
-    item = ArchiveMemberItem(
-        archive_path=zp, member_path="report.txt",
-        uncompressed_size=len(payload), mime=None, depth=1, task_temp=task_temp,
-    )
-    dest = item.materialize()
-    assert dest.exists()
-    assert dest.read_bytes() == payload
-    assert dest.parent == task_temp
-
-
-@pytest.mark.unit
-def test_archive_member_ext_from_member_path(tmp_path: Path) -> None:
-    zp = tmp_path / "e.zip"
-    with zipfile.ZipFile(zp, "w") as zf:
-        zf.writestr("report.xlsx", b"")
-    item = ArchiveMemberItem(
-        archive_path=zp, member_path="report.xlsx",
-        uncompressed_size=0, mime=None, depth=1, task_temp=tmp_path,
-    )
-    assert item.ext == ".xlsx"
-
-
-@pytest.mark.unit
-def test_archive_member_size_returns_uncompressed_size(tmp_path: Path) -> None:
-    zp = tmp_path / "z.zip"
-    with zipfile.ZipFile(zp, "w") as zf:
-        zf.writestr("f.txt", "abc")
-    item = ArchiveMemberItem(
-        archive_path=zp, member_path="f.txt",
-        uncompressed_size=999, mime=None, depth=2, task_temp=tmp_path,
-    )
-    assert item.size == 999
-    assert item.depth == 2
+def test_filesystem_item_satisfies_protocol(tmp_path: Path) -> None:
+    f = tmp_path / "file.txt"
+    f.write_bytes(b"hello")
+    assert isinstance(FilesystemItem(f), ScannableItem)
 
 
 # ---------------------------------------------------------------------------
@@ -637,3 +550,260 @@ def test_no_archives_flag_does_not_mutate_original() -> None:
         update={"archives": config.archives.model_copy(update={"enabled": False})}
     )
     assert config.archives.enabled is True
+
+
+# ---------------------------------------------------------------------------
+# 7z handler — unit tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_7z_handler_list_members(tmp_path: Path) -> None:
+    import io
+
+    import py7zr
+
+    from piidigger.archivehandlers._7z import handler as szhandler
+
+    buf = io.BytesIO()
+    with py7zr.SevenZipFile(buf, "w") as szf:
+        szf.writestr(b"hello world", "greeting.txt")
+    archive = tmp_path / "test.7z"
+    archive.write_bytes(buf.getvalue())
+
+    members = szhandler.list_members(archive)
+    assert len(members) == 1
+    assert members[0].name == "greeting.txt"
+    assert members[0].uncompressed_size == 11
+    assert members[0].is_dir is False
+    assert members[0].is_encrypted is False
+
+
+@pytest.mark.unit
+def test_7z_handler_extract_member(tmp_path: Path) -> None:
+    import io
+
+    import py7zr
+
+    from piidigger.archivehandlers._7z import handler as szhandler
+
+    payload = b"the quick brown fox"
+    buf = io.BytesIO()
+    with py7zr.SevenZipFile(buf, "w") as szf:
+        szf.writestr(payload, "fox.txt")
+    archive = tmp_path / "fox.7z"
+    archive.write_bytes(buf.getvalue())
+
+    dest_dir = tmp_path / "out"
+    result = szhandler.extract_member(archive, "fox.txt", dest_dir)
+    assert result.exists()
+    assert result.read_bytes() == payload
+    assert result.parent == dest_dir
+
+
+@pytest.mark.unit
+def test_zip_handler_extract_member(tmp_path: Path) -> None:
+    from piidigger.archivehandlers._zip import handler as ziphandler
+
+    payload = b"zip extract content"
+    zp = tmp_path / "test.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr("data.txt", payload)
+
+    dest_dir = tmp_path / "out"
+    result = ziphandler.extract_member(zp, "data.txt", dest_dir)
+    assert result.exists()
+    assert result.read_bytes() == payload
+    assert result.parent == dest_dir
+
+
+@pytest.mark.unit
+def test_7z_handler_corrupt_raises_archive_read_error(tmp_path: Path) -> None:
+    from piidigger.archivehandlers._7z import handler as szhandler
+    from piidigger.exceptions import ArchiveReadError
+
+    corrupt = tmp_path / "bad.7z"
+    corrupt.write_bytes(b"not a 7z file at all")
+
+    with pytest.raises(ArchiveReadError):
+        szhandler.list_members(corrupt)
+
+
+# ---------------------------------------------------------------------------
+# handle_enum_archive_members — 7z scenarios
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_enum_archive_7z_simple_pii_emits_scan_task(tmp_path: Path) -> None:
+    archive = _7z_fixture("simple-pii.7z")
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_archive_members(
+        _enum_archive_task(archive, archive_type="7z"), ctx, _logger()
+    )
+
+    assert result.status == "ok"
+    assert len(result.new_tasks) == 1
+    t = result.new_tasks[0]
+    assert t["task_type"] == TaskType.SCAN_ARCHIVE_MEMBER
+    assert t["payload"]["member_path"] == "readme.txt"
+    assert t["payload"]["archive_type"] == "7z"
+    assert result.counters.get("files_found") == 1
+
+
+@pytest.mark.unit
+def test_enum_archive_7z_corrupt_returns_error(tmp_path: Path) -> None:
+    archive = _7z_fixture("corrupt.7z")
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_archive_members(
+        _enum_archive_task(archive, archive_type="7z"), ctx, _logger()
+    )
+
+    assert result.status == "error"
+    assert result.counters.get("archive_errors", 0) >= 1
+
+
+@pytest.mark.unit
+def test_enum_archive_7z_encrypted_skipped(tmp_path: Path) -> None:
+    archive = _7z_fixture("encrypted.7z")
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_archive_members(
+        _enum_archive_task(archive, archive_type="7z"), ctx, _logger()
+    )
+
+    assert result.status == "ok"
+    assert result.new_tasks == []
+    assert result.counters.get("archive_members_skipped", 0) >= 1
+
+
+@pytest.mark.unit
+def test_enum_archive_7z_oversize_member_skipped(tmp_path: Path) -> None:
+    """100 MB member exceeds default 64 MB limit."""
+    archive = _7z_fixture("oversize-member.7z")
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_archive_members(
+        _enum_archive_task(archive, archive_type="7z"), ctx, _logger()
+    )
+
+    assert result.status == "ok"
+    assert result.new_tasks == []
+    assert result.counters.get("archive_members_skipped", 0) >= 1
+
+
+@pytest.mark.unit
+def test_enum_archive_7z_member_count_limit(tmp_path: Path) -> None:
+    """5-member archive with max_members=3 → 3 tasks emitted, 2 skipped."""
+    archive = _7z_fixture("many-members.7z")
+    ctx = _make_ctx(tmp_path, archives={"max_members": 3})
+    result = handle_enum_archive_members(
+        _enum_archive_task(archive, archive_type="7z"), ctx, _logger()
+    )
+
+    assert result.status == "ok"
+    assert len(result.new_tasks) == 3
+    assert result.counters.get("archive_members_skipped", 0) == 2
+
+
+@pytest.mark.unit
+def test_enum_archive_unknown_type_returns_error(tmp_path: Path) -> None:
+    """Requesting an unregistered archive_type returns status=error."""
+    fake = tmp_path / "fake.rar"
+    fake.write_bytes(b"placeholder")
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_archive_members(
+        _enum_archive_task(fake, archive_type="rar"), ctx, _logger()
+    )
+
+    assert result.status == "error"
+    assert result.counters.get("archive_errors", 0) >= 1
+
+
+# ---------------------------------------------------------------------------
+# handle_scan_archive_member — 7z
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_scan_archive_member_7z_finds_pii(tmp_path: Path) -> None:
+    import io
+
+    import py7zr
+
+    content = b"card number: 4111111111111111\n"
+    buf = io.BytesIO()
+    with py7zr.SevenZipFile(buf, "w") as szf:
+        szf.writestr(content, "readme.txt")
+    archive = tmp_path / "pii.7z"
+    archive.write_bytes(buf.getvalue())
+
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+    task = _scan_archive_task(archive, "readme.txt", ".txt", len(content), archive_type="7z")
+    result = handle_scan_archive_member(task, ctx, _logger())
+
+    assert result.status == "ok"
+    assert len(result.findings) >= 1
+    assert result.findings[0]["handler"] == "pan"
+
+
+@pytest.mark.unit
+def test_scan_archive_member_7z_lineage(tmp_path: Path) -> None:
+    """source_container_type is propagated from archive_type."""
+    import io
+
+    import py7zr
+
+    content = b"card number: 4111111111111111\n"
+    buf = io.BytesIO()
+    with py7zr.SevenZipFile(buf, "w") as szf:
+        szf.writestr(content, "readme.txt")
+    archive = tmp_path / "lineage.7z"
+    archive.write_bytes(buf.getvalue())
+
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+    task = _scan_archive_task(archive, "readme.txt", ".txt", len(content), depth=1, archive_type="7z")
+    result = handle_scan_archive_member(task, ctx, _logger())
+
+    assert result.status == "ok"
+    assert result.findings[0]["source_container_type"] == "7z"
+
+
+# ---------------------------------------------------------------------------
+# handle_enum_dir — 7z routing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_enum_dir_7z_file_emits_enum_archive_task(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "data.7z").write_bytes(b"placeholder")
+
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_dir(_enum_dir_task(root), ctx, _logger())
+
+    assert result.status == "ok"
+    task_types = {t["task_type"] for t in result.new_tasks}
+    assert TaskType.ENUM_ARCHIVE_MEMBERS in task_types
+
+    archive_tasks = [t for t in result.new_tasks if t["task_type"] == TaskType.ENUM_ARCHIVE_MEMBERS]
+    assert archive_tasks[0]["payload"]["archive_type"] == "7z"
+
+
+@pytest.mark.unit
+def test_enum_dir_archive_type_in_payload(tmp_path: Path) -> None:
+    """archive_type in the ENUM_ARCHIVE_MEMBERS payload matches the file extension."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "backup.zip").write_bytes(b"z")
+    (root / "archive.7z").write_bytes(b"z")
+
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_dir(_enum_dir_task(root), ctx, _logger())
+
+    archive_tasks = [t for t in result.new_tasks if t["task_type"] == TaskType.ENUM_ARCHIVE_MEMBERS]
+    types_by_ext = {
+        Path(t["payload"]["archive_path"]).suffix: t["payload"]["archive_type"]
+        for t in archive_tasks
+    }
+    assert types_by_ext[".zip"] == "zip"
+    assert types_by_ext[".7z"] == "7z"
