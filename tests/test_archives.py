@@ -12,9 +12,11 @@ Covers:
 """
 from __future__ import annotations
 
+import logging
 import multiprocessing as mp
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -38,8 +40,8 @@ _ZIP_FIXTURES = Path("testdata/zip")
 _7Z_FIXTURES = Path("testdata/7z")
 
 
-def _logger() -> object:
-    return build_worker_logger(_LOG_QUEUE, "test-archives")
+def _logger() -> logging.Logger:
+    return build_worker_logger(_LOG_QUEUE, "test-archives")  # type: ignore[no-any-return]
 
 
 def _fixture(name: str) -> Path:
@@ -59,15 +61,15 @@ def _7z_fixture(name: str) -> Path:
 def _make_ctx(
     tmp_path: Path,
     *,
-    archives: dict | None = None,
+    archives: dict[str, Any] | None = None,
     data_handlers: list[str] | None = None,
 ) -> WorkerContext:
     arc_cfg = ArchiveConfig(**(archives or {}))
-    extra: dict = {}
+    extra: dict[str, Any] = {}
     if data_handlers is not None:
         extra["data_handlers"] = data_handlers
     return WorkerContext(
-        config=Config(start_dirs=[], archives=arc_cfg, **extra),  # type: ignore[arg-type]
+        config=Config(start_dirs=[], archives=arc_cfg, **extra),
         task_queue=mp.Queue(),
         result_queue=mp.Queue(),
         log_queue=_LOG_QUEUE,
@@ -147,7 +149,7 @@ def test_archive_config_unknown_key_rejected() -> None:
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError):
-        ArchiveConfig(typo_field="bad")  # type: ignore[call-arg]
+        ArchiveConfig(typo_field="bad")
 
 
 @pytest.mark.unit
