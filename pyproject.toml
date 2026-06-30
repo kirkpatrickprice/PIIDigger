@@ -135,6 +135,13 @@ module = [
 ]
 ignore_errors = true
 
+# Tests are not type-checked. `uv run mypy src/` is the canonical command;
+# this override keeps IDE mypy extensions (which check the whole workspace)
+# in agreement with it instead of flagging untyped test helpers.
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+ignore_errors = true
+
 # New code is held to a strict standard.
 [[tool.mypy.overrides]]
 module = [
