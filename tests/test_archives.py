@@ -124,8 +124,8 @@ def test_archive_config_defaults() -> None:
     assert cfg.formats == ["all"]
     assert cfg.max_depth == 1
     assert cfg.max_members == 10_000
-    assert cfg.max_member_uncompressed_size_mb == 64
-    assert cfg.max_total_uncompressed_size_mb == 1024
+    assert cfg.max_member_uncompressed_size_mb == 512
+    assert cfg.max_total_uncompressed_size_mb == 8192
 
 
 @pytest.mark.unit
@@ -139,7 +139,7 @@ def test_archive_config_from_toml(tmp_path: Path) -> None:
     assert config.archives.enabled is False
     assert config.archives.max_members == 500
     assert config.archives.max_member_uncompressed_size_mb == 128
-    assert config.archives.max_total_uncompressed_size_mb == 1024  # default preserved
+    assert config.archives.max_total_uncompressed_size_mb == 8192  # default preserved
 
 
 @pytest.mark.unit
