@@ -71,8 +71,8 @@ _DEFAULT_LOG_LEVEL: str = "INFO"
 _DEFAULT_RESULTS_PATH: str = "piidigger-results"
 _ARCHIVE_MAX_DEPTH: int = 1
 _ARCHIVE_MAX_MEMBERS: int = 10_000
-_ARCHIVE_MAX_MEMBER_SIZE_MB: int = 64
-_ARCHIVE_MAX_TOTAL_SIZE_MB: int = 1024
+_ARCHIVE_MAX_MEMBER_SIZE_MB: int = 512
+_ARCHIVE_MAX_TOTAL_SIZE_MB: int = 8192
 
 _KNOWN_CONFIG_KEYS: tuple[str, ...] = (
     "start_dirs",
@@ -215,9 +215,9 @@ def generate_toml_template() -> str:
 class ArchiveConfig(PiiDiggerModel):
     """Archive scanning configuration.
 
-    Controls archive scanning behaviour.  Defaults enable all registered formats
-    with conservative safety limits.  Set enabled=False to skip all archive
-    files without any other change.
+    Controls archive scanning behaviour.  Defaults enable all registered formats.
+    Limits guard against disk exhaustion and runaway scan time.
+    Set enabled=False to skip all archive files without any other change.
     """
 
     enabled: bool = True

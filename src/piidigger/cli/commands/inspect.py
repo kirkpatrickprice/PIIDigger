@@ -6,6 +6,7 @@ from pathlib import Path
 import click
 import psutil
 
+from piidigger.archivehandlers import HANDLER_REGISTRY as ARCHIVE_HANDLER_REGISTRY
 from piidigger.datahandlers import HANDLER_REGISTRY
 from piidigger.filehandlers import get_supported_exts, get_supported_mimes
 from piidigger.getencoding import detect_encoding
@@ -32,6 +33,13 @@ def inspect_encoding(file_path: Path) -> None:
         click.echo(detect_encoding(file_path.read_bytes()))
     except OSError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+@inspect_group.command(name="archivetypes")
+def inspect_archivetypes() -> None:
+    """List supported archive formats."""
+    for name in sorted(ARCHIVE_HANDLER_REGISTRY):
+        click.echo(name)
 
 
 @inspect_group.command(name="datatypes")
