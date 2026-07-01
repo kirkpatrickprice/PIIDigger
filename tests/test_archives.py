@@ -1,12 +1,14 @@
-"""Multi-format archive support tests (ZIP and 7z).
+"""Multi-format archive support tests (ZIP, 7z, and tar).
 
 Covers:
   - ArchiveConfig model (defaults, TOML round-trip, unknown-key rejection)
   - ArchiveMemberItem (protocol compliance, open_bytes, open_stream, materialize)
   - FilesystemItem.open_bytes() still returns None
   - secure_delete() utility
-  - handle_enum_dir archive routing (zip/7z → ENUM_ARCHIVE_MEMBERS; archives disabled)
-  - handle_enum_archive_members safety checks (ZIP and 7z scenarios)
+  - _cleanup_temp_workspace() recursive deletion
+  - handle_enum_dir archive routing (zip/7z/tar → ENUM_ARCHIVE_MEMBERS; archives disabled)
+  - detect_archive_type() compound-suffix and alias mapping
+  - handle_enum_archive_members safety checks (ZIP, 7z, and tar scenarios)
   - handle_scan_archive_member (PII found, lineage fields, no-handler defensive path)
   - --no-archives CLI override logic
 """
@@ -38,6 +40,7 @@ from piidigger.protocols import ScannableItem
 _LOG_QUEUE: mp.Queue = mp.Queue()  # type: ignore[type-arg]
 _ZIP_FIXTURES = Path("testdata/zip")
 _7Z_FIXTURES = Path("testdata/7z")
+_TAR_FIXTURES = Path("testdata/tar")
 
 
 def _logger() -> logging.Logger:
@@ -55,6 +58,13 @@ def _7z_fixture(name: str) -> Path:
     p = _7Z_FIXTURES / name
     if not p.exists():
         pytest.skip(f"fixture {p} not found — run testdata/7z/create_fixtures.py")
+    return p
+
+
+def _tar_fixture(name: str) -> Path:
+    p = _TAR_FIXTURES / name
+    if not p.exists():
+        pytest.skip(f"fixture {p} not found — run testdata/tar/create_fixtures.py")
     return p
 
 
@@ -809,3 +819,363 @@ def test_enum_dir_archive_type_in_payload(tmp_path: Path) -> None:
     }
     assert types_by_ext[".zip"] == "zip"
     assert types_by_ext[".7z"] == "7z"
+
+
+# ---------------------------------------------------------------------------
+# detect_archive_type() — compound-suffix and alias mapping
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_detect_archive_type_tar() -> None:
+    from piidigger.archivehandlers import detect_archive_type
+
+    assert detect_archive_type("backup.tar") == "tar"
+
+
+@pytest.mark.unit
+def test_detect_archive_type_tar_gz_compound_suffix() -> None:
+    from piidigger.archivehandlers import detect_archive_type
+
+    assert detect_archive_type("backup.tar.gz") == "tar"
+
+
+@pytest.mark.unit
+def test_detect_archive_type_tgz_alias() -> None:
+    from piidigger.archivehandlers import detect_archive_type
+
+    assert detect_archive_type("backup.tgz") == "tar"
+
+
+@pytest.mark.unit
+def test_detect_archive_type_tbz2_alias() -> None:
+    from piidigger.archivehandlers import detect_archive_type
+
+    assert detect_archive_type("backup.tbz2") == "tar"
+
+
+@pytest.mark.unit
+def test_detect_archive_type_txz_alias() -> None:
+    from piidigger.archivehandlers import detect_archive_type
+
+    assert detect_archive_type("backup.txz") == "tar"
+
+
+@pytest.mark.unit
+def test_detect_archive_type_plain_gz_not_tar() -> None:
+    """A bare .gz file (no .tar segment) must not be routed to the tar handler."""
+    from piidigger.archivehandlers import detect_archive_type
+
+    assert detect_archive_type("notes.gz") is None
+
+
+@pytest.mark.unit
+def test_detect_archive_type_zip_unaffected() -> None:
+    from piidigger.archivehandlers import detect_archive_type
+
+    assert detect_archive_type("archive.zip") == "zip"
+
+
+@pytest.mark.unit
+def test_detect_archive_type_unknown_returns_none() -> None:
+    from piidigger.archivehandlers import detect_archive_type
+
+    assert detect_archive_type("data.rar") is None
+
+
+# ---------------------------------------------------------------------------
+# _cleanup_temp_workspace — recursive deletion
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_cleanup_temp_workspace_recursive(tmp_path: Path) -> None:
+    """Files in subdirectories are secure-deleted and the full tree is removed."""
+    from piidigger.orchestration.worker._loop import _cleanup_temp_workspace
+
+    task_id = "test-task-id"
+    task_temp = tmp_path / task_id
+    subdir = task_temp / "subdir"
+    subdir.mkdir(parents=True)
+    nested_file = subdir / "secret.txt"
+    nested_file.write_bytes(b"sensitive data")
+    flat_file = task_temp / "flat.txt"
+    flat_file.write_bytes(b"also sensitive")
+
+    _cleanup_temp_workspace(tmp_path, task_id)
+
+    assert not task_temp.exists()
+
+
+# ---------------------------------------------------------------------------
+# TarArchiveHandler — unit tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_tar_handler_list_members() -> None:
+    from piidigger.archivehandlers._tar import handler
+
+    archive = _tar_fixture("simple-pii.tar")
+    members = handler.list_members(archive)
+
+    assert len(members) == 1
+    assert members[0].name == "readme.txt"
+    assert members[0].uncompressed_size > 0
+    assert members[0].compressed_size == 0
+    assert not members[0].is_dir
+    assert not members[0].is_encrypted
+
+
+@pytest.mark.unit
+def test_tar_handler_extract_member(tmp_path: Path) -> None:
+    from piidigger.archivehandlers._tar import handler
+
+    archive = _tar_fixture("simple-pii.tar")
+    extracted = handler.extract_member(archive, "readme.txt", tmp_path)
+
+    assert extracted.exists()
+    assert b"4111111111111111" in extracted.read_bytes()
+
+
+@pytest.mark.unit
+def test_tar_handler_corrupt_raises_archive_read_error() -> None:
+    from piidigger.archivehandlers._tar import handler
+    from piidigger.exceptions import ArchiveReadError
+
+    archive = _tar_fixture("corrupt.tar")
+    with pytest.raises(ArchiveReadError):
+        handler.list_members(archive)
+
+
+@pytest.mark.unit
+def test_tar_handler_list_members_excludes_symlinks() -> None:
+    from piidigger.archivehandlers._tar import handler
+
+    archive = _tar_fixture("symlink-member.tar")
+    members = handler.list_members(archive)
+
+    names = [m.name for m in members]
+    assert "readme.txt" in names
+    assert "link-to-readme.txt" not in names
+
+
+@pytest.mark.unit
+def test_tar_handler_transparent_gzip() -> None:
+    from piidigger.archivehandlers._tar import handler
+
+    archive = _tar_fixture("simple-pii.tar.gz")
+    members = handler.list_members(archive)
+
+    assert any(m.name == "readme.txt" for m in members)
+
+
+@pytest.mark.unit
+def test_tar_handler_transparent_bzip2() -> None:
+    from piidigger.archivehandlers._tar import handler
+
+    archive = _tar_fixture("simple-pii.tar.bz2")
+    members = handler.list_members(archive)
+
+    assert any(m.name == "readme.txt" for m in members)
+
+
+@pytest.mark.unit
+def test_tar_handler_transparent_xz() -> None:
+    from piidigger.archivehandlers._tar import handler
+
+    archive = _tar_fixture("simple-pii.tar.xz")
+    members = handler.list_members(archive)
+
+    assert any(m.name == "readme.txt" for m in members)
+
+
+# ---------------------------------------------------------------------------
+# handle_enum_archive_members — tar
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_enum_archive_tar_simple_pii_emits_scan_task(tmp_path: Path) -> None:
+    archive = _tar_fixture("simple-pii.tar")
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_archive_members(
+        _enum_archive_task(archive, archive_type="tar"), ctx, _logger()
+    )
+
+    assert result.status == "ok"
+    assert len(result.new_tasks) == 1
+    assert result.new_tasks[0]["payload"]["member_path"] == "readme.txt"
+    assert result.new_tasks[0]["payload"]["archive_type"] == "tar"
+
+
+@pytest.mark.unit
+def test_enum_archive_tar_gz_simple_pii_emits_scan_task(tmp_path: Path) -> None:
+    archive = _tar_fixture("simple-pii.tar.gz")
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_archive_members(
+        _enum_archive_task(archive, archive_type="tar"), ctx, _logger()
+    )
+
+    assert result.status == "ok"
+    assert len(result.new_tasks) == 1
+
+
+@pytest.mark.unit
+def test_enum_archive_tar_corrupt_returns_error(tmp_path: Path) -> None:
+    archive = _tar_fixture("corrupt.tar")
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_archive_members(
+        _enum_archive_task(archive, archive_type="tar"), ctx, _logger()
+    )
+
+    assert result.status == "error"
+
+
+@pytest.mark.unit
+def test_enum_archive_tar_oversize_member_skipped(tmp_path: Path) -> None:
+    archive = _tar_fixture("oversize-member.tar.gz")
+    ctx = _make_ctx(tmp_path, archives={"max_member_uncompressed_size_mb": 1})
+    result = handle_enum_archive_members(
+        _enum_archive_task(archive, archive_type="tar"), ctx, _logger()
+    )
+
+    assert result.status == "ok"
+    assert len(result.new_tasks) == 0
+    assert result.counters.get("archive_members_skipped", 0) >= 1
+
+
+@pytest.mark.unit
+def test_enum_archive_tar_member_count_limit(tmp_path: Path) -> None:
+    archive = _tar_fixture("many-members.tar")
+    ctx = _make_ctx(tmp_path, archives={"max_members": 3})
+    result = handle_enum_archive_members(
+        _enum_archive_task(archive, archive_type="tar"), ctx, _logger()
+    )
+
+    assert result.status == "ok"
+    assert len(result.new_tasks) == 3
+    assert result.counters.get("archive_members_skipped", 0) == 2
+
+
+@pytest.mark.unit
+def test_enum_archive_tar_traversal_member_rejected(tmp_path: Path) -> None:
+    archive = _tar_fixture("traversal-member.tar")
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_archive_members(
+        _enum_archive_task(archive, archive_type="tar"), ctx, _logger()
+    )
+
+    assert result.status == "ok"
+    member_paths = [t["payload"]["member_path"] for t in result.new_tasks]
+    assert not any(".." in p for p in member_paths)
+
+
+@pytest.mark.unit
+def test_enum_archive_tar_symlink_member_not_scanned(tmp_path: Path) -> None:
+    """Symlink members excluded by list_members() produce no SCAN_ARCHIVE_MEMBER tasks."""
+    archive = _tar_fixture("symlink-member.tar")
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_archive_members(
+        _enum_archive_task(archive, archive_type="tar"), ctx, _logger()
+    )
+
+    assert result.status == "ok"
+    member_paths = [t["payload"]["member_path"] for t in result.new_tasks]
+    assert "link-to-readme.txt" not in member_paths
+
+
+# ---------------------------------------------------------------------------
+# handle_scan_archive_member — tar
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_scan_archive_member_tar_finds_pii(tmp_path: Path) -> None:
+    archive = _tar_fixture("simple-pii.tar")
+    content_size = len(b"card number: 4111111111111111\n")
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+    task = _scan_archive_task(archive, "readme.txt", ".txt", content_size, archive_type="tar")
+    result = handle_scan_archive_member(task, ctx, _logger())
+
+    assert result.status == "ok"
+    assert len(result.findings) >= 1
+    assert result.findings[0]["handler"] == "pan"
+
+
+@pytest.mark.unit
+def test_scan_archive_member_tar_lineage(tmp_path: Path) -> None:
+    """source_container_type is 'tar' regardless of compression flavor."""
+    archive = _tar_fixture("simple-pii.tar.gz")
+    content_size = len(b"card number: 4111111111111111\n")
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+    task = _scan_archive_task(archive, "readme.txt", ".txt", content_size, depth=1, archive_type="tar")
+    result = handle_scan_archive_member(task, ctx, _logger())
+
+    assert result.status == "ok"
+    assert result.findings[0]["source_container_type"] == "tar"
+
+
+# ---------------------------------------------------------------------------
+# handle_enum_dir — tar routing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_enum_dir_tar_file_emits_enum_archive_task(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "data.tar").write_bytes(b"placeholder")
+
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_dir(_enum_dir_task(root), ctx, _logger())
+
+    archive_tasks = [t for t in result.new_tasks if t["task_type"] == TaskType.ENUM_ARCHIVE_MEMBERS]
+    assert len(archive_tasks) == 1
+    assert archive_tasks[0]["payload"]["archive_type"] == "tar"
+
+
+@pytest.mark.unit
+def test_enum_dir_tar_gz_file_emits_enum_archive_task(tmp_path: Path) -> None:
+    """.tar.gz compound suffix is routed to ENUM_ARCHIVE_MEMBERS with archive_type='tar'."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "backup.tar.gz").write_bytes(b"placeholder")
+
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_dir(_enum_dir_task(root), ctx, _logger())
+
+    archive_tasks = [t for t in result.new_tasks if t["task_type"] == TaskType.ENUM_ARCHIVE_MEMBERS]
+    assert len(archive_tasks) == 1
+    assert archive_tasks[0]["payload"]["archive_type"] == "tar"
+
+
+@pytest.mark.unit
+def test_enum_dir_tgz_file_emits_enum_archive_task(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "backup.tgz").write_bytes(b"placeholder")
+
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_dir(_enum_dir_task(root), ctx, _logger())
+
+    archive_tasks = [t for t in result.new_tasks if t["task_type"] == TaskType.ENUM_ARCHIVE_MEMBERS]
+    assert len(archive_tasks) == 1
+    assert archive_tasks[0]["payload"]["archive_type"] == "tar"
+
+
+@pytest.mark.unit
+def test_enum_dir_zip_and_tar_gz_in_same_dir(tmp_path: Path) -> None:
+    """Mixed directory: zip and tar.gz both routed correctly; zip detection unaffected."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "report.zip").write_bytes(b"z")
+    (root / "backup.tar.gz").write_bytes(b"z")
+
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_dir(_enum_dir_task(root), ctx, _logger())
+
+    archive_tasks = [t for t in result.new_tasks if t["task_type"] == TaskType.ENUM_ARCHIVE_MEMBERS]
+    types = {Path(t["payload"]["archive_path"]).name: t["payload"]["archive_type"] for t in archive_tasks}
+    assert types["report.zip"] == "zip"
+    assert types["backup.tar.gz"] == "tar"

@@ -7,6 +7,9 @@ from piidigger.exceptions import ArchiveReadError
 from piidigger.models.archive import MemberInfo
 
 ARCHIVE_TYPE = "zip"
+HANDLES = {
+    "ext": [".zip"],
+}
 
 
 class ZipArchiveHandler:

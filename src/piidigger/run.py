@@ -48,8 +48,7 @@ def _prompt_admin_continue(timeout: int = _ADMIN_PROMPT_TIMEOUT) -> bool:
     Returns True to proceed, False to abort.
     """
     print(
-        f"Admin user not detected.  A full disk scan may not be possible."
-        f"  Continue (Y/n) [{timeout}s]: ",
+        f"Admin user not detected.  A full disk scan may not be possible.  Continue (Y/n) [{timeout}s]: ",
         end="",
         flush=True,
     )
@@ -59,7 +58,7 @@ def _prompt_admin_continue(timeout: int = _ADMIN_PROMPT_TIMEOUT) -> bool:
     def _read() -> None:
         try:
             result[0] = sys.stdin.readline().strip()
-        except (EOFError, OSError):
+        except EOFError, OSError:
             pass
         ev.set()
 
@@ -202,9 +201,8 @@ def run_scan(config: Config) -> int:
     # Create a PIIDigger-owned temp root and exclude it from directory scanning
     # so ENUM_DIR workers never attempt to scan extracted archive members.
     temp_base: Path = Path(tempfile.mkdtemp(prefix="piidigger_"))
-    runtime_config = config.model_copy(
-        update={"exclude_dirs": [*config.exclude_dirs, str(temp_base)]}
-    )
+    run_logger.info("temp workspace: %s", temp_base)
+    runtime_config = config.model_copy(update={"exclude_dirs": [*config.exclude_dirs, str(temp_base)]})
 
     ctx = WorkerContext(
         config=runtime_config,

@@ -42,6 +42,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
 
     new_tasks: list[dict[str, Any]] = []
     files_found = 0
+    bytes_found = 0
     members_skipped = 0
     archive_errors = 0
 
@@ -185,6 +186,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             }
         )
         files_found += 1
+        bytes_found += uncompressed_size
 
     return TaskResult(
         task_id=task.task_id,
@@ -194,6 +196,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
         counters={
             "files_scanned": 1,
             "files_found": files_found,
+            "bytes_found": bytes_found,
             "archive_members_skipped": members_skipped,
             "archive_errors": archive_errors,
         },

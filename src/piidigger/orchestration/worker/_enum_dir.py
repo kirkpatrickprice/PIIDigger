@@ -36,16 +36,18 @@ def _is_excluded(path: Path, exclude_dirs: list[str]) -> bool:
     return False
 
 
-def _is_archive_format(ext: str, config: Config) -> bool:
-    """Return True when ext matches a configured archive format and archives are enabled."""
+def _detect_archive_type(filename: str, config: Config) -> str | None:
+    """Return the archive_type for filename, or None if not a configured archive format."""
     if not config.archives.enabled:
-        return False
-    ext_bare = ext.lstrip(".").lower()
-    if "all" in config.archives.formats:
-        from piidigger.archivehandlers import HANDLER_REGISTRY  # noqa: PLC0415
+        return None
+    from piidigger.archivehandlers import detect_archive_type  # noqa: PLC0415
 
-        return ext_bare in HANDLER_REGISTRY
-    return ext_bare in {fmt.lower().lstrip(".") for fmt in config.archives.formats}
+    archive_type = detect_archive_type(filename)
+    if archive_type is None:
+        return None
+    if "all" in config.archives.formats:
+        return archive_type
+    return archive_type if archive_type in {f.lower() for f in config.archives.formats} else None
 
 
 def _is_cloud_placeholder(path: Path) -> bool:
@@ -133,24 +135,23 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
 
                 # Archive files are enumerated separately — emit before the regular
                 # handler check so they are not silently skipped (no FileHandler
-                # is registered for .zip).
-                if _is_archive_format(ext, config):
+                # is registered for .zip, .tar.gz, etc.).
+                archive_type = _detect_archive_type(entry.name, config)
+                if archive_type is not None:
                     new_tasks.append(
                         {
                             "task_type": TaskType.ENUM_ARCHIVE_MEMBERS,
                             "payload": {
                                 "archive_path": str(entry),
-                                "archive_type": ext.lstrip(".").lower(),
+                                "archive_type": archive_type,
                                 "depth": 0,
                             },
                             "timeout_seconds": config.default_timeout_seconds,
                         }
                     )
                     files_found += 1
-                    try:
-                        bytes_found += entry.stat().st_size
-                    except OSError:
-                        pass
+                    # bytes_found for archive members is counted in _enum_archive.py
+                    # using uncompressed member sizes — not the compressed on-disk size here.
                     continue
 
                 # Filter by include_exts / include_mime

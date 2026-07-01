@@ -6,6 +6,9 @@ from piidigger.exceptions import ArchiveReadError
 from piidigger.models.archive import MemberInfo
 
 ARCHIVE_TYPE = "7z"
+HANDLES = {
+    "ext": [".7z"],
+}
 
 
 class SevenZArchiveHandler:
@@ -38,22 +41,12 @@ class SevenZArchiveHandler:
             with py7zr.SevenZipFile(archive_path, mode="r") as szf:
                 szf.extract(path=str(dest_dir), targets=[member_path])
 
-            # py7zr preserves internal path structure; flatten to dest_dir
             extracted = dest_dir / member_path
             if not extracted.exists():
                 raise ArchiveReadError(
                     f"member {member_path!r} not found after extraction from {archive_path}"
                 )
-            flat_dest = dest_dir / Path(member_path).name
-            if extracted != flat_dest:
-                extracted.rename(flat_dest)
-                parent = extracted.parent
-                if parent != dest_dir:
-                    try:
-                        parent.rmdir()
-                    except OSError:
-                        pass
-            return flat_dest
+            return extracted
         except ArchiveReadError:
             raise
         except Exception as exc:  # noqa: BLE001

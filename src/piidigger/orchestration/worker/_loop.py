@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import os
+import shutil
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -54,20 +55,21 @@ DISPATCH: dict[TaskType, _HandlerFn] = {
 
 
 def _cleanup_temp_workspace(temp_base: Path, task_id: str) -> None:
-    """Securely delete per-task temp files created by ArchiveMemberItem.materialize().
+    """Securely delete per-task temp files then remove the task temp directory.
 
-    Creates no-ops gracefully when the task never called materialize() (the
-    common case for non-archive tasks and archive tasks that used open_bytes()).
+    Walks task_temp recursively so handlers need not flatten extracted files
+    to a single level.  secure_delete() is called only on files — unlink()
+    raises IsADirectoryError on directories, which missing_ok=True does not
+    suppress.  shutil.rmtree() removes the now-empty directory tree.
+    No-ops gracefully when the task created no temp files.
     """
     task_temp = temp_base / task_id
     if not task_temp.exists():
         return
-    for path in task_temp.iterdir():
-        secure_delete(path)
-    try:
-        task_temp.rmdir()
-    except OSError:
-        pass
+    for path in task_temp.rglob("*"):
+        if path.is_file():
+            secure_delete(path)
+    shutil.rmtree(task_temp, ignore_errors=True)
 
 
 def _dispatch(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
