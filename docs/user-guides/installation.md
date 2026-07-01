@@ -21,6 +21,8 @@ If you're not already familiar with managing Python-based applications, then I w
 
 ## Getting Started
 
+**NOTE:** If UV is not desirable for any number of reasons, there are standalone Windows and Linux packages available on the releases page (https://github.com/kirkpatrickprice/PIIDigger/releases).
+
 ### First Steps -- UV Installation
 
 1. Install Astral's UV from [UV documentation](https://docs.astral.sh/uv/) if not already installed 

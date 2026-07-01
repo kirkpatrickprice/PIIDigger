@@ -25,6 +25,19 @@ Before a member is ever extracted, it has to pass two gates: it must be an actua
 
 In all three cases, a symlink entry never becomes an extraction target, so it has no path to being followed or read by PIIDigger — the check happens up front, not as a side effect of the underlying library's own extraction safeguards.
 
+## Guarding Against Zip Bombs and Resource Exhaustion
+
+A malicious or corrupt archive can claim to contain far more data than is reasonable to extract — a small file that expands to gigabytes, an archive with hundreds of thousands of entries, or a handful of members that together would exhaust disk space. PIIDigger checks an archive's own declared member metadata (names, and their compressed/uncompressed sizes) during the initial listing pass — before extracting anything — and rejects members that look unsafe. These limits live under `[archives]` in the config file; see [Advanced Configuration](advanced-configuration.md) for the full settings reference.
+
+- **Member count cap** — `max_members` (default `10000`). Once this many members have been accepted from one archive, enumeration of that archive stops entirely; every remaining member is counted as skipped without being evaluated individually.
+- **Per-member size cap** — `max_member_uncompressed_size_mb` (default `512`). Any single member whose declared uncompressed size exceeds this is skipped, regardless of how small it is compressed.
+- **Compression-ratio heuristic** — a fixed check, not a separate config setting: any member whose declared uncompressed size is more than **1,000 times** its compressed size is rejected outright as a probable bomb, even if it would otherwise fit under the per-member size cap. Highly repetitive data (the classic zip-bomb technique) compresses to a tiny fraction of its expanded size, so this catches bombs that a size cap alone could miss if the cap were set generously.
+- **Running total cap** — `max_total_uncompressed_size_mb` (default `8192`). PIIDigger tracks the combined declared uncompressed size of every member accepted so far from one archive. Once accepting the next member would push that running total over the cap, that member is skipped — but enumeration continues, so a smaller member later in the archive can still be accepted if it fits.
+
+Because all four checks run against the archive's own header metadata during the up-front listing pass, a member that fails any of them is never extracted, and its data never touches disk. This is the same listing pass described in [How Archive Scanning Works](#how-archive-scanning-works) — size and ratio safety is one of the things that pass exists to establish before any extraction is allowed to happen.
+
+If you're scanning archives from a source you'd consider untrusted — say, a file share fed by external uploads — you can tighten these below their defaults for that run; see the "Disable or tune archive scanning" scenario in [Advanced Configuration](advanced-configuration.md#disable-or-tune-archive-scanning) for an example. If archive scanning isn't something you want to expose to untrusted input at all, `archives.enabled = false` in the config or the `--no-archives` run-time flag skip archive handling entirely for that run.
+
 ## The Temporary Workspace
 
 At the start of every run, PIIDigger creates one temporary folder for that run only, inside the OS's normal temp location (`%TEMP%` on Windows, `/tmp` on Linux/macOS). The path looks like `piidigger_<random>` and is written to the run's log file as `temp workspace: <path>` — that log line is the authoritative record of where a given run's scratch files lived.
