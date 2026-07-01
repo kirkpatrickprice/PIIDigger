@@ -1,44 +1,74 @@
 site_name: PIIDigger
 site_description: Identify Personally Identifiable Information in common file types
+site_url: https://kirkpatrickprice.github.io/PIIDigger
 repo_url: https://github.com/kirkpatrickprice/PIIDigger
 repo_name: kirkpatrickprice/PIIDigger
 docs_dir: docs
 
+# Exclude GitHub-specific files from documentation
+exclude_docs: |
+  .github/
+  docs/templates/
+
 theme:
   name: material
-  palette:
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      toggle:
-        icon: material/weather-night
-        name: Switch to dark mode
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      toggle:
-        icon: material/weather-sunny
-        name: Switch to light mode
   features:
+    - navigation.tabs
     - navigation.sections
+    - navigation.expand
+    - navigation.path
     - navigation.top
+    - navigation.tracking
+    - navigation.indexes
+    - toc.integrate
+    - toc.follow
+    - search.highlight
     - content.code.copy
-    - search.suggest
+    - content.code.annotate
+  palette:
+    # Dark mode
+    - scheme: slate
+      primary: indigo
+      accent: orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    # Light mode
+    - scheme: default
+      primary: indigo
+      accent: light blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  logo: assets/piidigger-logo.svg
+  favicon: assets/piidigger-logo.svg
+  font:
+    text: Roboto
+    code: Roboto Mono
 
 markdown_extensions:
-  - admonition
-  - pymdownx.details
   - pymdownx.highlight:
       anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
   - pymdownx.inlinehilite
   - pymdownx.snippets
-  - pymdownx.tasklist:
-      custom_checkbox: true
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
           class: mermaid
-          format: !!python/name:pymdownx.superfences.fence_code_format
+          format: !!python/name:pymdownx.superfences.fence_div_format
+  - admonition
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - attr_list
+  - md_in_html
   - toc:
       permalink: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
 
 plugins:
   - search
