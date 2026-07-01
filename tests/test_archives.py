@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+import stat
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -430,6 +431,26 @@ def test_enum_archive_no_handler_member_skipped(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_enum_archive_zip_symlink_member_not_scanned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Symlink members excluded by list_members() produce no SCAN_ARCHIVE_MEMBER tasks."""
+    from piidigger.archivehandlers import _zip
+
+    zp = tmp_path / "test.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr("readme.txt", "hello world")
+        zf.writestr("link-to-readme.txt", "readme.txt")
+
+    monkeypatch.setattr(_zip, "_is_symlink", lambda info: info.filename == "link-to-readme.txt")
+
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_archive_members(_enum_archive_task(zp), ctx, _logger())
+
+    assert result.status == "ok"
+    member_paths = [t["payload"]["member_path"] for t in result.new_tasks]
+    assert "link-to-readme.txt" not in member_paths
+
+
+@pytest.mark.unit
 def test_enum_archive_total_size_limit_skips_oversized(tmp_path: Path) -> None:
     """Members that push running total over the limit are skipped."""
     zp = tmp_path / "big.zip"
@@ -592,6 +613,32 @@ def test_7z_handler_list_members(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_7z_handler_list_members_excludes_symlinks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """py7zr's in-memory writer can't author a real symlink entry, so the
+    symlink/non-symlink distinction is exercised by monkeypatching the
+    handler's own _is_symlink() rather than crafting a malicious archive."""
+    import io
+
+    import py7zr
+
+    from piidigger.archivehandlers import _7z
+
+    buf = io.BytesIO()
+    with py7zr.SevenZipFile(buf, "w") as szf:
+        szf.writestr(b"hello world", "readme.txt")
+        szf.writestr(b"readme.txt", "link-to-readme.txt")
+    archive = tmp_path / "test.7z"
+    archive.write_bytes(buf.getvalue())
+
+    monkeypatch.setattr(_7z, "_is_symlink", lambda info: info.filename == "link-to-readme.txt")
+
+    members = _7z.handler.list_members(archive)
+    names = [m.name for m in members]
+    assert "readme.txt" in names
+    assert "link-to-readme.txt" not in names
+
+
+@pytest.mark.unit
 def test_7z_handler_extract_member(tmp_path: Path) -> None:
     import io
 
@@ -627,6 +674,47 @@ def test_zip_handler_extract_member(tmp_path: Path) -> None:
     assert result.exists()
     assert result.read_bytes() == payload
     assert result.parent == dest_dir
+
+
+@pytest.mark.unit
+def test_zip_handler_list_members_excludes_symlinks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercised via monkeypatch rather than crafting real Unix symlink mode
+    bits into a zip's external_attr — see test_zip_handler_is_symlink_* for
+    direct coverage of that bit-math."""
+    from piidigger.archivehandlers import _zip
+
+    zp = tmp_path / "test.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr("readme.txt", "hello world")
+        zf.writestr("link-to-readme.txt", "readme.txt")
+
+    monkeypatch.setattr(_zip, "_is_symlink", lambda info: info.filename == "link-to-readme.txt")
+
+    members = _zip.handler.list_members(zp)
+    names = [m.name for m in members]
+    assert "readme.txt" in names
+    assert "link-to-readme.txt" not in names
+
+
+@pytest.mark.unit
+def test_zip_handler_is_symlink_detects_unix_mode_bits() -> None:
+    """Direct check of the external_attr bit-math, independent of monkeypatching."""
+    from piidigger.archivehandlers._zip import _is_symlink
+
+    symlink_info = zipfile.ZipInfo("link.txt")
+    symlink_info.create_system = 3  # Unix
+    symlink_info.external_attr = (stat.S_IFLNK | 0o777) << 16
+    assert _is_symlink(symlink_info) is True
+
+    regular_info = zipfile.ZipInfo("readme.txt")
+    regular_info.create_system = 3  # Unix
+    regular_info.external_attr = (stat.S_IFREG | 0o644) << 16
+    assert _is_symlink(regular_info) is False
+
+    windows_info = zipfile.ZipInfo("readme.txt")
+    windows_info.create_system = 0  # Windows/FAT — external_attr isn't a unix mode
+    windows_info.external_attr = (stat.S_IFLNK | 0o777) << 16
+    assert _is_symlink(windows_info) is False
 
 
 @pytest.mark.unit
@@ -714,6 +802,34 @@ def test_enum_archive_7z_member_count_limit(tmp_path: Path) -> None:
     assert result.status == "ok"
     assert len(result.new_tasks) == 3
     assert result.counters.get("archive_members_skipped", 0) == 2
+
+
+@pytest.mark.unit
+def test_enum_archive_7z_symlink_member_not_scanned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Symlink members excluded by list_members() produce no SCAN_ARCHIVE_MEMBER tasks."""
+    import io
+
+    import py7zr
+
+    from piidigger.archivehandlers import _7z
+
+    buf = io.BytesIO()
+    with py7zr.SevenZipFile(buf, "w") as szf:
+        szf.writestr(b"hello world", "readme.txt")
+        szf.writestr(b"readme.txt", "link-to-readme.txt")
+    archive = tmp_path / "test.7z"
+    archive.write_bytes(buf.getvalue())
+
+    monkeypatch.setattr(_7z, "_is_symlink", lambda info: info.filename == "link-to-readme.txt")
+
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_archive_members(
+        _enum_archive_task(archive, archive_type="7z"), ctx, _logger()
+    )
+
+    assert result.status == "ok"
+    member_paths = [t["payload"]["member_path"] for t in result.new_tasks]
+    assert "link-to-readme.txt" not in member_paths
 
 
 @pytest.mark.unit

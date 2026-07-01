@@ -17,11 +17,13 @@ Because each member is its own task, and PIIDigger typically runs several worker
 
 ### Symlinks and other non-regular members
 
-Before a member is ever extracted, it has to pass two gates: it must be an actual file (not a directory, and not a symlink, hardlink, device node, or similar), and its file type has to match a file type PIIDigger has a handler for -- either by extension or by MIME type. Archives — `.tar` in particular — can contain entries that are none of those things, most notably symbolic links, and how safely that's handled currently differs by archive format:
+Before a member is ever extracted, it has to pass two gates: it must be an actual file (not a directory, and not a symlink, hardlink, device node, or similar), and its file type has to match a file type PIIDigger has a handler for -- either by extension or by MIME type. Archives — `.tar` in particular — can contain entries that are none of those things, most notably symbolic links. All three supported archive formats are covered:
 
-- **`.tar` (and its compressed variants):** symlinks, hardlinks, device nodes, and FIFOs are excluded during enumeration, before any extraction decision is made — they never become a scan task at all. A symlink inside a tarball, even one crafted to point outside the archive, has no path to being followed or read by PIIDigger.
-- **`.zip`:** extraction never uses a "recreate the original file type" operation — it reads a member's stored bytes and writes them into a brand-new regular file. There's no mechanism here that creates or follows a filesystem symlink, regardless of what permission metadata a zip entry carries.
-- **`.7z`:** this is the one exception worth knowing about. PIIDigger's `.7z` handler does not currently filter out symlink members before extraction the way the `.tar` handler does, so a symlink entry in a `.7z` archive can reach the extraction step. In practice this is still constrained by the third-party `py7zr` library itself, which checks a symlink's target against the extraction directory and refuses to create it (raising an error instead) if the target would resolve outside that directory. That means a `.7z` symlink crafted to point at an arbitrary host path is rejected rather than followed — but the protection is coming from that dependency's own internal check, not from PIIDigger's own member-type filtering, so it's a narrower guarantee than the one `.tar` handling provides directly.
+- **`.tar` (and its compressed variants):** symlinks, hardlinks, device nodes, and FIFOs are excluded during enumeration, before any extraction decision is made — they never become a scan task at all.
+- **`.zip`:** entries whose stored metadata marks them as a Unix symlink are excluded the same way during enumeration. Independently of that check, extraction here never uses a "recreate the original file type" operation anyway — it reads a member's stored bytes and writes them into a brand-new regular file, so there's no mechanism that could create or follow a filesystem symlink regardless.
+- **`.7z`:** entries the library reports as a symlink are excluded during enumeration, matching the `.tar` and `.zip` behavior.
+
+In all three cases, a symlink entry never becomes an extraction target, so it has no path to being followed or read by PIIDigger — the check happens up front, not as a side effect of the underlying library's own extraction safeguards.
 
 ## The Temporary Workspace
 

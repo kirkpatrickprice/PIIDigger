@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from piidigger.exceptions import ArchiveReadError
 from piidigger.models.archive import MemberInfo
@@ -9,6 +10,11 @@ ARCHIVE_TYPE = "7z"
 HANDLES = {
     "ext": [".7z"],
 }
+
+
+def _is_symlink(info: Any) -> bool:
+    """Return True if info is a symbolic link entry, not real file content."""
+    return bool(info.is_symlink)
 
 
 class SevenZArchiveHandler:
@@ -27,6 +33,7 @@ class SevenZArchiveHandler:
                     is_encrypted=all_encrypted,
                 )
                 for info in raw
+                if not _is_symlink(info)
             ]
         except ImportError as exc:
             raise ArchiveReadError(f"py7zr is required for .7z archives: {exc}") from exc

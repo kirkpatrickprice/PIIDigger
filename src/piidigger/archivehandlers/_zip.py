@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import stat
 from pathlib import Path
-from zipfile import BadZipFile, ZipFile
+from zipfile import BadZipFile, ZipFile, ZipInfo
 
 from piidigger.exceptions import ArchiveReadError
 from piidigger.models.archive import MemberInfo
@@ -10,6 +11,21 @@ ARCHIVE_TYPE = "zip"
 HANDLES = {
     "ext": [".zip"],
 }
+
+# ZipInfo.create_system value meaning "this entry's metadata was written by a
+# Unix zip tool" — only then are external_attr's upper 16 bits a unix st_mode.
+_UNIX_CREATE_SYSTEM = 3
+
+
+def _is_symlink(info: ZipInfo) -> bool:
+    """Return True if info is a Unix symlink entry, not real file content.
+
+    Windows-authored zips never set create_system == 3, so this is always
+    False for them regardless of external_attr's contents.
+    """
+    if info.create_system != _UNIX_CREATE_SYSTEM:
+        return False
+    return stat.S_ISLNK(info.external_attr >> 16)
 
 
 class ZipArchiveHandler:
@@ -25,6 +41,7 @@ class ZipArchiveHandler:
                         is_encrypted=bool(info.flag_bits & 0x1),
                     )
                     for info in zf.infolist()
+                    if not _is_symlink(info)
                 ]
         except (BadZipFile, OSError) as exc:
             raise ArchiveReadError(str(exc)) from exc
