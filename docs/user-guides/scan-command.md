@@ -121,8 +121,6 @@ Here are a few notes about looking at the results:
     * `source_container_type` names the archive format (e.g. `"zip"`). 
 * `handler` names which PII data handler matched (e.g. `pan`, `email`), and `match_type` is the specific pattern within that handler (e.g. `visa`, `amex`, etc), with `value` being the matched text itself.
 
-**Important — per-file scan limit:** PIIDigger stops scanning an individual file after approximately 65 MB of extracted text content. This applies to plain-text files, PDFs, DOCX, and legacy/modern Excel spreadsheets (for spreadsheets, the limit resets per worksheet rather than applying to the whole workbook). Anything beyond that point in a single oversized file is never handed to the data handlers, so results for very large files should not be treated as an exhaustive list of every PII value the file contains — only what appears within roughly the first 65 MB of extracted content.
-
 ## Troubleshooting
 
 ### Admin privilege prompt

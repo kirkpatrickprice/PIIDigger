@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from piidigger.models.config import Config, ResultsConfig, generate_toml_template
+from piidigger.models.config import (
+    BufferConfig,
+    Config,
+    ResultsConfig,
+    SpreadsheetConfig,
+    generate_toml_template,
+)
 
 # ---------------------------------------------------------------------------
 # ResultsConfig
@@ -36,6 +42,51 @@ def test_results_config_rejects_unknown_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
+# BufferConfig
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_buffer_config_defaults() -> None:
+    b = BufferConfig()
+    assert b.buffer_unit_bytes == 650
+    assert b.buffer_unit_count == 100_000
+    assert b.max_buffer_bytes == 65_000_000
+
+
+@pytest.mark.unit
+def test_buffer_config_rejects_out_of_bounds() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        BufferConfig(buffer_unit_bytes=0)
+    with pytest.raises(ValidationError):
+        BufferConfig(buffer_unit_count=0)
+
+
+# ---------------------------------------------------------------------------
+# SpreadsheetConfig
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_spreadsheet_config_defaults() -> None:
+    s = SpreadsheetConfig()
+    assert s.blank_row_limit == 250
+    assert s.blank_col_limit == 500
+
+
+@pytest.mark.unit
+def test_spreadsheet_config_rejects_out_of_bounds() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        SpreadsheetConfig(blank_row_limit=-1)
+    with pytest.raises(ValidationError):
+        SpreadsheetConfig(blank_col_limit=-1)
+
+
+# ---------------------------------------------------------------------------
 # Config defaults
 # ---------------------------------------------------------------------------
 
@@ -48,6 +99,8 @@ def test_config_default_returns_config() -> None:
     assert len(c.exclude_dirs) >= 1
     assert c.performance == "balanced"
     assert c.local_files_only is True
+    assert c.buffer.buffer_unit_bytes == 650
+    assert c.spreadsheet.blank_row_limit == 250
 
 
 @pytest.mark.unit
@@ -135,6 +188,19 @@ def test_generate_toml_template_is_valid_toml() -> None:
     assert "macos" in data["start_dirs"]
     assert "linux" in data["start_dirs"]
     assert isinstance(data["exclude_dirs"], dict)
+
+
+@pytest.mark.unit
+def test_generate_toml_template_round_trips_buffer_and_spreadsheet(tmp_path: Path) -> None:
+    """[buffer] and [spreadsheet] survive a generate -> from_toml round trip."""
+    toml = tmp_path / "cfg.toml"
+    toml.write_text(generate_toml_template(), encoding="utf-8")
+
+    config = Config.from_toml(toml)
+    assert config.buffer.buffer_unit_bytes == 650
+    assert config.buffer.buffer_unit_count == 100_000
+    assert config.spreadsheet.blank_row_limit == 250
+    assert config.spreadsheet.blank_col_limit == 500
 
 
 @pytest.mark.unit

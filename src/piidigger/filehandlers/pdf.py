@@ -7,8 +7,8 @@ from pypdf.errors import (
     PdfReadError,
 )
 
-from piidigger.filehandlers._constants import DEFAULT_CHUNK_COUNT, MAX_CHUNK_SIZE
-from piidigger.filehandlers._sharedfuncs import ContentHandler
+from piidigger.filehandlers._sharedfuncs import ContentBuffer
+from piidigger.models.config import Config
 
 HANDLES = {
     "ext": [
@@ -28,34 +28,34 @@ class PdfHandler:
     Reads via source.open_stream() — PdfReader accepts an IO[bytes] directly.
     """
 
-    def read(self, source) -> Iterator[str]:  # source: ScannableItem
+    def read(self, source, config: Config) -> Iterator[str]:  # source: ScannableItem
         logging.getLogger("pypdf").setLevel(logging.ERROR)
         stream = source.open_stream()
         try:
             document = PdfReader(stream, strict=False)
-            chunk_handler: ContentHandler = ContentHandler(max_content_size=MAX_CHUNK_SIZE * DEFAULT_CHUNK_COUNT)
+            content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
 
             for page in document.pages:
                 page_content = page.extract_text()
                 for line in page_content.split("\n"):
-                    chunk_handler.append_content(line)
-                    if chunk_handler.content_buffer_full():
-                        yield chunk_handler.get_content()
+                    content_buffer.append_content(line)
+                    if content_buffer.content_buffer_full():
+                        yield content_buffer.get_content()
 
             metadata = document.metadata
             if metadata:
                 for key in metadata.keys():
                     val = metadata.get(key)
                     if val:
-                        chunk_handler.append_content(str(val))
-                        if chunk_handler.content_buffer_full():
-                            yield chunk_handler.get_content()
+                        content_buffer.append_content(str(val))
+                        if content_buffer.content_buffer_full():
+                            yield content_buffer.get_content()
 
-            final = chunk_handler.finalize_content()
+            final = content_buffer.finalize_content()
             if final:
                 yield final
 
-        except EmptyFileError, PdfReadError:
+        except (EmptyFileError, PdfReadError):
             return
         finally:
             stream.close()

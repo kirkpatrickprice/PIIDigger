@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import IO, Protocol, runtime_checkable
 
 from piidigger.models.archive import MemberInfo
+from piidigger.models.config import Config
 from piidigger.models.results import ResultRecord
 
 
@@ -35,7 +36,7 @@ class ScannableItem(Protocol):
 
 @runtime_checkable
 class FileHandler(Protocol):
-    def read(self, source: ScannableItem) -> Iterator[str]: ...
+    def read(self, source: ScannableItem, config: Config) -> Iterator[str]: ...
 
 
 @runtime_checkable

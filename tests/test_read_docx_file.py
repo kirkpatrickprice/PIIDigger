@@ -3,11 +3,12 @@ from pathlib import Path
 import pytest
 
 from piidigger.filehandlers.docx import DocxHandler
+from piidigger.models.config import Config
 from piidigger.orchestration.sources import FilesystemItem
 
 
 def _read(path: Path) -> list[str]:
-    return list(DocxHandler().read(FilesystemItem(path)))
+    return list(DocxHandler().read(FilesystemItem(path), Config()))
 
 
 @pytest.mark.filehandlers
@@ -22,7 +23,7 @@ def test_docx_empty_file() -> None:
     assert chunks == []
 
 
-# All non-empty DOCX fixtures fit in a single chunk with DEFAULT_CHUNK_COUNT.
+# All non-empty DOCX fixtures fit in a single chunk with the default buffer size.
 # Each expected value is the exact content the handler produces after word-splitting.
 @pytest.mark.filehandlers
 @pytest.mark.parametrize(
@@ -70,7 +71,7 @@ def test_docx_single_chunk(filename: str, expected: str) -> None:
 
 @pytest.mark.filehandlers
 def test_docx_2paragraph() -> None:
-    # With DEFAULT_CHUNK_COUNT both paragraphs arrive as one large chunk.
+    # With the default buffer size both paragraphs arrive as one large chunk.
     chunks = _read(Path("testdata/docx/lorem-ipsum-2paragraph.docx"))
     content = " ".join(chunks)
     assert "Lorem ipsum dolor sit amet" in content

@@ -3,11 +3,12 @@ from pathlib import Path
 import pytest
 
 from piidigger.filehandlers.plaintext import PlaintextHandler
+from piidigger.models.config import BufferConfig, Config
 from piidigger.orchestration.sources import FilesystemItem
 
 
-def _read(path: Path) -> list[str]:
-    return list(PlaintextHandler().read(FilesystemItem(path)))
+def _read(path: Path, config: Config | None = None) -> list[str]:
+    return list(PlaintextHandler().read(FilesystemItem(path), config or Config()))
 
 
 # Files whose content should produce no meaningful text output.
@@ -79,7 +80,7 @@ def test_plaintext_single_chunk(filename: str, expected: str) -> None:
 
 @pytest.mark.filehandlers
 def test_plaintext_2paragraph() -> None:
-    # With DEFAULT_CHUNK_COUNT this multi-paragraph file lands in one large chunk.
+    # With the default buffer size this multi-paragraph file lands in one large chunk.
     chunks = _read(Path("testdata/plaintext/lorem-ipsum-2paragraph-utf8-crlf.txt"))
     content = " ".join(chunks)
     assert "Lorem ipsum dolor sit amet" in content
@@ -90,3 +91,16 @@ def test_plaintext_2paragraph() -> None:
 def test_plaintext_missing_file() -> None:
     with pytest.raises(FileNotFoundError):
         _read(Path("testdata/plaintext/does-not-exist.txt"))
+
+
+@pytest.mark.filehandlers
+def test_plaintext_buffer_config_controls_chunking() -> None:
+    # A much smaller buffer should split the same file into more, smaller chunks.
+    path = Path("testdata/plaintext/lorem-ipsum-2paragraph-utf8-crlf.txt")
+    default_chunks = _read(path)
+    small_buffer = Config(buffer=BufferConfig(buffer_unit_bytes=5, buffer_unit_count=1))
+    small_chunks = _read(path, small_buffer)
+
+    assert len(small_chunks) > len(default_chunks)
+    # Same words in the same order regardless of how they were chunked.
+    assert " ".join(small_chunks).split() == " ".join(default_chunks).split()

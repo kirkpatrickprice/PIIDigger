@@ -3,11 +3,12 @@ from pathlib import Path
 import pytest
 
 from piidigger.filehandlers.pdf import PdfHandler
+from piidigger.models.config import Config
 from piidigger.orchestration.sources import FilesystemItem
 
 
 def _read(path: Path) -> list[str]:
-    return list(PdfHandler().read(FilesystemItem(path)))
+    return list(PdfHandler().read(FilesystemItem(path), Config()))
 
 
 @pytest.mark.filehandlers
@@ -42,7 +43,7 @@ def test_pdf_sample_pans() -> None:
 
 @pytest.mark.filehandlers
 def test_pdf_lorem_ipsum() -> None:
-    # Multi-page document; with DEFAULT_CHUNK_COUNT the entire file arrives as
+    # Multi-page document; with the default buffer size the entire file arrives as
     # one or two large chunks.  Verify key content from the first and last pages.
     chunks = _read(Path("testdata/pdf/lorem-ipsum.pdf"))
     content = " ".join(chunks)

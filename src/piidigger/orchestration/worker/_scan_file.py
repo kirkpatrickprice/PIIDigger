@@ -12,7 +12,7 @@ from piidigger.orchestration.sources import FilesystemItem
 
 
 def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
-    """Scan one file: run all enabled data handlers over each text chunk."""
+    """Scan one file: run all enabled data handlers over each piece of extracted content."""
     from piidigger.datahandlers import HANDLER_REGISTRY  # lazy: deferred past warning-capture setup
     from piidigger.filehandlers import get_handler_for  # lazy: xlrd import triggers SyntaxWarning
 
@@ -36,16 +36,16 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
 
     item = FilesystemItem(payload.file_path, mime=payload.mime)
 
-    # Aggregate matches per data-handler across all chunks to produce one
+    # Aggregate matches per data-handler across all content pieces to produce one
     # ResultRecord per (file, handler) pair.
     per_handler: dict[str, dict[str, set[str]]] = {}
 
     try:
-        for chunk in file_handler.read(item):
-            if not chunk:
+        for content in file_handler.read(item, ctx.config):
+            if not content:
                 continue
             for dh in enabled_handlers:
-                matches = dh.find_matches(chunk)
+                matches = dh.find_matches(content)
                 for match_type, values in matches.items():
                     if values:
                         bucket = per_handler.setdefault(dh.name, {})

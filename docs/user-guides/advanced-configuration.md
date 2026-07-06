@@ -166,6 +166,27 @@ See [Archive Handling](archive-handling.md) for additional details on how PIIDig
 
 These limits also implicitly protect against path-traversal members (`../`) and encrypted members, both of which are always skipped and logged, independent of any setting.
 
+### `[buffer]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `buffer_unit_bytes` | `650` | Size, in bytes, of one word-aligned block of text handed to the PII-matching regexes at a time (words are never split mid-word). `650` was found to be the "happy place" for the built-in data handlers: regex matching has real per-call setup cost, so much smaller values waste CPU re-paying that overhead over and over, while much larger values make each individual regex pass slower. Also multiplied by `buffer_unit_count` to size the overall RAM buffer read from a file at a time (see `buffer_unit_count`) — most users will only ever need to adjust `buffer_unit_count`, not this value. |
+| `buffer_unit_count` | `100000` | Multiplied by `buffer_unit_bytes` to get the RAM buffer size (default 650 × 100,000 ≈ 65 MB) held per file before being handed to data handlers. This bounds memory use — it does not limit how much of a file gets scanned; the entire file is always read and scanned, just streamed through this buffer in bounded batches. Raising it buffers more per pass (more memory, longer per-pass regex matching — watch `default_timeout_seconds` if raised a lot); lowering it uses less memory at the cost of more, smaller passes. Applies to plain-text, PDF, DOCX, and spreadsheet files. |
+
+These two settings control how much RAM is used to hold file content in memory.  Each worker (see `performance` setting above) will use up to `buffer_unit_bytes X buffer_unit_count` bytes of RAM to hold files in memory.  If the file size is larger than this, then the file will be read in batches of this size.
+
+`buffer_unit_bytes` was determined to be the ideal amount of text to provide to the data handlers -- which are predominantly regular expression-based.  So most users will never need to change this.
+
+`buffer_unit_count` can be adjusted based on available RAM.  Compared to PIIDigger's program code, the file buffers represent the biggest demand on RAM.  Given that each worker manages its own buffers, the maximum amount of RAM will be `buffer_unit_bytes X buffer_unit_count X worker_count`.  So for example, with default settings and the `balanced` performance profile on an 8-core Intel processor, maximum RAM allocated to buffers will be:
+    `650 bytes/buffer x 100000 buffers/worker x 6 workers ~= 390MB`
+
+### `[spreadsheet]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `blank_row_limit` | `250` | Stop reading a worksheet after this many consecutive blank rows — avoids scanning huge sparse trailing ranges some spreadsheet software leaves behind. |
+| `blank_col_limit` | `500` | Same idea, applied within a single row: stop scanning across a row after this many consecutive blank cells. |
+
 ### Discovering valid values
 
 Rather than guessing at handler/extension names, ask PIIDigger directly:

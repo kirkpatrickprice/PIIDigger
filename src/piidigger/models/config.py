@@ -73,6 +73,10 @@ _ARCHIVE_MAX_DEPTH: int = 1
 _ARCHIVE_MAX_MEMBERS: int = 10_000
 _ARCHIVE_MAX_MEMBER_SIZE_MB: int = 512
 _ARCHIVE_MAX_TOTAL_SIZE_MB: int = 8192
+_DEFAULT_BUFFER_UNIT_BYTES: int = 650
+_DEFAULT_BUFFER_UNIT_COUNT: int = 100_000
+_DEFAULT_BLANK_ROW_LIMIT: int = 250
+_DEFAULT_BLANK_COL_LIMIT: int = 500
 
 _KNOWN_CONFIG_KEYS: tuple[str, ...] = (
     "start_dirs",
@@ -94,6 +98,10 @@ _KNOWN_CONFIG_KEYS: tuple[str, ...] = (
     "archives.max_members",
     "archives.max_member_uncompressed_size_mb",
     "archives.max_total_uncompressed_size_mb",
+    "buffer.buffer_unit_bytes",
+    "buffer.buffer_unit_count",
+    "spreadsheet.blank_row_limit",
+    "spreadsheet.blank_col_limit",
 )
 
 
@@ -203,6 +211,14 @@ def generate_toml_template() -> str:
         f"max_members = {_ARCHIVE_MAX_MEMBERS}",
         f"max_member_uncompressed_size_mb = {_ARCHIVE_MAX_MEMBER_SIZE_MB}",
         f"max_total_uncompressed_size_mb = {_ARCHIVE_MAX_TOTAL_SIZE_MB}",
+        "",
+        "[buffer]",
+        f"buffer_unit_bytes = {_DEFAULT_BUFFER_UNIT_BYTES}",
+        f"buffer_unit_count = {_DEFAULT_BUFFER_UNIT_COUNT}",
+        "",
+        "[spreadsheet]",
+        f"blank_row_limit = {_DEFAULT_BLANK_ROW_LIMIT}",
+        f"blank_col_limit = {_DEFAULT_BLANK_COL_LIMIT}",
     ]
     return "\n".join(lines) + "\n"
 
@@ -226,6 +242,34 @@ class ArchiveConfig(PiiDiggerModel):
     max_members: int = Field(default=_ARCHIVE_MAX_MEMBERS, ge=1)
     max_member_uncompressed_size_mb: int = Field(default=_ARCHIVE_MAX_MEMBER_SIZE_MB, ge=1)
     max_total_uncompressed_size_mb: int = Field(default=_ARCHIVE_MAX_TOTAL_SIZE_MB, ge=1)
+
+
+class BufferConfig(PiiDiggerModel):
+    """RAM-buffering configuration for text-extracting file handlers.
+
+    buffer_unit_bytes * buffer_unit_count is the amount of extracted text
+    held in memory before being handed to data handlers.  This bounds
+    memory use only — it never causes any part of a file to be skipped.
+    """
+
+    buffer_unit_bytes: int = Field(default=_DEFAULT_BUFFER_UNIT_BYTES, ge=1)
+    buffer_unit_count: int = Field(default=_DEFAULT_BUFFER_UNIT_COUNT, ge=1)
+
+    @property
+    def max_buffer_bytes(self) -> int:
+        return self.buffer_unit_bytes * self.buffer_unit_count
+
+
+class SpreadsheetConfig(PiiDiggerModel):
+    """Spreadsheet blank-run cutoff configuration (xls/xlsx handlers).
+
+    Unlike BufferConfig, these settings genuinely skip remaining content:
+    a worksheet stops being read once this many consecutive blank rows (or
+    a row stops being read once this many consecutive blank columns) are seen.
+    """
+
+    blank_row_limit: int = Field(default=_DEFAULT_BLANK_ROW_LIMIT, ge=0)
+    blank_col_limit: int = Field(default=_DEFAULT_BLANK_COL_LIMIT, ge=0)
 
 
 class ResultsConfig(PiiDiggerModel):
@@ -264,6 +308,8 @@ class Config(PiiDiggerModel):
     log_level: str = _DEFAULT_LOG_LEVEL
     results: ResultsConfig = Field(default_factory=ResultsConfig)
     archives: ArchiveConfig = Field(default_factory=ArchiveConfig)
+    buffer: BufferConfig = Field(default_factory=BufferConfig)
+    spreadsheet: SpreadsheetConfig = Field(default_factory=SpreadsheetConfig)
 
     @field_validator("data_handlers")
     @classmethod

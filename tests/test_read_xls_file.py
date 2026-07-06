@@ -3,11 +3,12 @@ from pathlib import Path
 import pytest
 
 from piidigger.filehandlers.xls import XlsHandler
+from piidigger.models.config import Config
 from piidigger.orchestration.sources import FilesystemItem
 
 
-def _read(path: Path) -> list[str]:
-    return list(XlsHandler().read(FilesystemItem(path)))
+def _read(path: Path, config: Config | None = None) -> list[str]:
+    return list(XlsHandler().read(FilesystemItem(path), config or Config()))
 
 
 @pytest.mark.filehandlers
@@ -23,7 +24,7 @@ def test_xls_empty_file() -> None:
 
 
 # Small, predictable fixtures: exact per-sheet chunk assertions.
-# XlsHandler yields one chunk per sheet; with DEFAULT_CHUNK_COUNT each sheet's
+# XlsHandler yields one chunk per sheet; with the default buffer size each sheet's
 # entire content fits in a single chunk.
 @pytest.mark.filehandlers
 @pytest.mark.parametrize(
@@ -60,7 +61,7 @@ def test_xls_exact_content(filename: str, expected_chunks: list[str]) -> None:
 @pytest.mark.filehandlers
 def test_xls_random_data_table() -> None:
     # Large table that was split into 22 chunks with maxChunkCount=2; now
-    # arrives as a single chunk with DEFAULT_CHUNK_COUNT.
+    # arrives as a single chunk with the default buffer size.
     chunks = _read(Path("testdata/xls/random-data-table.xls"))
     content = " ".join(chunks)
     assert "First Name" in content

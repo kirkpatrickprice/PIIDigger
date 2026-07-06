@@ -2,13 +2,8 @@ from collections.abc import Iterator
 
 import xlrd
 
-from piidigger.filehandlers._constants import (
-    DEFAULT_CHUNK_COUNT,
-    EXCEL_BLANK_COL_LIMIT,
-    EXCEL_BLANK_ROW_LIMIT,
-    MAX_CHUNK_SIZE,
-)
-from piidigger.filehandlers._sharedfuncs import ContentHandler
+from piidigger.filehandlers._sharedfuncs import ContentBuffer
+from piidigger.models.config import Config
 
 HANDLES = {
     "ext": [
@@ -34,7 +29,7 @@ class XlsHandler:
     FilesystemItem materialize() is a no-op (returns the path itself).
     """
 
-    def read(self, source) -> Iterator[str]:  # source: ScannableItem
+    def read(self, source, config: Config) -> Iterator[str]:  # source: ScannableItem
         data = source.open_bytes()
         if data is not None:
             book = xlrd.open_workbook(file_contents=data, on_demand=True, formatting_info=False)
@@ -43,7 +38,7 @@ class XlsHandler:
         try:
             for sheet_name in book.sheet_names():
                 active_sheet = book.sheet_by_name(sheet_name)
-                chunk_handler: ContentHandler = ContentHandler(max_content_size=MAX_CHUNK_SIZE * DEFAULT_CHUNK_COUNT)
+                content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
                 blank_row_count = 0
                 row_count = 0
                 total_rows = active_sheet.nrows
@@ -59,7 +54,7 @@ class XlsHandler:
                         item = active_sheet.cell_value(row, col)
                         if item is None or item == "":
                             blank_col_count += 1
-                            if blank_col_count > EXCEL_BLANK_COL_LIMIT:
+                            if blank_col_count > config.spreadsheet.blank_col_limit:
                                 break
                             continue
                         if isinstance(item, float) and str(item)[-2:] == ".0":
@@ -67,19 +62,19 @@ class XlsHandler:
                         line += str(item) + " "
                         row_has_data = True
 
-                    chunk_handler.append_content(line)
+                    content_buffer.append_content(line)
                     if row_has_data:
                         blank_row_count = 0
                     else:
                         blank_row_count += 1
-                        if blank_row_count > EXCEL_BLANK_ROW_LIMIT:
+                        if blank_row_count > config.spreadsheet.blank_row_limit:
                             break
 
-                    if chunk_handler.content_buffer_full():
-                        yield chunk_handler.get_content()
+                    if content_buffer.content_buffer_full():
+                        yield content_buffer.get_content()
 
                 book.unload_sheet(sheet_name)
-                final = chunk_handler.finalize_content()
+                final = content_buffer.finalize_content()
                 if final:
                     yield final
         finally:

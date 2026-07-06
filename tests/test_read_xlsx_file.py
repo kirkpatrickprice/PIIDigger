@@ -1,13 +1,15 @@
 from pathlib import Path
 
+import openpyxl
 import pytest
 
 from piidigger.filehandlers.xlsx import XlsxHandler
+from piidigger.models.config import Config, SpreadsheetConfig
 from piidigger.orchestration.sources import FilesystemItem
 
 
-def _read(path: Path) -> list[str]:
-    return list(XlsxHandler().read(FilesystemItem(path)))
+def _read(path: Path, config: Config | None = None) -> list[str]:
+    return list(XlsxHandler().read(FilesystemItem(path), config or Config()))
 
 
 @pytest.mark.filehandlers
@@ -23,7 +25,7 @@ def test_xlsx_empty_file() -> None:
 
 
 # Small, predictable fixtures: exact per-sheet chunk assertions.
-# XlsxHandler yields one chunk per sheet; with DEFAULT_CHUNK_COUNT each sheet's
+# XlsxHandler yields one chunk per sheet; with the default buffer size each sheet's
 # entire content fits in a single chunk.
 @pytest.mark.filehandlers
 @pytest.mark.parametrize(
@@ -64,9 +66,29 @@ def test_xlsx_exact_content(filename: str, expected_chunks: list[str]) -> None:
 @pytest.mark.filehandlers
 def test_xlsx_random_data_table() -> None:
     # Large table that was split into 22 chunks with maxChunkCount=2; now
-    # arrives as a single chunk with DEFAULT_CHUNK_COUNT.
+    # arrives as a single chunk with the default buffer size.
     chunks = _read(Path("testdata/xlsx/random-data-table.xlsx"))
     content = " ".join(chunks)
     assert "First Name" in content
     assert "j.montgomery@randatmail.com" in content
     assert "Lower secondary" in content
+
+
+@pytest.mark.filehandlers
+def test_xlsx_blank_row_limit_stops_early(tmp_path: Path) -> None:
+    # One value, a run of blank rows, then a second value further down.
+    workbook_path = tmp_path / "blank-run.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = "FIRST"
+    ws["A10"] = "SECOND"  # 8 blank rows (2-9) separate the two values
+    wb.save(workbook_path)
+
+    default_content = " ".join(_read(workbook_path))
+    assert "FIRST" in default_content
+    assert "SECOND" in default_content
+
+    strict_config = Config(spreadsheet=SpreadsheetConfig(blank_row_limit=3))
+    strict_content = " ".join(_read(workbook_path, strict_config))
+    assert "FIRST" in strict_content
+    assert "SECOND" not in strict_content

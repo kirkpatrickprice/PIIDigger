@@ -5,9 +5,9 @@
 from collections import deque
 
 
-class ContentHandler:
-    def __init__(self, max_content_size: int):
-        self.max_content_size = max_content_size
+class ContentBuffer:
+    def __init__(self, max_bytes: int):
+        self.max_content_size = max_bytes
         self.content_buffer = deque()
         self.buffer_length = 0
         self.total_bytes = 0

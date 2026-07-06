@@ -108,11 +108,11 @@ def handle_scan_archive_member(task: Task, ctx: WorkerContext, logger: logging.L
     per_handler: dict[str, dict[str, set[str]]] = {}
 
     try:
-        for chunk in file_handler.read(item):
-            if not chunk:
+        for content in file_handler.read(item, ctx.config):
+            if not content:
                 continue
             for dh in enabled_handlers:
-                matches = dh.find_matches(chunk)
+                matches = dh.find_matches(content)
                 for match_type, values in matches.items():
                     if values:
                         bucket = per_handler.setdefault(dh.name, {})
