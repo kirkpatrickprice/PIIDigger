@@ -288,6 +288,9 @@ piidigger inspect --help
 
 ## Related Documentation
 
+- [Config Command Guide](config-command.md)
+- [Scan Command Guide](scan-command.md)
+- [Inspect Command Guide](inspect-command.md)
 - [Installation Guide](installation.md)
 - [Archive Handling](archive-handling.md)
 - [Other Related Guides](index.md)

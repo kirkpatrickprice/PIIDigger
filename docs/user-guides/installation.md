@@ -87,6 +87,7 @@ This will run a scan with default settings:
 * Scan for all supported sensitive data types
 * Use the "Balanced" profile (75% of physical cores)
 * Produce output files in all supported versions under the `<current_folder>/piidigger-results/` folder
+* Produce a log in `current_folder/logs` using the `INFO` log level setting 
 
 #### Additional commands
 PIIDigger includes additional subcommands including:
@@ -115,6 +116,9 @@ piidigger inspect --help
 
 ## Related Documentation
 
+- [Scan Command Guide](scan-command.md)
+- [Config Command Guide](config-command.md)
+- [Inspect Command Guide](inspect-command.md)
 - [Advanced Configuration](advanced-configuration.md)
 - [Other Related Guides](index.md)
 

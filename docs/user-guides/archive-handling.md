@@ -85,4 +85,6 @@ In either case, the practical consequence is the same: extracted content — whi
 ## Related Documentation
 
 - [Advanced Configuration](advanced-configuration.md) — `[archives]` settings: enabling/disabling archive scanning, size limits, and supported formats
+- [Scan Command Guide](scan-command.md) — the `--no-archives` flag
+- [Inspect Command Guide](inspect-command.md) — `inspect archivetypes` to list supported formats
 - [Installation Guide](installation.md)
