@@ -110,21 +110,25 @@ Edit the generated file directly, then re-run `validate` after every change. The
 ### `generate` reports "already exists"
 
 **Symptoms:** `Error: 'piidigger.toml' already exists.  Delete it or choose a different path.`
+
 **Solutions:** `generate` never overwrites silently. Either delete/rename the existing file, or pass a different filename to `generate`.
 
 ### `validate` reports "Unknown setting"
 
 **Symptoms:** `Error: invalid configuration in piidigger.toml: - Unknown setting '...'`
+
 **Solutions:** The setting name doesn't exist in the current schema. If PIIDigger can guess what you meant, it says so (`Did you mean '...'?`). Otherwise, generate a fresh file to a new path and diff it against yours — a renamed or removed setting from an older PIIDigger version is the usual cause.
 
 ### `validate` reports "Unexpected keys found inside [section]"
 
 **Symptoms:** A setting you intended as top-level (like `log_level`) is being reported as if it belongs to a `[section]`.
+
 **Solutions:** In TOML, any `key = value` line written *after* a `[section]` header is parsed as part of that section, even if it wasn't meant to be. Move the flat setting above the first `[start_dirs]`/`[results]`/`[archives]` header in the file, or regenerate the template and re-apply your edits into the correctly-ordered copy.
 
 ### `validate` reports a TOML parse error about backslashes
 
 **Symptoms:** `Error: invalid TOML in piidigger.toml: Unescaped '\' in a string`
+
 **Solutions:** A Windows path was written with a single backslash (e.g. `C:\Windows`), which TOML doesn't allow unescaped inside a string. Use a forward slash (`C:/Windows`) or a doubled backslash (`C:\\Windows`) instead, then re-run `validate`.
 
 ### Getting Help
@@ -189,6 +193,7 @@ Neither subcommand touches the filesystem being scanned or spawns worker process
 
 ## Related Documentation
 
+- [⚠️ Breaking Changes](breaking-changes.md) — the `piidigger.toml` format changed in 2.0; 1.x config files will not load
 - [Scan Command Guide](scan-command.md)
 - [Advanced Configuration](advanced-configuration.md) — full settings reference and common scenarios
 - [Inspect Command Guide](inspect-command.md) — discover valid values for `data_handlers`, `include_exts`, and `archives.formats`

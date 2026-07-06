@@ -82,6 +82,15 @@ plugins:
 
 nav:
   - Home: index.md
+  - User Guides:
+      - Installation: user-guides/installation.md
+      - ⚠️ Breaking Changes: user-guides/breaking-changes.md
+      - Scan Command: user-guides/scan-command.md
+      - Config Command: user-guides/config-command.md
+      - Inspect Command: user-guides/inspect-command.md
+      - Advanced Configuration: user-guides/advanced-configuration.md
+      - Archive Handling: user-guides/archive-handling.md
+      - Troubleshooting: user-guides/troubleshooting.md
   - Architecture Refactor:
       - Overview: refactor/README.md
       - Redesign: refactor/ARCHITECTURE_REDESIGN.md
@@ -90,4 +99,4 @@ nav:
       - Testing Strategy: refactor/TESTING_STRATEGY.md
   - Quality Standards:
       - Testing Requirements: architecture/quality/testing-requirements.md
-  - API Reference: reference/api.md
+  - Extending PIIDigger: reference/extending.md

@@ -81,6 +81,7 @@ piidigger
 ```
 
 This will run a scan with default settings:
+
 * Scan all available Windows drive letters or Linux/MacOS disk partitions
 * Scan for all supported file types
 * Scan inside all supported archive files
@@ -114,12 +115,37 @@ piidigger scan --help
 piidigger inspect --help
 ```
 
+## Verifying Your Download and Troubleshooting the Install
+
+### Verifying file integrity (standalone packages)
+
+If you downloaded a standalone package from the [releases page](https://github.com/kirkpatrickprice/PIIDigger/releases) instead of using `uv`, confirm it matches the published hash before running it:
+
+```powershell
+# Confirm the downloaded Windows ZIP matches the hash listed on the release page
+Get-FileHash .\piidigger-<architecture>.zip
+```
+
+```bash
+# Confirm the downloaded Linux ZIP matches the hash listed on the release page
+sha256sum -b linux.zip
+```
+
+### Windows Anti-Virus
+
+PIIDigger's standalone Windows packages use Embedded Python distributed directly by the Python Software Foundation, which avoids most of the false-positive AV detections that affect PyInstaller-style Python packaging. Every release is also tested against VirusTotal before publishing. If your AV product still flags PIIDigger, please [open an issue](https://github.com/kirkpatrickprice/PIIDigger/issues) so it can be investigated.
+
+### macOS permissions
+
+On macOS 14 (Sonoma) and later, the OS prompts the first time an unrecognized application tries to access certain user data folders (Documents, Desktop, Downloads, etc.). Grant PIIDigger access through these prompts — scans of those folders will otherwise silently skip files it isn't permitted to read.
+
 ## Related Documentation
 
+- [⚠️ Breaking Changes](breaking-changes.md) — read this before upgrading from 1.x
 - [Scan Command Guide](scan-command.md)
 - [Config Command Guide](config-command.md)
 - [Inspect Command Guide](inspect-command.md)
 - [Advanced Configuration](advanced-configuration.md)
-- [Other Related Guides](index.md)
+- [Troubleshooting](troubleshooting.md)
 
 ---

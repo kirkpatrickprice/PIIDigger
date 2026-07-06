@@ -131,16 +131,19 @@ Every `inspect` subcommand prints plain text to stdout and nothing else — no l
 ### `inspect mime` or `inspect encoding` reports a path error
 
 **Symptoms:** Click reports the path doesn't exist before PIIDigger even attempts detection.
+
 **Solutions:** Double-check the path and quoting — especially on Windows paths with spaces. `encoding` additionally requires the argument to be a file, not a folder; `mime` accepts either.
 
 ### A file extension or MIME type I expected isn't in `inspect filetypes`
 
 **Symptoms:** A file type you want to scan isn't accepted by `include_exts`/`include_mime` even though it's a common format.
+
 **Solutions:** PIIDigger only scans file types with a registered file handler. If it's genuinely missing, that's a feature gap rather than a configuration mistake — check `inspect filetypes` against your config's `include_exts`/`include_mime` list before assuming the config is wrong.
 
 ### A `data_handlers` entry in my config fails validation
 
 **Symptoms:** `piidigger config validate` reports an unrecognized `data_handlers` value.
+
 **Solutions:** Run `piidigger inspect datatypes` and copy the exact spelling — handler names are lowercase and don't always match the PII type's common name (e.g. `pan` for payment card numbers, not `creditcard`).
 
 ### Getting Help

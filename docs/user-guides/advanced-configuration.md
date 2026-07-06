@@ -6,6 +6,8 @@ By default, `piidigger` scans every available drive/mount, every supported file 
 
 Configuration files let you control all of that without long command lines. PIIDigger reads settings from a [TOML](https://toml.io/) file, validates them, and uses them for the scan. This guide covers how to generate, edit, and validate a configuration file, what each setting does, and how to configure PIIDigger for a handful of common scenarios.
 
+**NOTE:** If you're upgrading from PIIDigger v1, the `piidigger.toml` format changed in 2.0; 1.x config files will not load.  See [⚠️ Breaking Changes](breaking-changes.md) for additional details.
+
 ## Prerequisites
 
 ### System Requirements
@@ -309,11 +311,12 @@ piidigger inspect --help
 
 ## Related Documentation
 
+- [⚠️ Breaking Changes](breaking-changes.md) — the `piidigger.toml` format changed in 2.0; 1.x config files will not load
 - [Config Command Guide](config-command.md)
 - [Scan Command Guide](scan-command.md)
 - [Inspect Command Guide](inspect-command.md)
 - [Installation Guide](installation.md)
 - [Archive Handling](archive-handling.md)
-- [Other Related Guides](index.md)
+- [Troubleshooting](troubleshooting.md)
 
 ---

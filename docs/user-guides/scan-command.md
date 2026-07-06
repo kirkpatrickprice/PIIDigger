@@ -113,6 +113,7 @@ Filenames are stamped with the hostname and start time, so repeated runs never o
 
 ### Interpreting Results
 Here are a few notes about looking at the results:
+
 * Every finding carries lineage: `source_path` is always the on-disk file PIIDigger opened. 
 * For a match found on-disk, `source_member_path`, `source_depth`, and `source_container_type` are all empty/zero. 
 * For a match found inside an archive, `source_path` is the archive itself
@@ -126,6 +127,7 @@ Here are a few notes about looking at the results:
 ### Admin privilege prompt
 
 **Symptoms:** `scan` prints `Admin user not detected.  A full disk scan may not be possible.  Continue (Y/n) [10s]:` and waits.
+
 **Solutions:** This appears when `admin_check = true` (the default) and PIIDigger isn't running elevated — a non-admin scan may not be able to read every file on the system. Press Enter or type `y` to continue anyway, or `n` to abort. If you don't respond within 10 seconds, the scan continues automatically. Set `admin_check = false` in your config to skip this prompt on future runs; it's also skipped automatically when `scan`'s input isn't an interactive terminal (e.g. scheduled tasks, CI).
 
 Note: For a full-disk scan on Windows, it's necessary to start the Powershell prompt as Administrator in addition to using a user account with Local Administrator permissions.  On Linux/MacOS, running PIIDigger as `root` is sufficient.
@@ -133,21 +135,26 @@ Note: For a full-disk scan on Windows, it's necessary to start the Powershell pr
 ### `scan` exits immediately with "config file ... not found"
 
 **Symptoms:** `Error: config file 'foo.toml' not found.`
+
 **Solutions:** This only happens with `-f`/`--config` pointing at a path that doesn't exist — unlike the automatic `piidigger.toml` lookup, an explicitly named file that's missing is treated as a mistake, not a signal to fall back to defaults. Fix the path, or drop `-f` if you meant to use defaults (or add `-d` to be explicit about it).
 
 ### `scan` exits immediately with a configuration error
 
 **Symptoms:** `Error: invalid configuration in piidigger.toml: ...`
+
 **Solutions:** The config file failed validation before the scan could start. Run `piidigger config validate` on the same file to see the full error and fix it there — see the [Config Command Guide](config-command.md) and [Advanced Configuration](advanced-configuration.md).
 
 ### A worker seems stuck / the Events panel shows timeouts
 
 **Symptoms:** An `Events` entry reports a task that timed out.
+
 **Solutions:** A single file, directory, or archive member that doesn't finish within `default_timeout_seconds` (default 30s) is terminated and replaced automatically — the scan keeps going, and that one item is recorded as timed out rather than scanned. If you're seeing many of these, the timeout may be too short for your storage (e.g. a slow network share); raise `default_timeout_seconds` in the config. See [Advanced Configuration](advanced-configuration.md).
 
 ### Stopping a scan early
 
 Press **Ctrl+C** once. PIIDigger stops feeding new work to the workers, lets in-flight tasks wind down, flushes whatever results have been found so far to the output sinks, and exits. Output files up to that point are valid and usable — they just won't include anything past the point of interruption.
+
+If Ctrl+C doesn't respond within a few seconds and the process genuinely seems stuck, fall back to stopping it at the OS level — see [Troubleshooting](troubleshooting.md#a-scan-appears-hung) for the platform-specific commands.
 
 ### Getting Help
 
@@ -203,6 +210,7 @@ piidigger scan -f piidigger.toml --no-archives
 - [Inspect Command Guide](inspect-command.md)
 - [Advanced Configuration](advanced-configuration.md)
 - [Archive Handling](archive-handling.md)
+- [Troubleshooting](troubleshooting.md)
 - [Installation Guide](installation.md)
 
 ---

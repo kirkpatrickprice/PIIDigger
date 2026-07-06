@@ -1,6 +1,9 @@
 # Breaking Changes
 
-This file documents changes that require action from existing PIIDigger users when upgrading.
+!!! danger "Read this before you upgrade"
+    2.0 is **not** backward compatible with 1.x. Your existing `piidigger.toml` will not load, and PIIDigger will exit with an error rather than silently misinterpreting it. Read this page before upgrading a production or scheduled scan.
+
+This page documents changes that require action from existing PIIDigger users when upgrading.
 
 ---
 
@@ -10,7 +13,7 @@ This file documents changes that require action from existing PIIDigger users wh
 
 The `piidigger.toml` format has been redesigned. **Existing 1.x config files will not load.** PIIDigger will exit with a clear error message pointing to this file.
 
-Run `piidigger config generate` to produce a valid 2.0 config file, then migrate your customizations.
+Run `piidigger config generate` to produce a valid 2.0 config file, then migrate your customizations. See the [Config Command Guide](config-command.md) and [Advanced Configuration](advanced-configuration.md) for the full 2.0 reference.
 
 #### Key renames (camelCase → snake_case)
 
@@ -56,38 +59,7 @@ ext = [".txt", ".pdf"]
 
 Affected fields: `data_handlers`, `include_files.ext`, `include_files.mime`, `include_files.start_dirs.*`, `exclude_dirs.*`.
 
-#### Full 2.0 config reference
-
-```toml
-data_handlers           = ["pan", "email"]   # or ["all"]
-local_files_only        = true
-max_workers             = 4                  # optional; omit to use cpu_count()
-default_timeout_seconds = 30                 # optional
-
-[include_files]
-ext  = ["all"]   # or e.g. [".txt", ".pdf", ".docx"]
-mime = ["all"]   # or e.g. ["text/plain", "application/pdf"]
-
-[include_files.start_dirs]
-windows = ["all"]   # or ["all"] to scan all drive letters
-linux   = ["/"]
-macos   = ["/"]
-
-[exclude_dirs]
-windows = ["C:\\Windows", "C:\\Program Files (x86)", "C:\\Program Files"]
-linux   = ["/boot", "/dev", "/etc", "/proc", "/run", "/snap", "/sys",
-           "/usr/bin", "/usr/lib", "/usr/local", "/usr/sbin", "/usr/share"]
-macos   = ["/dev", "/etc", "/usr/bin", "/usr/local/Homebrew",
-           "/usr/lib", "/usr/sbin", "/Applications", "/System"]
-
-[results]
-path = "piidigger-results/"
-formats = ["csv", "json", "text"]
-
-[logging]
-log_level = "WARNING"
-log_file  = "logs/piidigger.log"
-```
+For the full current config file layout and every setting's default, see [Advanced Configuration](advanced-configuration.md#configuration-reference).
 
 ---
 
@@ -102,7 +74,7 @@ The `json = true` output setting now produces **two files** with matching timest
 
 The JSON array content is equivalent to the 1.x output. The extra `.jsonl` file is new.
 
-**Why two files:** the `.jsonl` file is written incrementally so a long-running scan never loses results to a crash. The `.json` array is produced from it at clean shutdown (including Ctrl+C). Only a hard process kill (`kill -9`, power loss) results in `.jsonl` without `.json`.
+**Why two files:** the `.jsonl` file is written incrementally so a long-running scan never loses results to a crash. JSONL is also understood by many tools such as SIEM products.  The `.json` array is produced from it at clean shutdown (including Ctrl+C). Only a hard process kill (`kill -9`, power loss) results in `.jsonl` without `.json`.
 
 ---
 
@@ -146,3 +118,9 @@ The following are **unchanged** between 1.x and 2.0:
 - Text output format
 - Supported file types and their handling (plaintext, PDF, DOCX, XLSX, XLS)
 - `--help` behavior at the top level
+
+## Related Documentation
+
+- [Config Command Guide](config-command.md)
+- [Advanced Configuration](advanced-configuration.md)
+- [Installation Guide](installation.md)
