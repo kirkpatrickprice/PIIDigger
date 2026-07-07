@@ -1,0 +1,159 @@
+name: Release - Build Standalone Binaries
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: tag
+        run: echo "tag=${{ github.event.release.tag_name || 'dev' }}" >> "$GITHUB_OUTPUT"
+
+      # The build itself runs *inside* the manylinux2014 container (glibc 2.17)
+      # via `docker run`, rather than as a job-level `container:`. GitHub's own
+      # JS-based actions (checkout, upload-artifact, etc.) expect a modern
+      # glibc/Node runtime that manylinux2014's CentOS-7 base doesn't reliably
+      # provide, so only the actual build command executes inside the old
+      # image — the same pattern cibuildwheel uses.
+      - name: Build inside manylinux2014
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/io" -w /io \
+            -e RELEASE_TAG="${{ steps.tag.outputs.tag }}" \
+            quay.io/pypa/manylinux2014_x86_64 \
+            bash /io/.github/scripts/build-linux-standalone.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: piidigger-${{ steps.tag.outputs.tag }}-linux-x86_64-manylinux2014
+          path: dist/piidigger-${{ steps.tag.outputs.tag }}-linux-x86_64-manylinux2014.tar.gz
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: dist/piidigger-${{ steps.tag.outputs.tag }}-linux-x86_64-manylinux2014.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: echo "tag=${{ github.event.release.tag_name || 'dev' }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Install and build
+        run: |
+          python -m venv .venv
+          .venv\Scripts\activate
+          pip install -e .[win]
+          .\build_windows_embedded.ps1 -arch amd64 -pyVersion 3.14.0 -venv .venv
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\piidigger-amd64 -DestinationPath "dist\piidigger-${{ steps.tag.outputs.tag }}-windows-amd64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: piidigger-${{ steps.tag.outputs.tag }}-windows-amd64
+          path: dist/piidigger-${{ steps.tag.outputs.tag }}-windows-amd64.zip
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: dist/piidigger-${{ steps.tag.outputs.tag }}-windows-amd64.zip
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-13
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: tag
+        run: echo "tag=${{ github.event.release.tag_name || 'dev' }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Install dependencies
+        run: python -m pip install .[build]
+
+      # No -i icon flag here: the repo only ships a Windows .ico; PyInstaller
+      # wants a .icns on macOS. Add one later if a signed/branded app bundle
+      # is wanted.
+      - name: Build standalone binary
+        run: pyinstaller --onedir --distpath dist --collect-submodules wakepy piidigger.py
+
+      - name: Package artifact
+        run: |
+          cd dist
+          tar -czf "piidigger-${{ steps.tag.outputs.tag }}-macos-${{ matrix.arch }}.tar.gz" piidigger
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: piidigger-${{ steps.tag.outputs.tag }}-macos-${{ matrix.arch }}
+          path: dist/piidigger-${{ steps.tag.outputs.tag }}-macos-${{ matrix.arch }}.tar.gz
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: dist/piidigger-${{ steps.tag.outputs.tag }}-macos-${{ matrix.arch }}.tar.gz
+        # Unsigned/unnotarized build: macOS Gatekeeper will show an
+        # "unidentified developer" warning. Code-signing needs a paid Apple
+        # Developer account + notarization pipeline; documented as a known
+        # limitation in docs/user-guides/installation.md instead.
+
+  checksums:
+    if: github.event_name == 'release'
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release tag
+        id: tag
+        run: echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: piidigger-${{ steps.tag.outputs.tag }}-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum * > checksums.txt
+
+      - name: Attach checksums to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: artifacts/checksums.txt

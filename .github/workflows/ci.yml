@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --extra dev --extra test
+      - name: Lint (ruff)
+        run: uv run ruff check src/ tests/
+      # `ruff format --check` is intentionally NOT run here: ruff 0.15.17's
+      # formatter corrupts `except (A, B):` into invalid Python 3 syntax
+      # (`except A, B:`) in src/piidigger/filehandlers/pdf.py and
+      # src/piidigger/run.py. Re-enable only after confirming a ruff release
+      # fixes this (verify with `ruff format --diff` before flipping it on).
+      - name: Type check (mypy)
+        run: uv run mypy src/
+      - name: Run tests
+        run: >
+          uv run pytest tests/ -m "not slow and not e2e" -v
+          --cov=src/piidigger --cov-report=term-missing --cov-fail-under=80
+
+  slow-tests:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --extra dev --extra test
+      - name: Run slow/e2e tests
+        run: uv run pytest tests/ -m "slow or e2e" -v

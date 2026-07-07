@@ -119,25 +119,37 @@ piidigger inspect --help
 
 ### Verifying file integrity (standalone packages)
 
-If you downloaded a standalone package from the [releases page](https://github.com/kirkpatrickprice/PIIDigger/releases) instead of using `uv`, confirm it matches the published hash before running it:
+Every release publishes a `checksums.txt` alongside the platform archives (`piidigger-<version>-linux-x86_64-manylinux2014.tar.gz`, `piidigger-<version>-windows-amd64.zip`, `piidigger-<version>-macos-arm64.tar.gz`, `piidigger-<version>-macos-x86_64.tar.gz`). If you downloaded a standalone package from the [releases page](https://github.com/kirkpatrickprice/PIIDigger/releases) instead of using `uv`, confirm it matches `checksums.txt` before running it:
 
 ```powershell
-# Confirm the downloaded Windows ZIP matches the hash listed on the release page
-Get-FileHash .\piidigger-<architecture>.zip
+# Windows
+Get-FileHash .\piidigger-<version>-windows-amd64.zip
 ```
 
 ```bash
-# Confirm the downloaded Linux ZIP matches the hash listed on the release page
-sha256sum -b linux.zip
+# Linux / macOS
+sha256sum piidigger-<version>-*.tar.gz
 ```
+
+Compare the output against the matching line in `checksums.txt`.
 
 ### Windows Anti-Virus
 
-PIIDigger's standalone Windows packages use Embedded Python distributed directly by the Python Software Foundation, which avoids most of the false-positive AV detections that affect PyInstaller-style Python packaging. Every release is also tested against VirusTotal before publishing. If your AV product still flags PIIDigger, please [open an issue](https://github.com/kirkpatrickprice/PIIDigger/issues) so it can be investigated.
+PIIDigger's standalone Windows packages use Embedded Python distributed directly by the Python Software Foundation, which avoids most of the false-positive AV detections that affect PyInstaller-style Python packaging. Every release's standalone binaries (Windows, Linux, and macOS) are automatically scanned with VirusTotal as part of the release pipeline, and a link to each file's analysis is posted directly in that release's notes on the [releases page](https://github.com/kirkpatrickprice/PIIDigger/releases). If your AV product still flags PIIDigger, please [open an issue](https://github.com/kirkpatrickprice/PIIDigger/issues) so it can be investigated.
 
 ### macOS permissions
 
 On macOS 14 (Sonoma) and later, the OS prompts the first time an unrecognized application tries to access certain user data folders (Documents, Desktop, Downloads, etc.). Grant PIIDigger access through these prompts — scans of those folders will otherwise silently skip files it isn't permitted to read.
+
+### macOS Gatekeeper (unsigned standalone builds)
+
+The macOS standalone builds (`piidigger-<version>-macos-arm64.tar.gz` for Apple Silicon, `piidigger-<version>-macos-x86_64.tar.gz` for Intel) are not code-signed or notarized — that requires a paid Apple Developer account and a notarization pipeline, which isn't set up for this project. Gatekeeper will refuse to run the binary the first time and label it from an "unidentified developer." To run it anyway, either right-click the binary and choose **Open** (then confirm in the dialog), or clear the quarantine attribute yourself:
+
+```bash
+xattr -d com.apple.quarantine piidigger
+```
+
+If this friction is a blocker for your use case, install via `uv tool install piidigger` instead — that path isn't affected by Gatekeeper.
 
 ## Related Documentation
 
