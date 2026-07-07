@@ -29,9 +29,10 @@ class WorkerContext:
 
     All members must be pickle-safe for Windows multiprocessing spawn.
 
-    temp_base is the root directory for per-task temp workspaces created by
-    ArchiveMemberItem.materialize().  run_scan() creates a piidigger-prefixed
-    directory and adds it to exclude_dirs so ENUM_DIR never scans it.
+    temp_base is the root directory for per-task temp workspaces used by
+    archive member extraction (handle_scan_archive_member() -> extract_member()).
+    run_scan() creates a piidigger-prefixed directory and adds it to
+    exclude_dirs so ENUM_DIR never scans it.
     The default (system temp dir) is safe for tests that do not scan archives.
     """
 

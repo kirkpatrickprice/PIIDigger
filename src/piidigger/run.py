@@ -58,7 +58,7 @@ def _prompt_admin_continue(timeout: int = _ADMIN_PROMPT_TIMEOUT) -> bool:
     def _read() -> None:
         try:
             result[0] = sys.stdin.readline().strip()
-        except EOFError, OSError:
+        except (EOFError, OSError):
             pass
         ev.set()
 

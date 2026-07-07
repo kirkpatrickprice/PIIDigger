@@ -1,8 +1,8 @@
 # Implementation Checklist
 
 **Branch**: `refactor`
-**Status**: Phase 5 substantially complete — design revision 3 approved; implementation pending
-**Last Updated**: 2026-06-30
+**Status**: Refactor complete — all phases (0-5) done; Overall Success Criteria met. Retained as the historical build-progress record.
+**Last Updated**: 2026-07-06
 **Reference**: [ARCHITECTURE_REDESIGN.md](./ARCHITECTURE_REDESIGN.md)
 
 Use this checklist to track progress. Mark items `[x]` as completed. Each phase ends with an exit-criteria gate — do not start the next phase until all exit criteria are met.
@@ -434,12 +434,12 @@ Preset → worker count formula:
 ### Coverage and quality gate
 
 - [x] Run `pytest --cov=src/piidigger tests/ --cov-report=term-missing`
-- [x] Overall coverage ≥ 80% — **achieved 80%** (261 tests, 1624 statements, 317 missed)
-- [ ] `orchestration/` coverage ≥ 90% — **currently 76%**; blocked by subprocess workers not being counted by pytest-cov without multiprocessing concurrency plugin; coordinator nested-function deadline paths require slow integration tests. See note below.
+- [x] Overall coverage ≥ 80% — achieved then; **84% overall as of 2026-07-06** (349+ tests)
+- [ ] `orchestration/` coverage ≥ 90% — **not met** (55% for `coordinator.py` and `progress.py` as of 2026-07-06); this was always an aspirational stretch goal, not a merge-blocking exit criterion (the merge gate is the 80% overall figure in Overall Success Criteria, which is met). Left open as optional future work, not a refactor-completeness gap.
 - [x] `ruff check src/ tests/` — zero violations
 - [x] `mypy src/` — zero errors
 
-> **Orchestration coverage note**: The 90% goal is aspirational. Remaining uncovered lines are concentrated in coordinator.py nested functions (`_check_worker_deadlines` timeout/crash paths, KeyboardInterrupt handler) and `progress.py` TTY paths. Covering them requires either: (a) multiprocessing coverage plugin configuration, or (b) slow tests (> 5s) for deadline timeout scenarios. These are Phase 5 candidates once the `pytest-cov` multiprocessing plugin is configured.
+> **Orchestration coverage note**: The 90% goal is aspirational and remains unmet. Uncovered lines are concentrated in `coordinator.py` nested functions (`_check_worker_deadlines` timeout/crash paths, `KeyboardInterrupt` handler) and `progress.py` TTY paths. Covering them requires either (a) multiprocessing coverage plugin configuration, or (b) slow tests (> 5s) for deadline timeout scenarios. Not scheduled against any current phase — pick up only if orchestration reliability work resumes.
 
 ### Phase 4 — Tests
 
@@ -473,7 +473,7 @@ Additional tests added in Phase 4:
 
 *Proves Goal 2: archive support adds task types and a `ScannableItem` producer with zero changes to `coordinator.py` or `worker.py`.*
 
-> **Design revision in progress** — The implementation below is largely complete, but the I/O architecture is being revised to use a unified temp-dir extraction path for all archive formats. See [ADR-multi-format-archives.md](./ADR-multi-format-archives.md) for the revised design. Items marked with `⟳` require changes after ADR is re-approved.
+> **Design revision complete** — the unified temp-dir extraction path (`extract_member()`-only `ArchiveHandler`, `ArchiveMemberItem` folded into `FilesystemItem`) described in [ADR-multi-format-archives.md](./ADR-multi-format-archives.md) is implemented and verified directly against the code (2026-07-06). Items previously marked `⟳` are done.
 
 ### Open Decision 6 — secure deletion
 
@@ -487,13 +487,14 @@ Additional tests added in Phase 4:
 
 ### `protocols.py` — `ArchiveHandler`
 
-- [x] `ArchiveHandler(Protocol)` added with `list_members()`, `open_bytes()`, `open_stream()` — **⟳ pending revision to `extract_member()` after ADR re-approval**
+- [x] `ArchiveHandler(Protocol)`: `list_members()`, `extract_member(archive_path, member_path, dest_dir) -> Path` — revision-3 shape, no `open_bytes()`/`open_stream()`
 
 ### `archivehandlers/` package
 
-- [x] `archivehandlers/__init__.py` — `HANDLER_REGISTRY`, `get_handler()`, auto-registration loop
-- [x] `archivehandlers/_zip.py` — `ZipArchiveHandler`: `list_members()`, `open_bytes()`, `open_stream()` — **⟳ pending revision: replace I/O methods with `extract_member()`**
-- [x] `archivehandlers/_7z.py` — `SevenZArchiveHandler`: `list_members()`, `open_bytes()` (uses `tempfile.TemporaryDirectory()` — wrong pattern), `open_stream()` — **⟳ pending revision: replace with `extract_member()` using managed `task_temp`**
+- [x] `archivehandlers/__init__.py` — `HANDLER_REGISTRY`, `get_handler()`, `_EXT_REGISTRY`/`detect_archive_type()` (longest-first `endswith` match), auto-registration loop
+- [x] `archivehandlers/_zip.py` — `ZipArchiveHandler`: `list_members()`, `extract_member()`
+- [x] `archivehandlers/_7z.py` — `SevenZArchiveHandler`: `list_members()`, `extract_member()` (no `tempfile.TemporaryDirectory()` — flatten/rename block removed)
+- [x] `archivehandlers/_tar.py` — `TarArchiveHandler`: `list_members()`, `extract_member()`; `mode="r:*"` transparent gzip/bzip2/xz detection; `HANDLES` covers `.tar`, `.tgz`, `.tbz2`, `.tbz`, `.txz`, `.tar.gz`, `.tar.bz2`, `.tar.xz`
 - [x] `pyproject.toml`: `py7zr>=1.1.3,<1.2` dependency added; `piidigger.archivehandlers.*` added to mypy strict overrides
 
 ### Task types and handlers
@@ -507,17 +508,18 @@ Additional tests added in Phase 4:
   - [x] Returns `counters`: `{"archives_scanned": 1, "archive_members_found": N, "archive_members_skipped": K}`
   - [x] `_NESTED_ARCHIVE_EXTS` derived from `HANDLER_REGISTRY` keys (not hardcoded)
 - [x] `handle_scan_archive_member()` in `orchestration/worker/_scan_archive_member.py`:
-  - [x] Constructs `ArchiveMemberItem` with `archive_type=payload.archive_type`
+  - [x] Resolves `get_handler(payload.archive_type)`, calls `extract_member()`, wraps result as `FilesystemItem(extracted_path, mime=..., archive_path=..., member_path=...)`
   - [x] Routes through `FileHandler` + `DataHandler` chain (same as `handle_scan_file`)
-  - [x] `source_container_type=payload.archive_type` in `ResultRecord` — **⟳ already correct; no change needed**
+  - [x] `source_container_type=payload.archive_type` in `ResultRecord`
 - [x] Both handlers added to `DISPATCH` table — `coordinator.py` and `worker.py` unchanged
 
 ### Archive source — `src/piidigger/orchestration/sources.py`
 
-- [x] `ArchiveMemberItem(ScannableItem)`: format-agnostic, delegates to `get_handler(archive_type)`
-  - [x] `display_path`: `f"{archive_path}::{member_path}"`
-  - [x] `ext`, `mime`, `size`, `depth`, `task_temp` all wired correctly
-  - [x] `open_bytes()`, `open_stream()`, `materialize()` implemented — **⟳ pending revision: `open_bytes()` extracts+reads+`secure_delete()`; `open_stream()` → `BytesIO(open_bytes())`; `materialize()` extracts+returns path**
+- [x] `ArchiveMemberItem` deleted; `FilesystemItem(ScannableItem)` takes optional `archive_path: Path | None` / `member_path: str | None` kwargs to cover both plain files and extracted archive members
+  - [x] `display_path`: returns `f"{archive_path}::{member_path}"` when both are set, else `str(path)`
+  - [x] `ext`, `mime`, `size`, `depth` all wired correctly
+  - [x] `open_stream()`, `materialize()` read the already-extracted file directly; `open_bytes()` returns `None` (signals handlers to use `materialize()`'s path) — extraction itself happens once in `handle_scan_archive_member()`, not lazily inside these methods
+  - [x] Cleanup (secure-delete of the extracted file) happens once, at end-of-task, via `_cleanup_temp_workspace()` — not per-call inside `FilesystemItem`
 
 ### Configuration additions
 
@@ -547,19 +549,20 @@ Additional tests added in Phase 4:
 - [x] Safety check unit tests for all 8 rejection rules
 - [x] `test_archive_config_defaults` — asserts `formats == ["all"]`
 - [x] 14 7z-specific tests (list_members, encrypted, corrupt, oversize, member count)
-- [ ] **⟳ `extract_member()` unit tests** — replace `open_bytes`/`open_stream` handler tests (pending ADR revision)
-- [ ] **⟳ `ArchiveMemberItem.open_bytes()` secure-delete assertion** — confirm no file remains in `task_temp` after `open_bytes()` returns (pending ADR revision)
+- [x] `extract_member()` unit tests — one per format: `test_zip_handler_extract_member`, `test_7z_handler_extract_member`, `test_tar_handler_extract_member`
+- [x] `test_cleanup_temp_workspace_recursive` — confirms `_cleanup_temp_workspace()` secure-deletes and removes the entire `task_temp` tree at end-of-task (the revision-3 equivalent of the old per-`open_bytes()` assertion, since extraction+cleanup are no longer coupled to that call)
 
-### Phase 5 — Pending steps (revision 3 design)
+### Phase 5 — Revision 3 design (unified extraction path) — complete
 
-- [ ] `protocols.py`: remove `open_bytes()`/`open_stream()` from `ArchiveHandler`; add `extract_member(archive_path, member_path, dest_dir) -> Path`
-- [ ] `archivehandlers/_zip.py`: replace `open_bytes`/`open_stream` with `extract_member()`
-- [ ] `archivehandlers/_7z.py`: remove `open_bytes`/`open_stream` and `tempfile`/`io` imports; add `extract_member()`
-- [ ] `orchestration/sources.py`: **delete** `ArchiveMemberItem`; add `archive_path: Path | None` and `member_path: str | None` kwargs to `FilesystemItem.__init__()`; override `display_path` to return `archive::member` when set
-- [ ] `orchestration/worker/_scan_archive_member.py`: replace `ArchiveMemberItem` construction with `get_handler()` → `extract_member()` → `FilesystemItem(..., archive_path=..., member_path=...)`
-- [ ] `tests/test_archives.py`: delete `ArchiveMemberItem` tests; add `FilesystemItem` archive context tests; replace `open_bytes`/`open_stream` handler tests with `extract_member` tests
-- [ ] `uv run ruff check src/ tests/ && uv run mypy src/ && uv run pytest tests/ -v`
-- [ ] User documentation: Security Considerations entry disclosing archive temp-dir extraction and task-end secure deletion
+All items below were verified directly against the code on 2026-07-06 (not just checked off from memory):
+
+- [x] `protocols.py`: `ArchiveHandler` has only `extract_member(archive_path, member_path, dest_dir) -> Path` + `list_members()`; no `open_bytes()`/`open_stream()`
+- [x] `archivehandlers/_zip.py`, `_7z.py`, `_tar.py`: all `extract_member()`-only; no `tempfile.TemporaryDirectory()` anywhere in `archivehandlers/`
+- [x] `orchestration/sources.py`: `ArchiveMemberItem` deleted; `FilesystemItem.__init__()` takes `archive_path`/`member_path` kwargs; `display_path` returns `archive::member` form when set
+- [x] `orchestration/worker/_scan_archive_member.py`: `get_handler() → extract_member() → FilesystemItem(..., archive_path=..., member_path=...)`
+- [x] `tests/test_archives.py`: no `ArchiveMemberItem` tests remain (only a docstring mention of the old test category); `extract_member()` tests present per format
+- [x] `uv run ruff check src/ tests/` clean; `uv run mypy src/` clean (53 source files); `uv run pytest tests/ -q` — 354 passed, 1 skipped (Windows CTRL-C cross-process test, expected)
+- [x] User documentation: [docs/user-guides/archive-handling.md](../user-guides/archive-handling.md) documents temp-dir extraction, secure deletion, and residual-data risk on abnormal interruption
 
 ### Phase 5 — Exit Criteria
 
@@ -568,27 +571,27 @@ Additional tests added in Phase 4:
 - [x] All 8 safety limits active and covered by tests
 - [x] Findings include lineage fields (`source_container_type`, `source_member_path`, `source_depth`); non-archive output unchanged
 - [x] `secure_delete()` used for all temp files at end of each task
-- [ ] `ArchiveMemberItem` deleted — single `FilesystemItem` implementation for all sources
-- [ ] No `tempfile.TemporaryDirectory()` anywhere in archive handling code
-- [ ] `FilesystemItem.display_path` returns `archive::member` form when archive context is set
-- [ ] User documentation updated with Security Considerations
-- [ ] Test coverage ≥ 80% maintained
-- [ ] `ruff` + `mypy` clean
+- [x] `ArchiveMemberItem` deleted — single `FilesystemItem` implementation for all sources
+- [x] No `tempfile.TemporaryDirectory()` anywhere in archive handling code
+- [x] `FilesystemItem.display_path` returns `archive::member` form when archive context is set
+- [x] User documentation updated with Security Considerations
+- [x] Test coverage ≥ 80% maintained (84% overall, verified 2026-07-06)
+- [x] `ruff` + `mypy` clean (verified 2026-07-06)
 
 ---
 
 ## Overall Success Criteria
 
-These must all be true before `refactor` is merged to `main`:
+These must all be true before `refactor` is merged to `main`. All verified 2026-07-06:
 
-- [ ] Entire orchestration layer is new code under `orchestration/`; old process code deleted
-- [ ] All identifiers snake_case / PascalCase / UPPER_CASE; ruff `N` + mypy clean
-- [ ] Business logic unit-testable with no process tree
-- [ ] `base64-xml-test.xml` completes < 5 minutes; timeout logged; run never hangs
-- [ ] Graceful `Ctrl+C` with full cleanup (no temp files, no orphan processes)
-- [ ] 2.0 output baseline set with lineage fields present; baseline comparison passes
-- [ ] ZIP (Phase 5) added with zero changes to `coordinator.py` or `worker.py`
-- [ ] Test coverage ≥ 80%
+- [x] Entire orchestration layer is new code under `orchestration/`; old process code deleted — `classes.py`, `piidigger.py`, `queuefuncs.py`, `filescan.py`, `globalvars.py` absent from `src/piidigger/`; enforced by `test_phase4.py::test_no_legacy_orchestration_references`
+- [x] All identifiers snake_case / PascalCase / UPPER_CASE; ruff `N` + mypy clean — `ruff check src/ tests/` and `mypy src/` both clean; no per-file `N` exemption remains for the legacy tree in `pyproject.toml`
+- [x] Business logic unit-testable with no process tree — handler unit tests call handler functions directly
+- [x] `base64-xml-test.xml` completes < 5 minutes; timeout logged; run never hangs — resolved at the root cause (regex catastrophic backtracking) via an `@` prefilter instead of the original slow e2e fixture; see `test_email.py::test_email_prefilter_skips_regex_on_long_no_at_string`
+- [x] Graceful `Ctrl+C` with full cleanup (no temp files, no orphan processes) — verified on POSIX (`test_coordinator.py::test_ctrl_c_exits_within_5_seconds`); no equivalent automated test on Windows (`mp.Process` doesn't expose cross-process SIGINT delivery without `CREATE_NEW_PROCESS_GROUP` — a test-harness limitation, not a difference in `run_coordinator()`'s OS-agnostic `KeyboardInterrupt` handling)
+- [x] 2.0 output baseline set with lineage fields present; baseline comparison passes — one-time migration validation: v2 is a strict superset of v1 (0 regressions, 4 improvements); no permanent baseline test kept (rationale documented in the Baseline comparison section above)
+- [x] ZIP (Phase 5, later generalized to 7z and tar) added with zero changes to `coordinator.py` or `worker.py`
+- [x] Test coverage ≥ 80% — 84% overall (`pytest --cov=src/piidigger`)
 
 ---
 

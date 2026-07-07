@@ -31,7 +31,7 @@ This document does not replace feature-specific test plans.
 - **Predictable Releases**: Exit criteria remain visible and measurable.
 - **Team Alignment**: Contributors use shared quality targets.
 
-## Architecture Overview Diagram
+## Architecture Diagram
 
 ```mermaid
 flowchart TB
@@ -153,9 +153,9 @@ testing:
   fixture_root: testdata
 ```
 
-## Service Implementation
+## Core Implementation
 
-Production code exposes injectable dependencies and typed result models.
+Production code exposes constructor-injected dependencies and typed result models. This project wires dependencies with plain constructor calls — there is no DI container.
 
 ```python
 from __future__ import annotations
@@ -196,59 +196,16 @@ class ScannerService:
         return ScanSummary(files_scanned=1, findings_count=findings)
 ```
 
-## Container Integration
+## Extension Points
 
-Dependency composition should stay centralized and replaceable in tests.
+Adding a testable boundary to a new component follows the same pattern as `ScannerService` above:
 
-```python
-from __future__ import annotations
+- Define (or reuse) a `Protocol` for the boundary — filesystem, clock, output sink.
+- Accept the protocol as a constructor parameter; never reach for a global or construct the real dependency internally.
+- Provide a fake or in-memory implementation for tests; keep it next to the test module that uses it.
+- Register real implementations by passing them at the call site (`run_scan()`, the CLI command, the worker) — there is no container to update.
 
-from dataclasses import dataclass
-
-
-@dataclass
-class ServiceContainer:
-    """Lightweight container for production and test composition."""
-
-    scanner_service: ScannerService
-
-
-def build_container(
-    reader: FileReaderProtocol,
-    writer: OutputWriterProtocol,
-    clock: ClockProtocol,
-) -> ServiceContainer:
-    """Build service graph with explicit constructor wiring."""
-    scanner_service = ScannerService(reader=reader, writer=writer, clock=clock)
-    return ServiceContainer(scanner_service=scanner_service)
-```
-
-## CLI Integration
-
-CLI commands call services and return explicit exit codes.
-
-```python
-from __future__ import annotations
-
-import click
-from pathlib import Path
-
-
-@click.command("scan")
-@click.argument("target", type=click.Path(path_type=Path, exists=True))
-@click.option("--max-chunk-count", default=1, show_default=True, type=int)
-def scan_command(target: Path, max_chunk_count: int) -> None:
-    """Scan one file and print a concise summary."""
-    try:
-        container = build_container(reader=reader_impl, writer=writer_impl, clock=clock_impl)
-        summary = container.scanner_service.scan_file(target, max_chunk_count)
-        click.echo(f"scanned={summary.files_scanned} findings={summary.findings_count}")
-    except OSError as exc:
-        raise click.ClickException(f"I/O failure: {exc}") from exc
-```
-
-## Service Integration Patterns
-
+Testing-specific integration patterns:
 - Replace filesystem access with in-memory fakes for most tests.
 - Keep one integration suite for each file type handler.
 - Treat parser libraries as boundaries and test adapter behavior.
@@ -266,7 +223,8 @@ uv run pytest tests/test_read_plaintext_file.py -q
 ### Programmatic Example
 
 ```python
-summary = container.scanner_service.scan_file(Path("testdata/pii/contact-info.txt"), 1)
+scanner = ScannerService(reader=reader_impl, writer=writer_impl, clock=clock_impl)
+summary = scanner.scan_file(Path("testdata/pii/contact-info.txt"), 1)
 assert summary.files_scanned == 1
 assert summary.findings_count >= 1
 ```
@@ -310,30 +268,9 @@ assert summary.findings_count >= 1
 - Critical paths target: 95% minimum for scanner orchestration and handlers.
 - PRs should not reduce coverage on modified files.
 
-## Implementation Roadmap
-
-### Phase 1: Baseline Policy
-- [ ] Add this document to contributor onboarding references.
-- [ ] Publish current baseline metrics for runtime and coverage.
-- [ ] Define CI gates for minimum coverage and test duration.
-
-### Phase 2: Testability by Design
-- [ ] Add protocol seams at filesystem, time, and output boundaries.
-- [ ] Convert implicit globals to injected dependencies.
-- [ ] Introduce typed result models for core workflows.
-
-### Phase 3: Layer Expansion
-- [ ] Fill unit test gaps in handlers and data validators.
-- [ ] Add integration tests for malformed and edge-case fixtures.
-- [ ] Add orchestration tests for worker failure and recovery.
-
-### Phase 4: Release Hardening
-- [ ] Add trend reporting for duration and flaky test rates.
-- [ ] Add coverage diff checks for changed files.
-- [ ] Review and revise this document each quarter.
-
 ## Cross-References
 
+- Phase-by-phase testing task tracking: [docs/refactor/IMPLEMENTATION_CHECKLIST.md](../../refactor/IMPLEMENTATION_CHECKLIST.md)
 - Refactor-specific testing plan: [docs/refactor/TESTING_STRATEGY.md](../../refactor/TESTING_STRATEGY.md)
 - Main documentation index: [docs/README.md](https://github.com/kirkpatrickprice/PIIDigger/blob/main/README.md)
 - Architecture standards: [.github/instructions/architecture.instructions.md](https://github.com/kirkpatrickprice/PIIDigger/blob/main/.github/instructions/architecture.instructions.md)

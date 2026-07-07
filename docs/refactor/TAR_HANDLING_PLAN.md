@@ -1,8 +1,8 @@
 # Tar Archive Support — Implementation Plan
 
 **Branch**: `refactor`
-**Status**: Pre-implementation — design proposed, pending review
-**Last Updated**: 2026-06-30
+**Status**: Implemented — `archivehandlers/_tar.py` and `detect_archive_type()` match this plan; verified directly against the code and against `tests/test_archives.py` on 2026-07-06
+**Last Updated**: 2026-07-06
 **Reference**: [ADR-multi-format-archives.md](./ADR-multi-format-archives.md) (authoritative — this plan extends it, does not override it), [ZIP_HANDLING_PLAN.md](./ZIP_HANDLING_PLAN.md), [PHASE5_PLAN.md](./PHASE5_PLAN.md)
 
 ---

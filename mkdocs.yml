@@ -97,6 +97,12 @@ nav:
       - Current Issues: refactor/CURRENT_ISSUES.md
       - Implementation Checklist: refactor/IMPLEMENTATION_CHECKLIST.md
       - Testing Strategy: refactor/TESTING_STRATEGY.md
-  - Quality Standards:
+  - Architecture:
+      - Orchestration: architecture/orchestration/coordinator-worker-pipeline.md
+      - Archive Handling (Architecture): architecture/archives/archive-handling.md
       - Testing Requirements: architecture/quality/testing-requirements.md
   - Extending PIIDigger: reference/extending.md
+
+# To display Mermaid diagrams
+extra_javascript:
+  - https://unpkg.com/mermaid@11.16.0/dist/mermaid.min.js

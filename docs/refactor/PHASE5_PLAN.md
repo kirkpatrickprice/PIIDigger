@@ -1,8 +1,8 @@
 # Phase 5 Plan — ZIP Archive Support
 
 **Branch**: `refactor`  
-**Status**: Pre-implementation — decisions locked, ready for coding  
-**Last Updated**: 2026-06-29  
+**Status**: Historical — implemented, then partially superseded. Decisions 1, 3, and 4 below (nested-archive deferral, lineage fields, log levels) shipped as written. **Decision 2 (binary member extraction via `open_bytes()`/`open_stream()` on `ArchiveMemberItem`) did not survive to the final implementation** — it was superseded by [ADR-multi-format-archives.md](./ADR-multi-format-archives.md)'s revision-3 unified `extract_member()` path, which deleted `ArchiveMemberItem` entirely in favor of `FilesystemItem`. The §10 checklist below still describes the pre-revision-3 approach in places and was never the authoritative progress tracker (see line below) — for current status use [IMPLEMENTATION_CHECKLIST.md](./IMPLEMENTATION_CHECKLIST.md), and for current design use [docs/architecture/archives/archive-handling.md](../architecture/archives/archive-handling.md).
+**Last Updated**: 2026-07-06  
 **Reference**: [ZIP_HANDLING_PLAN.md](./ZIP_HANDLING_PLAN.md) (design; this document closes the open decisions and fills the gaps)
 
 ---
@@ -275,6 +275,8 @@ A real zip bomb is unsafe to store in the repo.  The fixture uses a single membe
 ---
 
 ## 10. Detailed Implementation Checklist (Phase 5 Addendum)
+
+> **Not a live status tracker.** This checklist predates the revision-3 unified extraction path — several boxes below describe `open_bytes()`/`open_stream()`/`ArchiveMemberItem` mechanics that were superseded and never shipped in that form (see the status banner at the top of this document). The boxes are left unchecked/as originally written for historical fidelity rather than retrofitted to match what actually shipped. [IMPLEMENTATION_CHECKLIST.md](./IMPLEMENTATION_CHECKLIST.md) is the authoritative record of what was actually built.
 
 This supplements the existing [IMPLEMENTATION_CHECKLIST.md Phase 5](./IMPLEMENTATION_CHECKLIST.md) section.  Items here are the gaps not captured there.
 

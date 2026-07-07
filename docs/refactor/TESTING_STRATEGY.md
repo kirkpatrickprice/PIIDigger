@@ -1,8 +1,8 @@
 # Testing Strategy for Architecture Refactor
 
 **Branch**: `refactor`
-**Status**: Active Reference
-**Last Updated**: 2026-06-15
+**Status**: Historical reference — describes the test strategy used to build the now-complete 2.0 architecture. For current, project-wide testing standards see [docs/architecture/quality/testing-requirements.md](../architecture/quality/testing-requirements.md).
+**Last Updated**: 2026-07-06
 **Reference**: [ARCHITECTURE_REDESIGN.md](./ARCHITECTURE_REDESIGN.md), [IMPLEMENTATION_CHECKLIST.md](./IMPLEMENTATION_CHECKLIST.md)
 
 ---

@@ -66,8 +66,9 @@ class ArchiveHandler(Protocol):
     def extract_member(self, archive_path: Path, member_path: str, dest_dir: Path) -> Path:
         """Extract one member to dest_dir and return the file path.
 
-        Writes to dest_dir / Path(member_path).name (flat — no subdirectory
-        nesting).  Creates dest_dir if it does not exist.
-        Raises ArchiveReadError on failure.
+        The returned path may be nested under dest_dir (implementations are not
+        required to flatten subdirectory structure) — _cleanup_temp_workspace()
+        removes the whole dest_dir tree regardless of shape.  Creates dest_dir
+        if it does not exist.  Raises ArchiveReadError on failure.
         """
         ...

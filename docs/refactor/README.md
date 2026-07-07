@@ -1,9 +1,16 @@
 # Architecture Refactor Documentation
 
 **Branch**: `refactor`
-**Status**: Design Locked — Phase 0 Ready to Start
-**Last Updated**: 2026-06-15
+**Status**: Refactor complete — this folder is retained as historical reference only
+**Last Updated**: 2026-07-06
 **Target release**: 2.0.0
+
+> **This is a historical record, not a living spec.** Every phase described below (0-5) is implemented, tested, and merged into the `refactor` branch. These documents capture the design rationale and decisions made along the way — useful for understanding *why* the architecture looks the way it does, but not the place to look for the current state of the code. For that, see:
+>
+> - [docs/architecture/orchestration/coordinator-worker-pipeline.md](../architecture/orchestration/coordinator-worker-pipeline.md) — coordinator/worker mechanics as they exist today
+> - [docs/architecture/archives/archive-handling.md](../architecture/archives/archive-handling.md) — archive (zip/7z/tar) design as it exists today
+> - [docs/reference/extending.md](../reference/extending.md) — how to add a handler
+> - `CLAUDE.md`'s module layout — the current package structure
 
 ---
 
@@ -11,11 +18,14 @@
 
 | Document | Purpose | Start here when… |
 |---|---|---|
-| **[ARCHITECTURE_REDESIGN.md](./ARCHITECTURE_REDESIGN.md)** | Complete design: goals, module layout, all 6 phases, open decisions | You need to understand what we're building and why |
-| **[IMPLEMENTATION_CHECKLIST.md](./IMPLEMENTATION_CHECKLIST.md)** | Actionable per-phase task list with exit criteria | You're about to write code |
+| **[ARCHITECTURE_REDESIGN.md](./ARCHITECTURE_REDESIGN.md)** | Original design: goals, module layout, all 6 phases, open decisions | You want the original design rationale for the coordinator/worker system |
+| **[IMPLEMENTATION_CHECKLIST.md](./IMPLEMENTATION_CHECKLIST.md)** | Per-phase task list with exit criteria — the authoritative build-progress record | You want to see exactly what was done, phase by phase |
 | **[TESTING_STRATEGY.md](./TESTING_STRATEGY.md)** | Test structure, fixtures, examples, coverage targets | You're writing tests or reviewing test coverage |
 | **[CURRENT_ISSUES.md](./CURRENT_ISSUES.md)** | Historical record of 1.x problems and their 2.0 dispositions | You want context on why a decision was made |
-| **[ZIP_HANDLING_PLAN.md](./ZIP_HANDLING_PLAN.md)** | ZIP archive support: task types, safety limits, test fixtures | You're working on Phase 5 |
+| **[ZIP_HANDLING_PLAN.md](./ZIP_HANDLING_PLAN.md)** | Original ZIP-only archive design (superseded — see below) | You want the earliest archive-support rationale |
+| **[ADR-multi-format-archives.md](./ADR-multi-format-archives.md)** | Design record for generalizing archive support beyond ZIP | You want to understand why the `ArchiveHandler` registry pattern exists |
+| **[PHASE5_PLAN.md](./PHASE5_PLAN.md)** | Pre-coding decision record closing ZIP_HANDLING_PLAN's open questions | You want the detailed rationale behind secure deletion, temp isolation, CLI flags |
+| **[TAR_HANDLING_PLAN.md](./TAR_HANDLING_PLAN.md)** | Design record for adding tar (+ compressed variants) via the same registry | You want the rationale for tar's compound-extension detection |
 
 ---
 
@@ -39,7 +49,7 @@ Coordinator (main process)
 - Adding a task type = one DISPATCH entry + one handler function. Nothing else changes.
 - Workers are stateless and identical — automatic load balancing.
 - Business logic (data/file/output handlers) is pure and unit-testable with no process tree.
-- ZIP archive support (Phase 5) is the acceptance test for extensibility — zero changes to coordinator or worker.
+- Archive support (Phase 5 — ultimately zip, 7z, and tar) is the acceptance test for extensibility — zero changes to coordinator or worker, proven three times over.
 
 ---
 
@@ -52,7 +62,7 @@ Coordinator (main process)
 | **2** | Coordinator & Control Flow | Fan-out loop, `pending` termination, deadline detection, `rich.Live` progress |
 | **3** | Business Logic Re-contracted | `protocols.py`, `FilesystemItem`, real handlers, `Config` model, output sinks, CLI |
 | **4** | Hardening & Parity | Heartbeat restart, base64-xml < 5 min, baseline comparison, old code deleted, ≥ 80% coverage |
-| **5** | ZIP Support | `ArchiveMemberItem`, archive task types, safety limits — zero changes to coordinator/worker |
+| **5** | Archive Support | ZIP first, then generalized to a format registry (7z, tar) — archive task types, safety limits, zero changes to coordinator/worker |
 
 ---
 
@@ -68,13 +78,13 @@ Coordinator (main process)
 
 ---
 
-## Success Criteria (merge to `main`)
+## Success Criteria (merge to `main`) — all met
 
-- [ ] Entire orchestration layer replaced; old process code deleted
-- [ ] All identifiers PEP 8 compliant; ruff + mypy clean
-- [ ] Business logic unit-testable without a process tree
-- [ ] `base64-xml-test.xml` completes < 5 minutes; timeout logged
-- [ ] Graceful `Ctrl+C` — no orphan processes, no temp files
-- [ ] 2.0 output baseline set with lineage fields; baseline comparison passes
-- [ ] ZIP (Phase 5) adds zero changes to `coordinator.py` or `worker.py`
-- [ ] Test coverage ≥ 80%
+- [x] Entire orchestration layer replaced; old process code deleted — `classes.py`, `piidigger.py`, `queuefuncs.py`, `filescan.py`, `globalvars.py` no longer exist in `src/piidigger/`; enforced in CI by `test_phase4.py::test_no_legacy_orchestration_references`
+- [x] All identifiers PEP 8 compliant; ruff + mypy clean — verified 2026-07-06 (`ruff check src/ tests/`, `mypy src/` both clean)
+- [x] Business logic unit-testable without a process tree — handler unit tests call handler functions directly, no `mp.Process` involved
+- [x] `base64-xml-test.xml` completes < 5 minutes; timeout logged — resolved at the root cause (regex catastrophic backtracking) via an `@`-prefilter; see `test_email.py::test_email_prefilter_skips_regex_on_long_no_at_string`
+- [x] Graceful `Ctrl+C` — no orphan processes, no temp files — verified on POSIX (`test_coordinator.py::test_ctrl_c_exits_within_5_seconds`); the Windows-specific automated test is skipped due to a test-harness limitation (`mp.Process` doesn't expose cross-process SIGINT delivery), not a difference in `run_coordinator()`'s `KeyboardInterrupt` handling itself
+- [x] 2.0 output baseline set with lineage fields; baseline comparison passes — one-time migration validation: v2 is a strict superset of v1 (0 regressions, 4 improvements); see `IMPLEMENTATION_CHECKLIST.md` for the documented rationale on why no permanent baseline test was kept
+- [x] Archive support (Phase 5 — zip, later extended to 7z and tar) adds zero changes to `coordinator.py` or `worker.py`
+- [x] Test coverage ≥ 80% — 84% overall, verified 2026-07-06

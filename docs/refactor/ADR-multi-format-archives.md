@@ -1,8 +1,8 @@
 # ADR — Multi-Format Archive Support (7z + future tar.*)
 
 **Branch**: `refactor`  
-**Status**: Revised — pending re-approval (design revision 2)  
-**Last Updated**: 2026-06-30  
+**Status**: Implemented — including this document's own "revision 3" steps (§9). Verified directly against the code on 2026-07-06: `ArchiveHandler` has only `extract_member()` (no `open_bytes`/`open_stream`), `ArchiveMemberItem` is deleted in favor of `FilesystemItem` taking optional `archive_path`/`member_path` kwargs, and all §9 steps previously marked `⏳ Pending` are done. Tar was added later using this same shape (see [TAR_HANDLING_PLAN.md](./TAR_HANDLING_PLAN.md)). For the current design description, see [docs/architecture/archives/archive-handling.md](../architecture/archives/archive-handling.md); this ADR remains useful as the historical record of *why* the temp-dir approach was chosen over ZIP's original in-memory streaming.  
+**Last Updated**: 2026-07-06  
 **Reference**: [ZIP_HANDLING_PLAN.md](./ZIP_HANDLING_PLAN.md), [PHASE5_PLAN.md](./PHASE5_PLAN.md)
 
 ---
@@ -663,24 +663,24 @@ Outlook PST and OST files use a different addressing model (items have store pat
 
 ## 9. Implementation Sequence
 
-Steps 1–9 and 13–14 and 17 are **already complete** on the `refactor` branch. Steps 10–12 and 15–16 reflect the code changes for revision 3 of this design.
+All 17 steps are **complete**, verified directly against the code on 2026-07-06 (not just checked off from memory — see [docs/architecture/archives/archive-handling.md](../architecture/archives/archive-handling.md) for the resulting design).
 
 | # | Step | Status |
 |---|---|---|
 | 1 | `pyproject.toml` — add `py7zr`; update mypy overrides | ✅ Done |
 | 2 | `exceptions.py` — `ArchiveReadError` | ✅ Done |
 | 3 | `models/archive.py` — `MemberInfo` Pydantic model | ✅ Done |
-| 4 | `protocols.py` — revise `ArchiveHandler`: remove `open_bytes`/`open_stream`, add `extract_member` | ⏳ Pending |
+| 4 | `protocols.py` — revise `ArchiveHandler`: remove `open_bytes`/`open_stream`, add `extract_member` | ✅ Done |
 | 5 | `archivehandlers/__init__.py` — registry skeleton | ✅ Done |
-| 6 | `archivehandlers/_zip.py` — replace `open_bytes`/`open_stream` with `extract_member` | ⏳ Pending |
-| 7 | `archivehandlers/_7z.py` — replace `open_bytes`/`open_stream` (and `tempfile` usage) with `extract_member` | ⏳ Pending |
+| 6 | `archivehandlers/_zip.py` — replace `open_bytes`/`open_stream` with `extract_member` | ✅ Done |
+| 7 | `archivehandlers/_7z.py` — replace `open_bytes`/`open_stream` (and `tempfile` usage) with `extract_member` | ✅ Done |
 | 8 | `models/payloads.py` — add `archive_type` to both payload models | ✅ Done |
 | 9 | `models/config.py` — update `formats` default and TOML template | ✅ Done |
-| 10 | `orchestration/sources.py` — delete `ArchiveMemberItem`; extend `FilesystemItem` with optional `archive_path`/`member_path` kwargs and updated `display_path` | ⏳ Pending |
+| 10 | `orchestration/sources.py` — delete `ArchiveMemberItem`; extend `FilesystemItem` with optional `archive_path`/`member_path` kwargs and updated `display_path` | ✅ Done |
 | 11 | `orchestration/worker/_enum_dir.py` — already done; no change | ✅ Done |
 | 12 | `orchestration/worker/_enum_archive.py` — already done; no change | ✅ Done |
-| 13 | `orchestration/worker/_scan_archive_member.py` — replace `ArchiveMemberItem` with direct `get_handler()` → `extract_member()` → `FilesystemItem(... archive_path=..., member_path=...)` | ⏳ Pending |
+| 13 | `orchestration/worker/_scan_archive_member.py` — replace `ArchiveMemberItem` with direct `get_handler()` → `extract_member()` → `FilesystemItem(... archive_path=..., member_path=...)` | ✅ Done |
 | 14 | `testdata/7z/create_fixtures.py` — already created and run | ✅ Done |
-| 15 | `tests/test_archives.py` — delete `ArchiveMemberItem` tests; add `FilesystemItem` archive context tests; replace `open_bytes`/`open_stream` handler tests with `extract_member` tests | ⏳ Pending |
-| 16 | `uv run ruff check src/ tests/ && uv run mypy src/ && uv run pytest tests/ -v` | ⏳ Pending |
-| 17 | User documentation — Security Considerations entry for archive temp extraction | ⏳ Pending |
+| 15 | `tests/test_archives.py` — delete `ArchiveMemberItem` tests; add `FilesystemItem` archive context tests; replace `open_bytes`/`open_stream` handler tests with `extract_member` tests | ✅ Done |
+| 16 | `uv run ruff check src/ tests/ && uv run mypy src/ && uv run pytest tests/ -v` | ✅ Done — clean, 354 passed / 1 skipped (Windows CTRL-C test, expected) |
+| 17 | User documentation — Security Considerations entry for archive temp extraction | ✅ Done — see `docs/user-guides/archive-handling.md` |

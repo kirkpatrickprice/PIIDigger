@@ -53,7 +53,7 @@ uv run mkdocs serve
 
 ## Project Structure
 
-### Target module layout (2.0 — being built now)
+### Current module layout (2.0 implementation complete)
 
 ```
 src/piidigger/
@@ -61,25 +61,38 @@ src/piidigger/
 │   ├── main.py             # click.group(); entry point replaces piidigger.piidigger:main
 │   └── commands/
 │       ├── scan.py         # `piidigger scan`
-│       └── config.py       # `piidigger config generate|validate`
+│       ├── config.py       # `piidigger config generate|validate`
+│       └── inspect.py      # `piidigger inspect` (MIME types, data handlers, CPU count, etc.)
 ├── models/                 # All Pydantic data models
+│   ├── base.py             # PiiDiggerModel — shared BaseModel with extra="forbid"
 │   ├── config.py           # Config (replaces classes.Config getter-soup)
 │   ├── tasks.py            # Task, TaskResult, TaskType, SHUTDOWN
 │   ├── payloads.py         # Typed per-task-type payloads
+│   ├── archive.py          # MemberInfo (archive member metadata)
 │   └── results.py          # ResultRecord (with lineage fields)
-├── protocols.py            # DataHandler, FileHandler, OutputSink, ScannableItem protocols
-├── orchestration/          # All multiprocessing-aware code (new; strict mypy)
+├── protocols.py             # DataHandler, FileHandler, OutputSink, ScannableItem, ArchiveHandler protocols
+├── exceptions.py            # ArchiveReadError
+├── orchestration/          # All multiprocessing-aware code (strict mypy)
 │   ├── context.py          # WorkerContext (frozen dataclass — see note below)
-│   ├── worker.py           # worker_loop, DISPATCH table
+│   ├── worker/              # package: worker_loop, DISPATCH table, split by task type
+│   │   ├── _loop.py         # worker_loop, DISPATCH, _cleanup_temp_workspace
+│   │   ├── _enum_dir.py     # handle_enum_dir
+│   │   ├── _enum_archive.py # handle_enum_archive_members
+│   │   ├── _scan_file.py    # handle_scan_file
+│   │   └── _scan_archive_member.py  # handle_scan_archive_member
 │   ├── coordinator.py      # fan-out loop, pending counter, deadline monitor
 │   ├── logging_setup.py    # QueueHandler / QueueListener helpers
 │   ├── progress.py         # rich.Live two-panel display
-│   └── sources.py          # FilesystemItem; ArchiveMemberItem (Phase 5)
-├── datahandlers/           # PII matchers — implement DataHandler protocol
+│   ├── secure_delete.py    # 2-pass overwrite + fsync + unlink for extracted archive members
+│   └── sources.py          # FilesystemItem (archive_path/member_path kwargs cover archive members too)
+├── archivehandlers/         # ArchiveHandler implementations: zip, 7z, tar (+ compressed tar variants)
+├── datahandlers/           # PII matchers — implement DataHandler protocol (pan, email implemented; phonenum, trackdata are stubs)
 ├── filehandlers/           # File readers — implement FileHandler protocol
 ├── outputhandlers/         # Output sinks — implement OutputSink protocol
 └── run.py                  # run_scan(config: Config) -> int  (testable core)
 ```
+
+See [Coordinator/Worker Task Pipeline](docs/architecture/orchestration/coordinator-worker-pipeline.md) and [Archive Handling](docs/architecture/archives/archive-handling.md) for the architecture behind this layout.
 
 ### Legacy modules (being deleted by end of refactor)
 
