@@ -101,6 +101,7 @@ nav:
       - Orchestration: architecture/orchestration/coordinator-worker-pipeline.md
       - Archive Handling (Architecture): architecture/archives/archive-handling.md
       - Testing Requirements: architecture/quality/testing-requirements.md
+      - CI/CD Pipeline: architecture/ci-cd/pipeline.md
   - Extending PIIDigger: reference/extending.md
 
 # To display Mermaid diagrams
