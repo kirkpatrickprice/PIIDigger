@@ -184,8 +184,11 @@ def test_full_fanout_multiple_start_dirs(tmp_path: Path) -> None:
 @pytest.mark.skipif(
     os.name == "nt",
     reason=(
-        "Sending SIGINT to a specific subprocess on Windows requires CREATE_NEW_PROCESS_GROUP "
-        "which mp.Process does not expose; os.kill(pid, SIGINT) raises PermissionError."
+        "Sending SIGINT to a specific subprocess on Windows requires CREATE_NEW_PROCESS_GROUP, "
+        "which mp.Process does not expose; os.kill(pid, SIGINT) raises PermissionError. Ctrl+C "
+        "graceful-exit behavior is intentionally left unverified by CI on Windows — a real "
+        "equivalent needs a subprocess.Popen(creationflags=CREATE_NEW_PROCESS_GROUP) + "
+        "GenerateConsoleCtrlEvent harness, not a tweak to this test."
     ),
 )
 def test_ctrl_c_exits_within_5_seconds(tmp_path: Path) -> None:
