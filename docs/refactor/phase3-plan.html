@@ -1,0 +1,1261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phase 3 Implementation Plan — PIIDigger 2.0</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #22263a;
+    --border: #2e3350;
+    --accent: #5b7fff;
+    --accent2: #7ecdaa;
+    --warn: #f5a623;
+    --danger: #e05c5c;
+    --text: #cdd5f0;
+    --text-dim: #7b84b0;
+    --text-bright: #edf0ff;
+    --tag-green: #2d5a3d;
+    --tag-blue: #1e3a5f;
+    --tag-orange: #5a3d1e;
+    --tag-red: #5a1e1e;
+    --tag-purple: #3d2558;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+    font-size: 14px;
+    padding: 0 0 60px;
+  }
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 28px 40px 20px;
+  }
+  .header h1 {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text-bright);
+    letter-spacing: -0.3px;
+  }
+  .header .meta {
+    margin-top: 6px;
+    color: var(--text-dim);
+    font-size: 13px;
+    display: flex;
+    gap: 24px;
+  }
+  .header .meta span { display: flex; align-items: center; gap: 5px; }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+  }
+  .badge-green { background: var(--tag-green); color: #7ecdaa; }
+  .badge-blue  { background: var(--tag-blue);  color: #7db3f5; }
+  .badge-orange{ background: var(--tag-orange);color: #f5c07a; }
+  .badge-red   { background: var(--tag-red);   color: #f07070; }
+  .badge-purple{ background: var(--tag-purple);color: #c78fe8; }
+
+  .container { max-width: 1100px; margin: 0 auto; padding: 32px 40px; }
+
+  /* Overview boxes */
+  .overview-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 12px;
+    margin-bottom: 36px;
+  }
+  .overview-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+  }
+  .overview-card .label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+  .overview-card .value {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text-bright);
+  }
+  .overview-card .sub { font-size: 12px; color: var(--text-dim); margin-top: 3px; }
+
+  /* Section headings */
+  h2 {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text-bright);
+    margin: 40px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    letter-spacing: -0.2px;
+  }
+  h3 {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--accent2);
+    margin: 0 0 10px;
+    letter-spacing: 0.2px;
+  }
+
+  /* Work steps */
+  .step {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+  .step-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 14px 18px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .step-header:hover { background: var(--surface2); }
+  .step-num {
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    margin-top: 1px;
+  }
+  .step-title-area { flex: 1; }
+  .step-title {
+    font-weight: 600;
+    color: var(--text-bright);
+    font-size: 13.5px;
+  }
+  .step-file {
+    font-family: 'Menlo', 'Consolas', 'Courier New', monospace;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
+  .step-tags { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 5px; }
+  .step-body {
+    padding: 0 18px 16px 58px;
+    display: none;
+  }
+  .step-body.open { display: block; }
+  .step-body ul { list-style: none; padding: 0; }
+  .step-body ul li {
+    position: relative;
+    padding-left: 14px;
+    margin-bottom: 5px;
+    color: var(--text);
+    font-size: 13px;
+  }
+  .step-body ul li::before {
+    content: '–';
+    position: absolute;
+    left: 0;
+    color: var(--text-dim);
+  }
+  .step-body ul li strong { color: var(--text-bright); }
+  .step-body .note {
+    background: var(--surface2);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    padding: 8px 12px;
+    margin-top: 10px;
+    font-size: 12.5px;
+    color: var(--text);
+  }
+  .step-body .warn-note {
+    background: var(--surface2);
+    border-left: 3px solid var(--warn);
+    border-radius: 4px;
+    padding: 8px 12px;
+    margin-top: 10px;
+    font-size: 12.5px;
+    color: var(--text);
+  }
+
+  code {
+    font-family: 'Menlo', 'Consolas', 'Courier New', monospace;
+    background: var(--surface2);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 12px;
+    color: var(--accent2);
+  }
+  pre {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    font-family: 'Menlo', 'Consolas', 'Courier New', monospace;
+    font-size: 12px;
+    color: var(--text);
+    margin-top: 10px;
+    line-height: 1.5;
+  }
+  pre .kw  { color: #7db3f5; }
+  pre .cls { color: #e8d87a; }
+  pre .cmt { color: #6b7498; font-style: italic; }
+  pre .str { color: #a8d4a0; }
+  pre .num { color: #c98aef; }
+
+  /* Decision table */
+  .decision-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+  }
+  .decision-table th {
+    text-align: left;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .decision-table td {
+    padding: 10px 12px;
+    vertical-align: top;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .decision-table tr:last-child td { border-bottom: none; }
+  .decision-table .td-decision { color: var(--text-bright); font-weight: 600; }
+  .decision-table .td-rec { color: var(--accent2); }
+
+  /* Dependency graph */
+  .dep-row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    margin-bottom: 6px;
+    font-size: 13px;
+  }
+  .dep-label {
+    flex-shrink: 0;
+    min-width: 240px;
+    font-family: monospace;
+    font-size: 12px;
+    color: var(--text-bright);
+    padding: 4px 8px;
+    background: var(--surface2);
+    border-radius: 4px;
+  }
+  .dep-arrow { color: var(--text-dim); padding-top: 5px; }
+  .dep-deps { color: var(--text-dim); font-size: 12px; padding-top: 5px; }
+
+  /* Risk list */
+  .risk {
+    display: flex;
+    gap: 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 12px 14px;
+    margin-bottom: 8px;
+    align-items: flex-start;
+  }
+  .risk-icon { font-size: 16px; flex-shrink: 0; padding-top: 1px; }
+  .risk-body { flex: 1; }
+  .risk-title { font-weight: 600; color: var(--text-bright); font-size: 13.5px; }
+  .risk-desc { color: var(--text); font-size: 13px; margin-top: 3px; }
+  .risk-mit { color: var(--accent2); font-size: 12px; margin-top: 4px; }
+
+  /* Toggle all */
+  .toggle-bar {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 10px;
+  }
+  .toggle-bar button {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 5px 12px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .toggle-bar button:hover { color: var(--text-bright); border-color: var(--accent); }
+
+  /* Phase groups */
+  .phase-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin: 24px 0 8px;
+  }
+
+  /* Sequence diagram boxes */
+  .seq { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
+  .seq-box {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 5px 10px;
+    font-size: 12px;
+    font-family: monospace;
+    color: var(--text);
+  }
+  .seq-arrow { color: var(--text-dim); font-size: 14px; }
+  .seq-break { width: 100%; height: 0; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Phase 3 — Re-contract &amp; Wire Business Logic</h1>
+  <div class="meta">
+    <span><strong>Branch:</strong> refactor</span>
+    <span><strong>Prerequisite:</strong> Phase 2 complete ✓</span>
+    <span><strong>Goal:</strong> First real scan — correct output in all three formats</span>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- Overview -->
+  <div class="overview-grid">
+    <div class="overview-card">
+      <div class="label">Work units</div>
+      <div class="value">12</div>
+      <div class="sub">Files / groups of files</div>
+    </div>
+    <div class="overview-card">
+      <div class="label">New files</div>
+      <div class="value">5</div>
+      <div class="sub">payloads, results, protocols, sources, run.py rewrite</div>
+    </div>
+    <div class="overview-card">
+      <div class="label">Heavily modified</div>
+      <div class="value">7</div>
+      <div class="sub">config, worker, all 3 handler groups, coordinator, CLI</div>
+    </div>
+    <div class="overview-card">
+      <div class="label">Tests to add</div>
+      <div class="value">12+</div>
+      <div class="sub">unit, integration, CliRunner smoke</div>
+    </div>
+  </div>
+
+  <!-- Dependency / sequencing overview -->
+  <h2>Sequencing Overview</h2>
+  <p style="color:var(--text-dim); font-size:13px; margin-bottom:12px;">Each group must wait for the groups it depends on. Within a group, steps can proceed in parallel.</p>
+
+  <div class="dep-row">
+    <div class="dep-label">Group A — Foundation models</div>
+    <div class="dep-arrow">→</div>
+    <div class="dep-deps">No dependencies. Start immediately.</div>
+  </div>
+  <div class="dep-row">
+    <div class="dep-label">Group B — Full Config model</div>
+    <div class="dep-arrow">→</div>
+    <div class="dep-deps">Needs file/data handler registries to validate handler names. Do after D's registries are defined (or use lazy validation).</div>
+  </div>
+  <div class="dep-row">
+    <div class="dep-label">Group C — FilesystemItem</div>
+    <div class="dep-arrow">→</div>
+    <div class="dep-deps">Needs protocols.py (Group A).</div>
+  </div>
+  <div class="dep-row">
+    <div class="dep-label">Group D — Handler re-contracting</div>
+    <div class="dep-arrow">→</div>
+    <div class="dep-deps">Needs protocols.py (Group A) + FilesystemItem (Group C for file handlers).</div>
+  </div>
+  <div class="dep-row">
+    <div class="dep-label">Group E — Real worker handlers</div>
+    <div class="dep-arrow">→</div>
+    <div class="dep-deps">Needs A (payloads, results, protocols), B (Config), C (FilesystemItem), D (all handlers).</div>
+  </div>
+  <div class="dep-row">
+    <div class="dep-label">Group F — Wire-up (run.py + CLI)</div>
+    <div class="dep-arrow">→</div>
+    <div class="dep-deps">Needs all previous groups.</div>
+  </div>
+  <div class="dep-row">
+    <div class="dep-label">Group G — Tests</div>
+    <div class="dep-arrow">→</div>
+    <div class="dep-deps">Unit tests written alongside each step. Integration tests after Group F.</div>
+  </div>
+  <div class="dep-row">
+    <div class="dep-label">Group H — Cleanup</div>
+    <div class="dep-arrow">→</div>
+    <div class="dep-deps">pyproject.toml markers + entry point. Last.</div>
+  </div>
+
+  <!-- Execution Order -->
+  <h2>Execution Order</h2>
+  <p style="color:var(--text-dim); font-size:13px; margin-bottom:16px;">Steps within a wave are independent and can run in parallel. Each wave must be complete before the next begins. Unit tests are written alongside the step they cover; integration tests are Wave 7.</p>
+
+  <div style="display:grid; gap:10px;">
+
+    <div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+      <div style="background:var(--surface2); padding:10px 16px; display:flex; align-items:center; gap:10px;">
+        <span style="background:#1e3a5f; color:#7db3f5; font-size:11px; font-weight:700; padding:2px 8px; border-radius:4px; letter-spacing:0.5px;">WAVE 1</span>
+        <span style="color:var(--text-bright); font-weight:600; font-size:13px;">Foundation models — parallel, no dependencies</span>
+      </div>
+      <div style="padding:12px 16px; display:flex; flex-wrap:wrap; gap:8px;">
+        <div style="background:var(--surface2); border:1px solid var(--border); border-radius:5px; padding:8px 12px; font-size:12px;">
+          <div style="color:#7db3f5; font-weight:700; margin-bottom:3px;">A1 — models/payloads.py</div>
+          <div style="color:var(--text-dim);">EnumDirPayload, ScanFilePayload<br>+ remove SLOW_TEST from TaskType</div>
+        </div>
+        <div style="background:var(--surface2); border:1px solid var(--border); border-radius:5px; padding:8px 12px; font-size:12px;">
+          <div style="color:#7db3f5; font-weight:700; margin-bottom:3px;">A2 — models/results.py</div>
+          <div style="color:var(--text-dim);">ResultRecord with lineage fields</div>
+        </div>
+        <div style="background:var(--surface2); border:1px solid var(--border); border-radius:5px; padding:8px 12px; font-size:12px;">
+          <div style="color:#7db3f5; font-weight:700; margin-bottom:3px;">A3 — protocols.py</div>
+          <div style="color:var(--text-dim);">DataHandler, FileHandler,<br>OutputSink, ScannableItem</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align:center; color:var(--text-dim); font-size:18px; line-height:1;">↓</div>
+
+    <div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+      <div style="background:var(--surface2); padding:10px 16px; display:flex; align-items:center; gap:10px;">
+        <span style="background:#1e3a5f; color:#7db3f5; font-size:11px; font-weight:700; padding:2px 8px; border-radius:4px; letter-spacing:0.5px;">WAVE 2</span>
+        <span style="color:var(--text-bright); font-weight:600; font-size:13px;">Sources + DataHandlers + OutputSinks — parallel, all need Wave 1</span>
+      </div>
+      <div style="padding:12px 16px; display:flex; flex-wrap:wrap; gap:8px;">
+        <div style="background:var(--surface2); border:1px solid var(--border); border-radius:5px; padding:8px 12px; font-size:12px;">
+          <div style="color:#7db3f5; font-weight:700; margin-bottom:3px;">C1 — orchestration/sources.py</div>
+          <div style="color:var(--text-dim);">FilesystemItem (needs A3)</div>
+        </div>
+        <div style="background:var(--surface2); border:1px solid var(--border); border-radius:5px; padding:8px 12px; font-size:12px;">
+          <div style="color:#7db3f5; font-weight:700; margin-bottom:3px;">D1 — datahandlers/</div>
+          <div style="color:var(--text-dim);">Class wrappers + registry<br>(needs A3)</div>
+        </div>
+        <div style="background:var(--surface2); border:1px solid var(--border); border-radius:5px; padding:8px 12px; font-size:12px;">
+          <div style="color:#7db3f5; font-weight:700; margin-bottom:3px;">D3 — outputhandlers/</div>
+          <div style="color:var(--text-dim);">CsvSink, JsonSink, TextSink<br>(needs A2 + A3)</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align:center; color:var(--text-dim); font-size:18px; line-height:1;">↓</div>
+
+    <div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+      <div style="background:var(--surface2); padding:10px 16px; display:flex; align-items:center; gap:10px;">
+        <span style="background:#1e3a5f; color:#7db3f5; font-size:11px; font-weight:700; padding:2px 8px; border-radius:4px; letter-spacing:0.5px;">WAVE 3</span>
+        <span style="color:var(--text-bright); font-weight:600; font-size:13px;">FileHandlers — needs C1 (FilesystemItem) from Wave 2</span>
+      </div>
+      <div style="padding:12px 16px; display:flex; flex-wrap:wrap; gap:8px;">
+        <div style="background:var(--surface2); border:1px solid var(--border); border-radius:5px; padding:8px 12px; font-size:12px;">
+          <div style="color:#7db3f5; font-weight:700; margin-bottom:3px;">D2 — filehandlers/</div>
+          <div style="color:var(--text-dim);">Class wrappers + registry.<br>read(ScannableItem) interface.<br>Needs A3 + C1.</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align:center; color:var(--text-dim); font-size:18px; line-height:1;">↓</div>
+
+    <div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+      <div style="background:var(--surface2); padding:10px 16px; display:flex; align-items:center; gap:10px;">
+        <span style="background:#1e3a5f; color:#7db3f5; font-size:11px; font-weight:700; padding:2px 8px; border-radius:4px; letter-spacing:0.5px;">WAVE 4</span>
+        <span style="color:var(--text-bright); font-weight:600; font-size:13px;">Config model — needs handler registries to validate names and extensions</span>
+      </div>
+      <div style="padding:12px 16px; display:flex; flex-wrap:wrap; gap:8px;">
+        <div style="background:var(--surface2); border:1px solid var(--border); border-radius:5px; padding:8px 12px; font-size:12px;">
+          <div style="color:#7db3f5; font-weight:700; margin-bottom:3px;">B1 — models/config.py</div>
+          <div style="color:var(--text-dim);">Full Pydantic Config: from_toml(),<br>default(), all validators.<br>Needs D1 + D2 registries.</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align:center; color:var(--text-dim); font-size:18px; line-height:1;">↓</div>
+
+    <div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+      <div style="background:var(--surface2); padding:10px 16px; display:flex; align-items:center; gap:10px;">
+        <span style="background:#1e3a5f; color:#7db3f5; font-size:11px; font-weight:700; padding:2px 8px; border-radius:4px; letter-spacing:0.5px;">WAVE 5</span>
+        <span style="color:var(--text-bright); font-weight:600; font-size:13px;">Real worker handlers — needs everything above</span>
+      </div>
+      <div style="padding:12px 16px; display:flex; flex-wrap:wrap; gap:8px;">
+        <div style="background:var(--surface2); border:1px solid var(--border); border-radius:5px; padding:8px 12px; font-size:12px;">
+          <div style="color:#7db3f5; font-weight:700; margin-bottom:3px;">E1 — orchestration/worker.py</div>
+          <div style="color:var(--text-dim);">Real handle_enum_dir + handle_scan_file.<br>Update DISPATCH (remove SLOW_TEST handler).<br>Coordinator: _route_to_sinks → deserialize dict → ResultRecord.<br>Needs A1 + A2 + B1 + C1 + D1 + D2.</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align:center; color:var(--text-dim); font-size:18px; line-height:1;">↓</div>
+
+    <div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+      <div style="background:var(--surface2); padding:10px 16px; display:flex; align-items:center; gap:10px;">
+        <span style="background:#1e3a5f; color:#7db3f5; font-size:11px; font-weight:700; padding:2px 8px; border-radius:4px; letter-spacing:0.5px;">WAVE 6</span>
+        <span style="color:var(--text-bright); font-weight:600; font-size:13px;">Wire-up — parallel, both need Wave 5</span>
+      </div>
+      <div style="padding:12px 16px; display:flex; flex-wrap:wrap; gap:8px;">
+        <div style="background:var(--surface2); border:1px solid var(--border); border-radius:5px; padding:8px 12px; font-size:12px;">
+          <div style="color:#7db3f5; font-weight:700; margin-bottom:3px;">F1 — run.py rewrite</div>
+          <div style="color:var(--text-dim);">~40-line thin adapter replacing<br>~280-line legacy orchestration.<br>Needs B1 + E1 + D3.</div>
+        </div>
+        <div style="background:var(--surface2); border:1px solid var(--border); border-radius:5px; padding:8px 12px; font-size:12px;">
+          <div style="color:#7db3f5; font-weight:700; margin-bottom:3px;">F2 — cli/ scaffolding</div>
+          <div style="color:var(--text-dim);">cli/main.py, commands/scan.py,<br>commands/config.py.<br>Remove legacy entry point.<br>Needs B1 + F1.</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align:center; color:var(--text-dim); font-size:18px; line-height:1;">↓</div>
+
+    <div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+      <div style="background:var(--surface2); padding:10px 16px; display:flex; align-items:center; gap:10px;">
+        <span style="background:#1e3a5f; color:#7db3f5; font-size:11px; font-weight:700; padding:2px 8px; border-radius:4px; letter-spacing:0.5px;">WAVE 7</span>
+        <span style="color:var(--text-bright); font-weight:600; font-size:13px;">Integration tests — needs Wave 6 complete</span>
+      </div>
+      <div style="padding:12px 16px; display:flex; flex-wrap:wrap; gap:8px;">
+        <div style="background:var(--surface2); border:1px solid var(--border); border-radius:5px; padding:8px 12px; font-size:12px;">
+          <div style="color:#7db3f5; font-weight:700; margin-bottom:3px;">G1 — Integration tests</div>
+          <div style="color:var(--text-dim);">run_scan() on testdata/plaintext/<br>run_scan() on testdata/ (all formats)<br>CliRunner smoke test<br>(marked @pytest.mark.e2e)</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="text-align:center; color:var(--text-dim); font-size:18px; line-height:1;">↓</div>
+
+    <div style="background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden;">
+      <div style="background:var(--surface2); padding:10px 16px; display:flex; align-items:center; gap:10px;">
+        <span style="background:#1e3a5f; color:#7db3f5; font-size:11px; font-weight:700; padding:2px 8px; border-radius:4px; letter-spacing:0.5px;">WAVE 8</span>
+        <span style="color:var(--text-bright); font-weight:600; font-size:13px;">Cleanup — last</span>
+      </div>
+      <div style="padding:12px 16px; display:flex; flex-wrap:wrap; gap:8px;">
+        <div style="background:var(--surface2); border:1px solid var(--border); border-radius:5px; padding:8px 12px; font-size:12px;">
+          <div style="color:#7db3f5; font-weight:700; margin-bottom:3px;">H1 — pyproject.toml</div>
+          <div style="color:var(--text-dim);">Add slow + e2e markers.<br>Update entry point to piidigger.cli.main:cli.<br>Verify ruff + mypy clean.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Work steps -->
+  <h2>Work Steps</h2>
+  <div class="toggle-bar">
+    <button onclick="toggleAll()">Expand / Collapse All</button>
+  </div>
+
+  <!-- Group A -->
+  <div class="phase-label">Group A — Foundation models (no dependencies)</div>
+
+  <div class="step">
+    <div class="step-header" onclick="toggle(this)">
+      <div class="step-num">A1</div>
+      <div class="step-title-area">
+        <div class="step-title">Payload models</div>
+        <div class="step-file">src/piidigger/models/payloads.py</div>
+        <div class="step-tags">
+          <span class="badge badge-blue">New code</span>
+          <span class="badge badge-green">No risk</span>
+        </div>
+      </div>
+    </div>
+    <div class="step-body">
+      <ul>
+        <li><strong>EnumDirPayload(BaseModel)</strong>: <code>path: Path</code>, <code>depth: int = 0</code></li>
+        <li><strong>ScanFilePayload(BaseModel)</strong>: <code>display_path: str</code>, <code>file_path: Path</code>, <code>ext: str</code>, <code>mime: str | None</code>, <code>size: int</code>, <code>depth: int = 0</code></li>
+        <li>Both frozen. Serialize cleanly to/from the <code>Task.payload: dict</code> field.</li>
+        <li>Remove <code>SLOW_TEST</code> and <code>NOOP</code> from <code>TaskType</code> — or keep them for integration testing. <strong>Recommendation: keep NOOP, remove SLOW_TEST</strong> (SLOW_TEST is test-specific and adds no value in production; NOOP is useful for future infrastructure tests).</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-header" onclick="toggle(this)">
+      <div class="step-num">A2</div>
+      <div class="step-title-area">
+        <div class="step-title">ResultRecord model</div>
+        <div class="step-file">src/piidigger/models/results.py</div>
+        <div class="step-tags">
+          <span class="badge badge-blue">New code</span>
+          <span class="badge badge-green">No risk</span>
+        </div>
+      </div>
+    </div>
+    <div class="step-body">
+      <ul>
+        <li><strong>ResultRecord(BaseModel)</strong> exactly as specified in the architecture doc:</li>
+      </ul>
+      <pre><span class="kw">class</span> <span class="cls">ResultRecord</span>(BaseModel):
+    source_path: str
+    source_member_path: str | None = None   <span class="cmt"># None for on-disk files</span>
+    source_depth: int = 0                   <span class="cmt"># 0 for on-disk, ≥1 for archives</span>
+    source_container_type: str | None = None  <span class="cmt"># "zip" for members; None for on-disk</span>
+    handler: str                            <span class="cmt"># data handler name ("pan", "email")</span>
+    matches: dict[str, list[str]]           <span class="cmt"># match type → list of matched values</span></pre>
+      <div class="note">The lineage fields (<code>source_member_path</code>, <code>source_depth</code>, <code>source_container_type</code>) default to null for Phase 3 on-disk files. Phase 5 (ZIP) populates them. This ensures the output schema is stable from day one.</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-header" onclick="toggle(this)">
+      <div class="step-num">A3</div>
+      <div class="step-title-area">
+        <div class="step-title">Protocol definitions</div>
+        <div class="step-file">src/piidigger/protocols.py</div>
+        <div class="step-tags">
+          <span class="badge badge-blue">New code</span>
+          <span class="badge badge-green">No risk</span>
+        </div>
+      </div>
+    </div>
+    <div class="step-body">
+      <ul>
+        <li>All four protocols in one file, with <code>@runtime_checkable</code> on each for isinstance checks:</li>
+      </ul>
+      <pre><span class="kw">from</span> typing <span class="kw">import</span> Iterator, Protocol, runtime_checkable
+<span class="kw">from</span> pathlib <span class="kw">import</span> Path
+<span class="kw">from</span> typing <span class="kw">import</span> IO
+
+<span class="kw">@runtime_checkable</span>
+<span class="kw">class</span> <span class="cls">DataHandler</span>(Protocol):
+    name: str
+    <span class="kw">def</span> find_matches(self, text: str) -> dict[str, set[str]]: ...
+
+<span class="kw">@runtime_checkable</span>
+<span class="kw">class</span> <span class="cls">ScannableItem</span>(Protocol):
+    display_path: str
+    ext: str
+    mime: str | None
+    size: int
+    depth: int
+    <span class="kw">def</span> open_stream(self) -> IO[bytes]: ...
+    <span class="kw">def</span> materialize(self) -> Path: ...
+
+<span class="kw">@runtime_checkable</span>
+<span class="kw">class</span> <span class="cls">FileHandler</span>(Protocol):
+    <span class="kw">def</span> read(self, source: ScannableItem) -> Iterator[str]: ...
+
+<span class="kw">@runtime_checkable</span>
+<span class="kw">class</span> <span class="cls">OutputSink</span>(Protocol):
+    <span class="kw">def</span> open(self) -> None: ...
+    <span class="kw">def</span> write(self, record: <span class="cls">ResultRecord</span>) -> None: ...
+    <span class="kw">def</span> close(self) -> None: ...</pre>
+    </div>
+  </div>
+
+  <!-- Group B -->
+  <div class="phase-label">Group B — Full Config model</div>
+
+  <div class="step">
+    <div class="step-header" onclick="toggle(this)">
+      <div class="step-num">B1</div>
+      <div class="step-title-area">
+        <div class="step-title">Full Config Pydantic model</div>
+        <div class="step-file">src/piidigger/models/config.py</div>
+        <div class="step-tags">
+          <span class="badge badge-green">Format decisions locked ✓</span>
+          <span class="badge badge-purple">Largest unit</span>
+        </div>
+      </div>
+    </div>
+    <div class="step-body open">
+      <h3>Locked TOML format (2.0)</h3>
+      <p style="color:var(--text-dim); font-size:12.5px; margin-bottom:8px;">Snake_case throughout. Every list field is always a list — no bare strings. OS sub-tables kept for <code>start_dirs</code> and <code>exclude_dirs</code> so one config file works across platforms. <code>from_toml()</code> selects the current-OS sub-table and exposes flat resolved fields.</p>
+      <pre><span class="cmt"># piidigger.toml — 2.0 format</span>
+
+data_handlers           = [<span class="str">"pan"</span>, <span class="str">"email"</span>]
+local_files_only        = <span class="kw">true</span>
+max_workers             = <span class="num">4</span>          <span class="cmt"># optional; defaults to cpu_count()</span>
+default_timeout_seconds = <span class="num">30</span>         <span class="cmt"># optional</span>
+
+[include_files]
+ext  = [<span class="str">"all"</span>]    <span class="cmt"># always a list; ["all"] = all supported extensions</span>
+mime = [<span class="str">"all"</span>]    <span class="cmt"># always a list; ["all"] = all supported MIME types</span>
+
+[include_files.start_dirs]
+windows = [<span class="str">"all"</span>]   <span class="cmt"># always a list; ["all"] = all drive letters</span>
+linux   = [<span class="str">"/"</span>]
+darwin  = [<span class="str">"/"</span>]
+
+[exclude_dirs]
+windows = [<span class="str">"C:\\Windows"</span>, <span class="str">"C:\\Program Files (x86)"</span>, <span class="str">"C:\\Program Files"</span>]
+linux   = [<span class="str">"/boot"</span>, <span class="str">"/dev"</span>, <span class="str">"/etc"</span>, <span class="str">"/proc"</span>, <span class="str">"/run"</span>, <span class="str">"/snap"</span>, <span class="str">"/sys"</span>,
+           <span class="str">"/usr/bin"</span>, <span class="str">"/usr/lib"</span>, <span class="str">"/usr/local"</span>, <span class="str">"/usr/sbin"</span>, <span class="str">"/usr/share"</span>]
+darwin  = [<span class="str">"/dev"</span>, <span class="str">"/etc"</span>, <span class="str">"/usr/bin"</span>, <span class="str">"/usr/local/Homebrew"</span>,
+           <span class="str">"/usr/lib"</span>, <span class="str">"/usr/sbin"</span>, <span class="str">"/Applications"</span>, <span class="str">"/System"</span>]
+
+[results]
+path = <span class="str">"piidigger-results/"</span>
+csv  = <span class="kw">true</span>
+json = <span class="kw">true</span>
+text = <span class="kw">true</span>
+
+[logging]
+log_level = <span class="str">"WARNING"</span>
+log_file  = <span class="str">"logs/piidigger.log"</span></pre>
+
+      <h3 style="margin-top:14px;">Resolved Config model shape</h3>
+      <p style="color:var(--text-dim); font-size:12.5px; margin-bottom:8px;"><code>from_toml()</code> does the OS-selection and expansion internally. The Config object exposed to the rest of the codebase is always flat — no OS nesting, no <code>"all"</code> sentinels.</p>
+      <pre><span class="kw">class</span> <span class="cls">Config</span>(BaseModel):
+    <span class="cmt"># Resolved from include_files.start_dirs.&lt;current_os&gt; + "all" expansion</span>
+    start_dirs: list[Path]        <span class="cmt"># never empty after validation</span>
+
+    <span class="cmt"># Resolved from exclude_dirs.&lt;current_os&gt;</span>
+    exclude_dirs: list[str]       <span class="cmt"># linux and darwin are distinct sets</span>
+
+    <span class="cmt"># Resolved from include_files; "all" expanded to concrete values</span>
+    include_exts: list[str]       <span class="cmt"># e.g. [".txt", ".pdf", ".docx", ...]</span>
+    include_mime: list[str]       <span class="cmt"># [] if python-magic not installed</span>
+
+    <span class="cmt"># Resolved from data_handlers list; "all" expands to all registry names</span>
+    data_handlers: list[str]      <span class="cmt"># unknown names rejected at load time</span>
+
+    <span class="cmt"># Direct fields</span>
+    local_files_only: bool = <span class="kw">True</span>
+    max_workers: int              <span class="cmt"># default: cpu_count()</span>
+    default_timeout_seconds: int = <span class="num">30</span>
+
+    <span class="cmt"># Flattened from [logging] section</span>
+    log_file: Path                <span class="cmt"># default: Path("logs/piidigger.log")</span>
+    log_level: str                <span class="cmt"># default: "WARNING"</span>
+
+    <span class="cmt"># Nested</span>
+    results: ResultsConfig        <span class="cmt"># path, csv, json_, text booleans</span></pre>
+
+      <h3 style="margin-top:14px;">from_toml() loading sequence</h3>
+      <ul>
+        <li>Read raw TOML dict; fail fast on <code>TOMLDecodeError</code> with clear message</li>
+        <li>Detect OS via <code>platform.system().lower()</code> → <code>"windows"</code> / <code>"linux"</code> / <code>"darwin"</code></li>
+        <li>Extract <code>include_files.start_dirs[os]</code> → validate each path exists, or expand <code>"all"</code> to system roots</li>
+        <li>Extract <code>exclude_dirs[os]</code> → keep as-is (no existence check; missing dirs silently skipped at scan time)</li>
+        <li>Expand <code>include_files.ext</code>/<code>mime</code>/<code>data_handlers</code> if <code>["all"]</code></li>
+        <li>Construct and return validated <code>Config</code></li>
+      </ul>
+      <div class="note"><strong>Invariant from "always a list" rule:</strong> validators never accept a bare string for <code>ext</code>, <code>mime</code>, <code>start_dirs</code>, or <code>data_handlers</code>. If someone writes <code>ext = "all"</code> in the TOML, Pydantic raises a clear validation error pointing to the field — not a cryptic runtime crash.</div>
+    </div>
+  </div>
+
+  <!-- Group C -->
+  <div class="phase-label">Group C — Sources (depends on A)</div>
+
+  <div class="step">
+    <div class="step-header" onclick="toggle(this)">
+      <div class="step-num">C1</div>
+      <div class="step-title-area">
+        <div class="step-title">FilesystemItem</div>
+        <div class="step-file">src/piidigger/orchestration/sources.py</div>
+        <div class="step-tags">
+          <span class="badge badge-blue">New code</span>
+          <span class="badge badge-green">Straightforward</span>
+        </div>
+      </div>
+    </div>
+    <div class="step-body">
+      <ul>
+        <li><strong>FilesystemItem</strong> wraps a <code>pathlib.Path</code> and satisfies the <code>ScannableItem</code> protocol</li>
+        <li><code>display_path</code>: <code>str(path)</code></li>
+        <li><code>ext</code>: <code>path.suffix.lower()</code></li>
+        <li><code>mime</code>: call existing <code>getmime.py</code> MIME detection if available; else <code>None</code></li>
+        <li><code>size</code>: <code>path.stat().st_size</code></li>
+        <li><code>depth</code>: always <code>0</code></li>
+        <li><code>open_stream()</code>: returns <code>open(path, "rb")</code></li>
+        <li><code>materialize()</code>: returns <code>path</code> itself (no copy needed for real files)</li>
+      </ul>
+      <div class="note">The MIME check wraps <code>getmime.test_magic()</code> — if <code>python-magic</code> is not installed, <code>mime</code> is <code>None</code> and file selection falls back to extension only. This matches 1.x behaviour.</div>
+    </div>
+  </div>
+
+  <!-- Group D -->
+  <div class="phase-label">Group D — Handler re-contracting (depends on A + C)</div>
+
+  <div class="step">
+    <div class="step-header" onclick="toggle(this)">
+      <div class="step-num">D1</div>
+      <div class="step-title-area">
+        <div class="step-title">Data handlers — class wrappers + registry</div>
+        <div class="step-file">src/piidigger/datahandlers/*.py + __init__.py</div>
+        <div class="step-tags">
+          <span class="badge badge-orange">Updates existing tests</span>
+          <span class="badge badge-blue">Low risk logic</span>
+        </div>
+      </div>
+    </div>
+    <div class="step-body">
+      <h3>Per-handler change (example: email.py)</h3>
+      <ul>
+        <li>Create <code>EmailHandler</code> class with <code>name: str = 'Email Address'</code></li>
+        <li>Rename module-level <code>find_match(line)</code> to <code>find_matches(self, text)</code></li>
+        <li>Keep private helper functions (<code>_is_valid</code>, <code>_redact</code>) unchanged</li>
+        <li>Same pattern for <code>pan.py</code> → <code>PanHandler</code></li>
+        <li><code>trackdata.py</code> and <code>phonenum.py</code> are still unimplemented — add class stubs but do not implement matching logic yet</li>
+      </ul>
+      <h3>Registry in __init__.py</h3>
+      <pre><span class="kw">from</span> piidigger.datahandlers.email <span class="kw">import</span> EmailHandler
+<span class="kw">from</span> piidigger.datahandlers.pan <span class="kw">import</span> PanHandler
+
+HANDLER_REGISTRY: dict[str, DataHandler] = {
+    EmailHandler.name: EmailHandler(),
+    PanHandler.name: PanHandler(),
+}
+
+<span class="kw">def</span> get_enabled_handlers(names: list[str]) -> list[DataHandler]:
+    <span class="kw">return</span> [HANDLER_REGISTRY[n] <span class="kw">for</span> n <span class="kw">in</span> names <span class="kw">if</span> n <span class="kw">in</span> HANDLER_REGISTRY]</pre>
+      <div class="warn-note"><strong>Test impact:</strong> <code>tests/test_email.py</code> and <code>tests/test_pan.py</code> call <code>email.find_match()</code> / <code>pan.find_match()</code>. These tests must be updated to call <code>EmailHandler().find_matches()</code> — the logic is unchanged, only the call site.</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-header" onclick="toggle(this)">
+      <div class="step-num">D2</div>
+      <div class="step-title-area">
+        <div class="step-title">File handlers — ScannableItem interface + registry</div>
+        <div class="step-file">src/piidigger/filehandlers/*.py + __init__.py</div>
+        <div class="step-tags">
+          <span class="badge badge-orange">Updates existing tests</span>
+          <span class="badge badge-orange">Medium change</span>
+        </div>
+      </div>
+    </div>
+    <div class="step-body">
+      <h3>Interface change</h3>
+      <ul>
+        <li>Old: <code>read_file(filename: str, log_manager: LogManager, max_chunk_count: int) -> Iterator[str]</code></li>
+        <li>New: <code>read(self, source: ScannableItem) -> Iterator[str]</code></li>
+        <li>Remove <code>log_manager</code> — handlers raise exceptions or yield empty on error; the caller (<code>handle_scan_file</code>) catches and logs</li>
+        <li>Replace <code>open(filename, ...)</code> with <code>source.open_stream()</code> for stream-based handlers</li>
+        <li>For <code>xlsx.py</code> and <code>xls.py</code> (which need a real path for openpyxl/xlrd): call <code>source.materialize()</code> and document this in the method docstring</li>
+        <li>The <code>ContentHandler</code> in <code>_sharedfuncs.py</code> is unchanged — it's pure buffering logic</li>
+      </ul>
+      <h3>Class structure example (plaintext.py)</h3>
+      <pre><span class="kw">class</span> <span class="cls">PlaintextHandler</span>:
+    handles = {
+        <span class="str">"ext"</span>: [<span class="str">".txt"</span>, <span class="str">".py"</span>, <span class="str">".json"</span>, ...],  <span class="cmt"># used by registry</span>
+        <span class="str">"mime"</span>: [<span class="str">"text/plain"</span>, ...],
+    }
+
+    <span class="kw">def</span> read(self, source: ScannableItem) -> Iterator[str]:
+        <span class="cmt"># uses source.open_stream() instead of open(filename)</span>
+        ...</pre>
+      <h3>Registry in __init__.py</h3>
+      <pre>FILE_HANDLER_REGISTRY: list[tuple[PlaintextHandler | ...]] = [...]
+
+<span class="kw">def</span> get_file_handler(ext: str, mime: str | None):
+    <span class="cmt"># Returns the first handler whose handles dict matches ext or mime</span>
+    ...</pre>
+      <div class="warn-note"><strong>Test impact:</strong> <code>tests/test_read_plaintext_file.py</code> and similar tests call <code>plaintext.read_file(filename, log_manager)</code>. They must be updated to construct a <code>FilesystemItem</code> and call <code>PlaintextHandler().read(item)</code>. This changes the test setup, not the assertions.</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-header" onclick="toggle(this)">
+      <div class="step-num">D3</div>
+      <div class="step-title-area">
+        <div class="step-title">Output sinks — class wrappers</div>
+        <div class="step-file">src/piidigger/outputhandlers/csv.py, json.py, text.py</div>
+        <div class="step-tags">
+          <span class="badge badge-orange">JSON format change</span>
+          <span class="badge badge-blue">Medium refactor</span>
+        </div>
+      </div>
+    </div>
+    <div class="step-body">
+      <h3>CsvSink (csv.py)</h3>
+      <ul>
+        <li><code>open()</code>: create output file; write CSV header (<code>source_path, handler, match_type, value</code>)</li>
+        <li><code>write(record: ResultRecord)</code>: flatten <code>record.matches</code> — one CSV row per individual match value</li>
+        <li><code>close()</code>: flush and close the file writer</li>
+      </ul>
+      <h3>JsonSink (json.py)</h3>
+      <ul>
+        <li>One <code>json = true</code> config flag produces <strong>two paired files</strong> with the same timestamp: <code>hostname-TIMESTAMP.jsonl</code> and <code>hostname-TIMESTAMP.json</code></li>
+        <li><code>open()</code>: open the <code>.jsonl</code> file for writing</li>
+        <li><code>write(record: ResultRecord)</code>: <code>jsonl_file.write(record.model_dump_json() + "\n")</code> — streams one line per record, no memory accumulation</li>
+        <li><code>close()</code>: flush and close the <code>.jsonl</code> file, then read it back line-by-line and write the <code>.json</code> file as a standard JSON array. Runs inside the coordinator's <code>finally</code> block, so both files are produced on normal exit <em>and</em> on Ctrl+C. Only a hard kill (<code>kill -9</code>) bypasses <code>finally</code>; in that scenario the <code>.jsonl</code> partial file remains valid.</li>
+      </ul>
+      <h3>TextSink (text.py)</h3>
+      <ul>
+        <li>Maintains current YAML-like format (file is called "text" but written as YAML)</li>
+        <li><code>open()</code> / <code>write(record))</code> / <code>close()</code> per pattern above</li>
+      </ul>
+      <div class="note">Phase 4 baseline comparison: the 1.x JSON output was a single array file. 2.0 produces both <code>.json</code> (array, same schema) and <code>.jsonl</code> (new). The JSON array content should match; the extra JSONL file is an expected new artifact. Document this in the Phase 4 baseline notes.</div>
+      <h3>Sink factory</h3>
+      <pre><span class="kw">def</span> get_enabled_sinks(config: Config) -> list[OutputSink]:
+    <span class="cmt"># Constructs and returns only the enabled sink types based on config.results</span>
+    ...</pre>
+    </div>
+  </div>
+
+  <!-- Group E -->
+  <div class="phase-label">Group E — Real worker handlers (depends on A, B, C, D)</div>
+
+  <div class="step">
+    <div class="step-header" onclick="toggle(this)">
+      <div class="step-num">E1</div>
+      <div class="step-title-area">
+        <div class="step-title">Real handle_enum_dir + handle_scan_file</div>
+        <div class="step-file">src/piidigger/orchestration/worker.py</div>
+        <div class="step-tags">
+          <span class="badge badge-purple">Core logic</span>
+          <span class="badge badge-orange">Strict mypy required</span>
+        </div>
+      </div>
+    </div>
+    <div class="step-body">
+      <h3>handle_enum_dir</h3>
+      <ul>
+        <li>Parse payload: <code>EnumDirPayload.model_validate(task.payload)</code></li>
+        <li>Use <code>os.scandir()</code> to list entries (faster than <code>Path.iterdir()</code>)</li>
+        <li>For each subdirectory:
+          <ul>
+            <li>Skip if name matches any pattern in <code>ctx.config.exclude_dirs</code></li>
+            <li>Skip if <code>ctx.config.local_files_only</code> and it's a network/removable drive</li>
+            <li>Else: emit one <code>Task(ENUM_DIR, EnumDirPayload(path=..., depth=depth+1))</code></li>
+          </ul>
+        </li>
+        <li>For each file:
+          <ul>
+            <li>Get extension; check against <code>ctx.config.include_exts</code></li>
+            <li>MIME check only if extension matches and MIME list is non-empty</li>
+            <li>If matched: emit one <code>Task(SCAN_FILE, ScanFilePayload(...))</code></li>
+          </ul>
+        </li>
+        <li>Handle <code>PermissionError</code>, <code>OSError</code>, <code>FileNotFoundError</code> — log + continue, don't fail the task</li>
+        <li>Return: <code>new_tasks</code> (serialised task dicts) + <code>counters: {"dirs_scanned": 1, "dirs_found": N, "files_found": M}</code></li>
+      </ul>
+      <h3>handle_scan_file</h3>
+      <ul>
+        <li>Parse payload: <code>ScanFilePayload.model_validate(task.payload)</code></li>
+        <li>Construct <code>FilesystemItem(Path(payload.file_path))</code></li>
+        <li>Look up FileHandler via <code>get_file_handler(item.ext, item.mime)</code></li>
+        <li>If no handler: log at DEBUG and return <code>status="ok"</code> with empty findings</li>
+        <li>Iterate chunks from <code>file_handler.read(item)</code></li>
+        <li>For each chunk, call every enabled <code>DataHandler.find_matches(chunk)</code></li>
+        <li>If a handler returns matches: build <code>ResultRecord(source_path=item.display_path, handler=handler.name, matches=...)</code></li>
+        <li>Return <code>findings</code> as <code>[record.model_dump() for record in records]</code> and <code>counters: {"files_scanned": 1, "bytes_scanned": item.size}</code></li>
+        <li>Handle unreadable files, encoding errors with <code>status="error"</code></li>
+      </ul>
+      <h3>DISPATCH table update</h3>
+      <pre>DISPATCH = {
+    TaskType.ENUM_DIR:  handle_enum_dir,
+    TaskType.SCAN_FILE: handle_scan_file,
+    TaskType.NOOP:      _handle_noop,   <span class="cmt"># kept for integration tests</span>
+}</pre>
+      <div class="note"><strong>Coordinator minor update:</strong> The coordinator's <code>_route_to_sinks</code> currently calls <code>sink.write(finding)</code> where <code>finding</code> is a plain dict. Since <code>OutputSink.write</code> now takes a <code>ResultRecord</code>, update <code>_route_to_sinks</code> to deserialize: <code>sink.write(ResultRecord.model_validate(finding))</code>. This is a 2-line change.</div>
+      <div class="note">Data handler selection: <code>handle_scan_file</code> calls <code>get_enabled_handlers(ctx.config.data_handlers)</code> on every file. This is fine — the list is short and the lookup is a dict key operation.</div>
+    </div>
+  </div>
+
+  <!-- Group F -->
+  <div class="phase-label">Group F — Wire-up (depends on all previous)</div>
+
+  <div class="step">
+    <div class="step-header" onclick="toggle(this)">
+      <div class="step-num">F1</div>
+      <div class="step-title-area">
+        <div class="step-title">run.py rewrite</div>
+        <div class="step-file">src/piidigger/run.py</div>
+        <div class="step-tags">
+          <span class="badge badge-red">Replaces ~300 lines legacy</span>
+          <span class="badge badge-blue">~40 lines new</span>
+        </div>
+      </div>
+    </div>
+    <div class="step-body">
+      <ul>
+        <li>Replace the entire legacy orchestration body with a thin adapter</li>
+        <li>Creates <code>mp.Queue</code> instances, <code>WorkerContext</code>, starts listener, starts workers, opens sinks, starts progress display, calls <code>run_coordinator()</code></li>
+        <li>Coordinator's <code>finally</code> block already calls <code>_flush_sinks()</code>, <code>stop_listener()</code>, <code>progress.stop()</code> — <code>run.py</code> does not duplicate those</li>
+      </ul>
+      <pre><span class="kw">def</span> run_scan(config: Config) -> int:
+    log_queue: mp.Queue = mp.Queue()
+    task_queue: mp.Queue = mp.Queue()
+    result_queue: mp.Queue = mp.Queue()
+    stop_event = mp.Event()
+
+    ctx = WorkerContext(config=config, task_queue=task_queue,
+                        result_queue=result_queue, log_queue=log_queue,
+                        stop_event=stop_event)
+
+    listener = start_listener(log_queue, config.log_file, config.log_level)
+    workers = start_worker_pool(ctx, config.max_workers)
+    sinks = get_enabled_sinks(config)
+    <span class="kw">for</span> sink <span class="kw">in</span> sinks:
+        sink.open()
+
+    progress = ProgressDisplay()
+    progress.start()
+
+    <span class="kw">try</span>:
+        run_coordinator(ctx, workers, listener, sinks, progress)
+        <span class="kw">return</span> <span class="num">0</span>
+    <span class="kw">except</span> Exception:
+        <span class="kw">return</span> <span class="num">1</span></pre>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="step-header" onclick="toggle(this)">
+      <div class="step-num">F2</div>
+      <div class="step-title-area">
+        <div class="step-title">CLI scaffolding</div>
+        <div class="step-file">src/piidigger/cli/main.py, commands/scan.py, commands/config.py</div>
+        <div class="step-tags">
+          <span class="badge badge-blue">Straightforward Click port</span>
+        </div>
+      </div>
+    </div>
+    <div class="step-body">
+      <h3>cli/main.py</h3>
+      <ul>
+        <li><code>@click.group(invoke_without_command=True)</code> named <code>cli</code></li>
+        <li>Registers <code>scan</code> as default subcommand (invoked when no subcommand given)</li>
+      </ul>
+      <h3>cli/commands/scan.py</h3>
+      <ul>
+        <li>Migrate all options from <code>piidigger.py</code>: <code>--config</code>, <code>--start-dirs</code>, <code>--log-level</code>, <code>--max-workers</code>, <code>--local-files-only</code></li>
+        <li>Loads <code>Config.from_toml(path)</code> or <code>Config.default()</code></li>
+        <li>Calls <code>run_scan(config)</code> → <code>sys.exit(code)</code></li>
+      </ul>
+      <h3>cli/commands/config.py</h3>
+      <ul>
+        <li><code>config generate [--output PATH]</code>: write default TOML to file (replaces <code>write_default_config()</code>)</li>
+        <li><code>config validate PATH</code>: load, report any validation errors; exit 0 on success</li>
+      </ul>
+      <h3>pyproject.toml</h3>
+      <ul>
+        <li>Update entry point: <code>piidigger = "piidigger.cli.main:cli"</code></li>
+        <li>Keep existing <code>piidigger.piidigger:main</code> entry for one phase as a legacy shim (remove in Phase 4)</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Group G -->
+  <div class="phase-label">Group G — Tests</div>
+
+  <div class="step">
+    <div class="step-header" onclick="toggle(this)">
+      <div class="step-num">G1</div>
+      <div class="step-title-area">
+        <div class="step-title">All Phase 3 tests</div>
+        <div class="step-file">tests/test_*.py (new + updated)</div>
+        <div class="step-tags">
+          <span class="badge badge-purple">Gating</span>
+        </div>
+      </div>
+    </div>
+    <div class="step-body">
+      <h3>New test files</h3>
+      <ul>
+        <li><code>tests/test_sources.py</code> — FilesystemItem satisfies ScannableItem protocol; open_stream returns bytes; materialize returns path</li>
+        <li><code>tests/test_config_model.py</code> — from_toml valid; from_toml invalid TOML raises with message; missing start dir raises cleanly; default() roundtrips; "all" sentinel expanded correctly</li>
+        <li><code>tests/test_output_sinks.py</code> — CsvSink, JsonSink, TextSink write correct content with tmp_path</li>
+        <li><code>tests/test_handler_enum_dir.py</code> — enumerate a real tmp_path tree; correct new_tasks and counters; PermissionError handled gracefully</li>
+        <li><code>tests/test_handler_scan_file.py</code> — known plaintext fixture returns correct findings; permission-denied file returns status="error"; no-handler file returns ok + empty findings</li>
+        <li><code>tests/test_run_scan.py</code> — run_scan() on testdata/plaintext/ produces non-empty CSV; marked <code>@pytest.mark.e2e</code></li>
+        <li><code>tests/test_cli.py</code> — CliRunner invokes piidigger scan with --config and exits 0</li>
+      </ul>
+      <h3>Updated test files</h3>
+      <ul>
+        <li><code>tests/test_email.py</code> — update call sites: <code>find_match()</code> → <code>EmailHandler().find_matches()</code></li>
+        <li><code>tests/test_pan.py</code> — same rename</li>
+        <li><code>tests/test_read_plaintext_file.py</code> and similar — update to construct FilesystemItem; call <code>handler.read(item)</code></li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Group H -->
+  <div class="phase-label">Group H — Cleanup</div>
+
+  <div class="step">
+    <div class="step-header" onclick="toggle(this)">
+      <div class="step-num">H1</div>
+      <div class="step-title-area">
+        <div class="step-title">pyproject.toml + marker cleanup</div>
+        <div class="step-file">pyproject.toml</div>
+        <div class="step-tags">
+          <span class="badge badge-green">Trivial</span>
+        </div>
+      </div>
+    </div>
+    <div class="step-body">
+      <ul>
+        <li>Add pytest markers <code>slow</code> and <code>e2e</code> to <code>[tool.pytest.ini_options] markers</code></li>
+        <li>Update <code>[project.scripts]</code> entry point to <code>piidigger.cli.main:cli</code></li>
+        <li>Mark the Phase 3 integration tests (<code>test_run_scan.py</code>) as <code>@pytest.mark.e2e</code></li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Key Decisions -->
+  <h2>Key Decisions for Your Review</h2>
+
+  <table class="decision-table">
+    <thead>
+      <tr>
+        <th style="width:30%">Decision</th>
+        <th style="width:35%">Options</th>
+        <th style="width:35%">Recommendation</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="opacity:0.7;">
+        <td class="td-decision">TOML key naming (2.0 break) <span class="badge badge-green" style="margin-left:6px;">Locked ✓</span></td>
+        <td>Snake_case throughout — clean break from 1.x camelCase</td>
+        <td class="td-rec">✓ Confirmed. <code>piidigger config generate</code> writes the new format as migration aid.</td>
+      </tr>
+      <tr style="opacity:0.7;">
+        <td class="td-decision">List fields always lists <span class="badge badge-green" style="margin-left:6px;">Locked ✓</span></td>
+        <td>All list fields (<code>start_dirs</code>, <code>ext</code>, <code>mime</code>, <code>data_handlers</code>) accept only <code>list[str]</code>. Default is <code>["all"]</code>. Bare strings rejected at validation time.</td>
+        <td class="td-rec">✓ Confirmed. Eliminates the "sometimes string, sometimes list" bug class entirely.</td>
+      </tr>
+      <tr style="opacity:0.7;">
+        <td class="td-decision">OS sub-tables for start_dirs + exclude_dirs <span class="badge badge-green" style="margin-left:6px;">Locked ✓</span></td>
+        <td>Keep <code>[include_files.start_dirs]</code> and <code>[exclude_dirs]</code> OS sub-tables. <code>from_toml()</code> selects current-OS section. Linux and darwin have distinct exclude sets even if they look similar.</td>
+        <td class="td-rec">✓ Confirmed. Config model itself is always flat (no OS nesting visible to caller).</td>
+      </tr>
+      <tr style="opacity:0.7;">
+        <td class="td-decision">macOS key name in TOML <span class="badge badge-green" style="margin-left:6px;">Locked ✓</span></td>
+        <td>Use <code>macos</code> as the TOML key (not <code>darwin</code>). <code>from_toml()</code> maps <code>platform.system() == "Darwin"</code> → <code>"macos"</code> internally.</td>
+        <td class="td-rec">✓ Confirmed. <code>darwin</code> is an implementation detail unknown to most Mac users. The mapping is 5 lines in <code>from_toml()</code> and never visible outside it.</td>
+      </tr>
+      <tr style="opacity:0.7;">
+        <td class="td-decision">JSON output format <span class="badge badge-green" style="margin-left:6px;">Locked ✓</span></td>
+        <td>
+          Both <code>.jsonl</code> and <code>.json</code> produced from one <code>json = true</code> config flag, sharing the same timestamp.<br><br>
+          <strong>During scan:</strong> <code>JsonSink.write()</code> streams to <code>.jsonl</code> — no memory accumulation.<br><br>
+          <strong>At <code>close()</code>:</strong> reads JSONL back and writes a standard JSON array to <code>.json</code>. Runs in the coordinator's <code>finally</code> block, so both files are produced on normal exit <em>and</em> on Ctrl+C. Only a hard kill (<code>kill -9</code>, power loss) bypasses <code>finally</code>; in that case the <code>.jsonl</code> partial file is still valid and usable.
+        </td>
+        <td class="td-rec">✓ Confirmed. Streaming write for reliability; JSON array at close() for interoperability. One flag, two paired files with matching timestamps.</td>
+      </tr>
+      <tr style="opacity:0.7;">
+        <td class="td-decision">Handler discovery mechanism <span class="badge badge-green" style="margin-left:6px;">Locked ✓</span></td>
+        <td>Explicit registry dict in <code>__init__.py</code> — simple, readable, no magic.</td>
+        <td class="td-rec">✓ Confirmed. Adding a handler means adding one line to the registry — obvious and grep-able.</td>
+      </tr>
+      <tr style="opacity:0.7;">
+        <td class="td-decision">SLOW_TEST task type <span class="badge badge-green" style="margin-left:6px;">Locked ✓</span></td>
+        <td>Remove from <code>TaskType</code> and <code>DISPATCH</code>. Deadline detection tests use a configurable sleep injected at test time instead.</td>
+        <td class="td-rec">✓ Confirmed. No production task type should exist solely to sleep. The test fixture approach is cleaner.</td>
+      </tr>
+      <tr style="opacity:0.7;">
+        <td class="td-decision">Legacy piidigger.piidigger:main entry point <span class="badge badge-green" style="margin-left:6px;">Locked ✓</span></td>
+        <td>Remove immediately in Phase 3. <code>piidigger.cli.main:cli</code> is the sole entry point from this point forward.</td>
+        <td class="td-rec">✓ Confirmed. Phase 4 already deletes old orchestration code — cleaner to remove the entry point at the same time as the CLI is built.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- Risks -->
+  <h2>Risks &amp; Mitigations</h2>
+
+  <div class="risk">
+    <div class="risk-icon">⚠️</div>
+    <div class="risk-body">
+      <div class="risk-title">Existing tests break on handler interface rename</div>
+      <div class="risk-desc">test_email.py, test_pan.py, and all file handler tests use the old module-level function signatures. They will fail until updated.</div>
+      <div class="risk-mit">Mitigation: update tests in the same commit as the handler changes. This is mechanical — same assertions, new call sites.</div>
+    </div>
+  </div>
+
+  <div class="risk">
+    <div class="risk-icon">⚠️</div>
+    <div class="risk-body">
+      <div class="risk-title">mypy --strict on orchestration/ including new handler code</div>
+      <div class="risk-desc">handle_enum_dir and handle_scan_file are in orchestration/worker.py which is held to mypy --strict. All return types and exception paths must be fully annotated.</div>
+      <div class="risk-mit">Mitigation: annotate as you write; run mypy after each handler to catch issues early.</div>
+    </div>
+  </div>
+
+  <div class="risk">
+    <div class="risk-icon">⚠️</div>
+    <div class="risk-body">
+      <div class="risk-title">Config start_dirs normalization on Windows</div>
+      <div class="risk-desc">The 1.x code expands "all" to all drive letters via <code>string.ascii_uppercase</code> + <code>os.path.exists(d + ":")</code>. This logic must be ported correctly to the Pydantic validator; if it runs at import time it may interact with test fixtures.</div>
+      <div class="risk-mit">Mitigation: put "all" expansion in a <code>model_validator(mode="after")</code>, not in __init__. The memory note about this normalization is tracked.</div>
+    </div>
+  </div>
+
+  <div class="risk">
+    <div class="risk-icon">⚠️</div>
+    <div class="risk-body">
+      <div class="risk-title">Coordinator _route_to_sinks needs dict→ResultRecord conversion</div>
+      <div class="risk-desc">Currently calls <code>sink.write(finding)</code> where finding is a dict. The new OutputSink.write takes a ResultRecord. This requires a 2-line change to coordinator.py — a Phase 2 file.</div>
+      <div class="risk-mit">Mitigation: small targeted change; already identified. Not a re-architecture — just add <code>ResultRecord.model_validate(finding)</code> at the call site.</div>
+    </div>
+  </div>
+
+  <div class="risk">
+    <div class="risk-icon">⚠️</div>
+    <div class="risk-body">
+      <div class="risk-title">xlsx/xls handlers require materialize() — creates temp copies of PII</div>
+      <div class="risk-desc">openpyxl and xlrd require a real file path. For Phase 3 (on-disk files), materialize() just returns the path itself — no temp copy. This only becomes a security concern in Phase 5 (archives). Nevertheless, the reason should be documented in the method.</div>
+      <div class="risk-mit">Mitigation: add a docstring note in xlsx.py and xls.py explaining why materialize() is called and that for FilesystemItem it returns the path itself (no copy).</div>
+    </div>
+  </div>
+
+  <div class="risk">
+    <div class="risk-icon">ℹ️</div>
+    <div class="risk-body">
+      <div class="risk-title">Phase 0 tasks are still incomplete</div>
+      <div class="risk-desc">snake_case renames across datahandlers/, filehandlers/, outputhandlers/ are technically Phase 0 work. Phase 3 will complete this as part of the class restructuring.</div>
+      <div class="risk-mit">Mitigation: the Phase 3 handler re-contracting naturally performs the Phase 0 renames. No separate Phase 0 commit needed — just note in the PR that Phase 0 naming tasks are being closed by Phase 3.</div>
+    </div>
+  </div>
+
+  <!-- Exit Criteria -->
+  <h2>Phase 3 Exit Criteria (from checklist)</h2>
+  <ul style="list-style:none; padding:0;">
+    <li style="padding: 7px 0; border-bottom: 1px solid var(--border); font-size:13px; display:flex; gap:10px; align-items:center;">
+      <span style="color:var(--text-dim);">□</span>
+      Full scan of <code>testdata/</code> produces correct output in all three formats (CSV, JSONL, text)
+    </li>
+    <li style="padding: 7px 0; border-bottom: 1px solid var(--border); font-size:13px; display:flex; gap:10px; align-items:center;">
+      <span style="color:var(--text-dim);">□</span>
+      All handler unit tests pass without spinning up a process tree
+    </li>
+    <li style="padding: 7px 0; border-bottom: 1px solid var(--border); font-size:13px; display:flex; gap:10px; align-items:center;">
+      <span style="color:var(--text-dim);">□</span>
+      CliRunner smoke test passes
+    </li>
+    <li style="padding: 7px 0; font-size:13px; display:flex; gap:10px; align-items:center;">
+      <span style="color:var(--text-dim);">□</span>
+      <code>ruff check src/ tests/</code> + <code>mypy src/</code> — zero violations
+    </li>
+  </ul>
+
+</div>
+
+<script>
+function toggle(header) {
+  const body = header.nextElementSibling;
+  body.classList.toggle('open');
+}
+function toggleAll() {
+  const bodies = document.querySelectorAll('.step-body');
+  const anyOpen = Array.from(bodies).some(b => b.classList.contains('open'));
+  bodies.forEach(b => anyOpen ? b.classList.remove('open') : b.classList.add('open'));
+}
+</script>
+</body>
+</html>

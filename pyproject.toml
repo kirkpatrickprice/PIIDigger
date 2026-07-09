@@ -1,7 +1,3 @@
-# [build-system]
-# requires=['hatchling']
-# build-backend = "hatchling.build"
-
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
@@ -15,17 +11,22 @@ authors = [
 description = "Python program to identify Personally Identifiable Information in common file types"
 readme = "README.md"
 keywords = ["pii discovery", "data discovery", "credit card discovery"]
-requires-python = ">=3.9,<4"
-dependencies = ["chardet==5.2.0",
+requires-python = ">=3.14,<4"
+dependencies = ["charset-normalizer>=3.4,<4",
+                "click>=8.1,<9",
                 "colorama==0.4.6",
-                "docx2python==2.10.1",
-                "openpyxl==3.0.10",
-                "puremagic==1.20",
-                "pypdf==5.4.0",
-                "pyyaml==6.0.1",
-                "tomli==2.0.1",
-                "wakepy==0.7.2",
-                "xlrd==2.0.1",
+                "docx2python==3.6.2",
+                "lxml>=6.0.0,<7",
+                "openpyxl==3.1.5",
+                "pydantic==2.13.4",
+                "puremagic==2.2.0",
+                "psutil>=7.1,<8",
+                "pypdf==6.13.2",
+                "pyyaml==6.0.3",
+                "rich>=13.7,<15",
+                "py7zr>=1.1.3,<1.2",
+                "wakepy==1.0.0",
+                "xlrd==2.0.2",
                 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -39,14 +40,42 @@ classifiers = [
     ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4.4",]
-test = ["pytest>=7.4.4",]
-win = ["pywin32"]
-build = ["pyinstaller>=6.6.0",]
-pypi = ["build>=1.2.1", "twine>=5.0.0",]
+dev = [
+    "pytest>=7.4.4",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-PyYAML",
+    ]
+test = [
+    "pytest>=7.4.4",
+    "pytest-cov>=5.0",
+    ]
+win = [
+    "pywin32",
+    ]
+build = [
+    "pyinstaller>=6.6.0",
+    ]
+pypi = [
+    "build>=1.2.1",
+    "twine>=5.0.0",
+    ]
+docs = [
+    "mkdocs>=1.6.0",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.26.0",
+    "mkdocs-gen-files>=0.5.0",
+    "mkdocs-literate-nav>=0.6.0",
+    "mkdocs-section-index>=0.3.0",
+    "mkdocs-autorefs>=1.0.0",
+    "pymdown-extensions>=10.0.0",
+    "mkdocs-git-revision-date-localized-plugin>=1.2.0",
+    "mkdocs-mermaid2-plugin>=1.2.1",
+]
 
 [project.scripts]
-piidigger = "piidigger.piidigger:main"
+piidigger = "piidigger.cli.main:cli"
 getmime = "piidigger.getmime:main"
 
 [tool.setuptools.dynamic]
@@ -56,19 +85,73 @@ version = {attr = "piidigger.__version__"}
 Homepage = "https://github.com/kirkpatrickprice/PIIDigger"
 Issues = "https://github.com/kirkpatrickprice/PIIDigger/issues"
 
-[tool.bandit]
-targets = ["."]
-exclude_dirs = ["tests"]
-#skips = ["B324"]
+[tool.ruff]
+target-version = "py314"
+src = ["src", "tests"]
+line-length = 120
+
+[tool.ruff.lint]
+# E/F = pycodestyle+pyflakes, I = isort, UP = pyupgrade (enforces `X | None`),
+# B = bugbear, S = flake8-bandit (replaces the old [tool.bandit] config).
+# N (pep8-naming) is enabled for new code only; legacy modules are exempted
+# below until the queue refactor renames them (dirsQ -> dirs_queue, etc.).
+select = ["E", "F", "I", "UP", "B", "S", "N"]
+ignore = [
+    "E501",  # line length handled by the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/piidigger/__main__.py" = ["N"]
+"tests/**" = ["S101", "S108", "S301", "N"]  # asserts, /tmp strings, and pickle are expected in tests
+# Handler packages re-export submodules so the dynamic __dir__() discovery in
+# globalfuncs can find them; the imports are intentional, not dead code.
+"**/__init__.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.14"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+# mypy 2.x defaults are strict. Keep no-untyped-call off globally so freshly
+# typed modules may still call into the (as yet) untyped legacy tree.
+disable_error_code = ["no-untyped-call"]
+
+# The legacy tree is largely unannotated and is being typed module-by-module as
+# the queue refactor rewrites it. These modules are ignored for now; delete each
+# entry as its module gains full type coverage. Modules NOT listed here
+# (console, getencoding, future orchestration) are type-checked normally.
+[[tool.mypy.overrides]]
+module = [
+    "piidigger.run",
+    "piidigger.__main__",
+    "piidigger.globalfuncs",
+    "piidigger.getmime",
+    "piidigger.filehandlers.*",
+    "piidigger.outputhandlers.*",
+    "piidigger.datahandlers.*",
+]
+ignore_errors = true
+
+# Tests are not type-checked. `uv run mypy src/` is the canonical command;
+# this override keeps IDE mypy extensions (which check the whole workspace)
+# in agreement with it instead of flagging untyped test helpers.
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+ignore_errors = true
+
+# New code is held to a strict standard.
+[[tool.mypy.overrides]]
+module = [
+    "piidigger.orchestration.*",
+    "piidigger.archivehandlers.*",
+]
+strict = true
+enable_error_code = ["no-untyped-call"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-# [tool.hatch.build.targets.wheel]
-# packages = ["src/piidigger"]
 
 [tool.pytest.ini_options]
 pythonpath = "src/"
@@ -78,4 +161,7 @@ markers = [
     "filehandlers: mark a test as a file handler test",
     "unit: mark a test as a unit test",
     "utils: mark a test as a utility test",
+    "slow: mark a test as slow (timeout/reliability tests)",
+    "e2e: mark a test as an end-to-end test (full scan + baseline)",
+    "integration: mark a test as an integration test (spins up real processes)",
     ]

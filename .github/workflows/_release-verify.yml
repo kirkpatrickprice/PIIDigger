@@ -1,0 +1,31 @@
+name: Release - Verify
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  full-test-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --extra dev --extra test
+      - name: Lint (ruff)
+        run: uv run ruff check src/ tests/
+      - name: Type check (mypy)
+        run: uv run mypy src/
+      - name: Run full test suite (all markers, no exclusions)
+        run: >
+          uv run pytest tests/ -v
+          --cov=src/piidigger --cov-report=term-missing --cov-fail-under=80
