@@ -66,7 +66,7 @@ def readFile(filename: str,
                             break
                         continue
                     # xlrd converts all numbers to floats.  If the float is really an integer (ends in '.0'), convert it to a string without the decimal point
-                    if type(item) == float and str(item)[-2:] == '.0':
+                    if isinstance(item, float) and str(item)[-2:] == '.0':
                         item = str(item)[:-2]
                     line += str(item) + ' '
                     rowHasData=True
