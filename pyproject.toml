@@ -165,3 +165,16 @@ markers = [
     "e2e: mark a test as an end-to-end test (full scan + baseline)",
     "integration: mark a test as an integration test (spins up real processes)",
     ]
+
+[tool.uv.workspace]
+members = [
+    ".",
+]
+
+[tool.uv.sources]
+piidigger = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "piidigger[win]",
+]

@@ -1047,6 +1047,11 @@ win = [
     { name = "pywin32" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "piidigger", extra = ["win"] },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "build", marker = "extra == 'pypi'", specifier = ">=1.2.1" },
@@ -1087,6 +1092,9 @@ requires-dist = [
     { name = "xlrd", specifier = "==2.0.2" },
 ]
 provides-extras = ["dev", "test", "win", "build", "pypi", "docs"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "piidigger", extras = ["win"], editable = "." }]
 
 [[package]]
 name = "platformdirs"

@@ -172,6 +172,26 @@ def test_archive_config_unknown_toml_key_raises(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_archive_config_rejects_unknown_format() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="unknown archive format"):
+        ArchiveConfig(formats=["zip", "rar"])
+
+
+@pytest.mark.unit
+def test_archive_config_accepts_known_formats_case_insensitively() -> None:
+    cfg = ArchiveConfig(formats=["ZIP", "Tar"])
+    assert cfg.formats == ["ZIP", "Tar"]
+
+
+@pytest.mark.unit
+def test_archive_config_all_bypasses_format_validation() -> None:
+    cfg = ArchiveConfig(formats=["all"])
+    assert cfg.formats == ["all"]
+
+
+@pytest.mark.unit
 def test_generate_toml_template_includes_archives_section() -> None:
     from piidigger.models.config import generate_toml_template
 

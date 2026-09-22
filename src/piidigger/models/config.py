@@ -243,6 +243,19 @@ class ArchiveConfig(PiiDiggerModel):
     max_member_uncompressed_size_mb: int = Field(default=_ARCHIVE_MAX_MEMBER_SIZE_MB, ge=1)
     max_total_uncompressed_size_mb: int = Field(default=_ARCHIVE_MAX_TOTAL_SIZE_MB, ge=1)
 
+    @field_validator("formats")
+    @classmethod
+    def _validate_formats(cls, v: list[str]) -> list[str]:
+        if "all" in v:
+            return v
+        from piidigger.archivehandlers import HANDLER_REGISTRY  # noqa: PLC0415
+
+        unknown = [name for name in v if name.lower() not in HANDLER_REGISTRY]
+        if unknown:
+            known = ", ".join(sorted(HANDLER_REGISTRY))
+            raise ValueError(f"unknown archive format(s): {', '.join(unknown)}; known: {known}")
+        return v
+
 
 class BufferConfig(PiiDiggerModel):
     """RAM-buffering configuration for text-extracting file handlers.
@@ -284,6 +297,19 @@ class ResultsConfig(PiiDiggerModel):
     path: Path = Path(_DEFAULT_RESULTS_PATH)
     formats: list[str] = Field(default_factory=lambda: ["all"])
 
+    @field_validator("formats")
+    @classmethod
+    def _validate_formats(cls, v: list[str]) -> list[str]:
+        if "all" in v:
+            return v
+        from piidigger.outputhandlers import HANDLER_REGISTRY  # noqa: PLC0415
+
+        unknown = [name for name in v if name.lower() not in HANDLER_REGISTRY]
+        if unknown:
+            known = ", ".join(sorted(HANDLER_REGISTRY))
+            raise ValueError(f"unknown result format(s): {', '.join(unknown)}; known: {known}")
+        return v
+
 
 class Config(PiiDiggerModel):
     """2.0 scan configuration.
@@ -310,6 +336,32 @@ class Config(PiiDiggerModel):
     archives: ArchiveConfig = Field(default_factory=ArchiveConfig)
     buffer: BufferConfig = Field(default_factory=BufferConfig)
     spreadsheet: SpreadsheetConfig = Field(default_factory=SpreadsheetConfig)
+
+    @field_validator("include_exts")
+    @classmethod
+    def _validate_include_exts(cls, v: list[str]) -> list[str]:
+        if "all" in v:
+            return v
+        from piidigger.filehandlers import get_supported_exts  # noqa: PLC0415
+
+        known = get_supported_exts()
+        unknown = [name for name in v if name not in known]
+        if unknown:
+            raise ValueError(f"unknown extension(s): {', '.join(unknown)}; known: {', '.join(sorted(known))}")
+        return v
+
+    @field_validator("include_mime")
+    @classmethod
+    def _validate_include_mime(cls, v: list[str]) -> list[str]:
+        if "all" in v:
+            return v
+        from piidigger.filehandlers import get_supported_mimes  # noqa: PLC0415
+
+        known = get_supported_mimes()
+        unknown = [name for name in v if name not in known]
+        if unknown:
+            raise ValueError(f"unknown MIME type(s): {', '.join(unknown)}; known: {', '.join(sorted(known))}")
+        return v
 
     @field_validator("data_handlers")
     @classmethod

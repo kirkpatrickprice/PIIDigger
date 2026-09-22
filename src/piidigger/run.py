@@ -23,9 +23,9 @@ from piidigger.orchestration.coordinator import run_coordinator
 from piidigger.orchestration.logging_setup import build_worker_logger, setup_warning_capture, start_listener
 from piidigger.orchestration.progress import ProgressDisplay
 from piidigger.orchestration.worker import start_worker_pool
-from piidigger.outputhandlers import CsvSink, JsonSink, TextSink
+from piidigger.outputhandlers import HANDLER_REGISTRY, CsvSink, JsonSink, TextSink
 
-_ALL_FORMATS: frozenset[str] = frozenset({"csv", "json", "text"})
+_ALL_FORMATS: frozenset[str] = frozenset(HANDLER_REGISTRY)
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 _ADMIN_PROMPT_TIMEOUT: int = 10
 

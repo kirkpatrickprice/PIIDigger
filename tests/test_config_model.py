@@ -41,6 +41,26 @@ def test_results_config_rejects_unknown_fields() -> None:
         ResultsConfig(unknown_field="bad")  # type: ignore[call-arg]
 
 
+@pytest.mark.unit
+def test_results_config_rejects_unknown_format() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="unknown result format"):
+        ResultsConfig(formats=["csv", "xml"])
+
+
+@pytest.mark.unit
+def test_results_config_accepts_known_formats_case_insensitively() -> None:
+    r = ResultsConfig(formats=["CSV", "Json"])
+    assert r.formats == ["CSV", "Json"]
+
+
+@pytest.mark.unit
+def test_results_config_all_bypasses_format_validation() -> None:
+    r = ResultsConfig(formats=["all"])
+    assert r.formats == ["all"]
+
+
 # ---------------------------------------------------------------------------
 # BufferConfig
 # ---------------------------------------------------------------------------
@@ -111,6 +131,52 @@ def test_config_default_is_picklable() -> None:
     restored: Config = pickle.loads(pickle.dumps(c))
     assert restored.start_dirs == c.start_dirs
     assert restored.performance == c.performance
+
+
+# ---------------------------------------------------------------------------
+# Config.include_exts / include_mime validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_config_accepts_known_ext() -> None:
+    c = Config(start_dirs=[], include_exts=[".docx"])
+    assert c.include_exts == [".docx"]
+
+
+@pytest.mark.unit
+def test_config_rejects_unknown_ext() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="unknown extension"):
+        Config(start_dirs=[], include_exts=[".notarealext"])
+
+
+@pytest.mark.unit
+def test_config_include_exts_all_bypasses_validation() -> None:
+    c = Config(start_dirs=[], include_exts=["all"])
+    assert c.include_exts == ["all"]
+
+
+@pytest.mark.unit
+def test_config_accepts_known_mime() -> None:
+    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    c = Config(start_dirs=[], include_mime=[mime])
+    assert c.include_mime == [mime]
+
+
+@pytest.mark.unit
+def test_config_rejects_unknown_mime() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="unknown MIME type"):
+        Config(start_dirs=[], include_mime=["application/x-bogus"])
+
+
+@pytest.mark.unit
+def test_config_include_mime_all_bypasses_validation() -> None:
+    c = Config(start_dirs=[], include_mime=["all"])
+    assert c.include_mime == ["all"]
 
 
 # ---------------------------------------------------------------------------
