@@ -51,8 +51,13 @@ def test_results_config_rejects_unknown_format() -> None:
 
 @pytest.mark.unit
 def test_results_config_accepts_known_formats_case_insensitively() -> None:
+    """Mixed case validates AND is normalized to lowercase.
+
+    Normalization is the contract, not a convenience: run._build_sinks matches
+    these names against the lowercase registry keys.
+    """
     r = ResultsConfig(formats=["CSV", "Json"])
-    assert r.formats == ["CSV", "Json"]
+    assert r.formats == ["csv", "json"]
 
 
 @pytest.mark.unit

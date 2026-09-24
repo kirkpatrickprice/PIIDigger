@@ -246,15 +246,20 @@ class ArchiveConfig(PiiDiggerModel):
     @field_validator("formats")
     @classmethod
     def _validate_formats(cls, v: list[str]) -> list[str]:
-        if "all" in v:
-            return v
+        # Normalize before anything else: consumers match these names against
+        # the lowercase registry keys, so a stored "ZIP" would match nothing.
+        # Lowercasing first also lets "ALL" reach the short-circuit below.
+        normalized = [name.lower() for name in v]
+        if "all" in normalized:
+            return normalized
         from piidigger.archivehandlers import HANDLER_REGISTRY  # noqa: PLC0415
 
+        # Report the name as the user spelled it, but compare case-insensitively.
         unknown = [name for name in v if name.lower() not in HANDLER_REGISTRY]
         if unknown:
             known = ", ".join(sorted(HANDLER_REGISTRY))
             raise ValueError(f"unknown archive format(s): {', '.join(unknown)}; known: {known}")
-        return v
+        return normalized
 
 
 class BufferConfig(PiiDiggerModel):
@@ -300,15 +305,21 @@ class ResultsConfig(PiiDiggerModel):
     @field_validator("formats")
     @classmethod
     def _validate_formats(cls, v: list[str]) -> list[str]:
-        if "all" in v:
-            return v
+        # Normalize before anything else: run._build_sinks intersects these
+        # names against the lowercase registry keys, so a stored "CSV" would
+        # build no sink and the scan would write nothing.  Lowercasing first
+        # also lets "ALL" reach the short-circuit below.
+        normalized = [name.lower() for name in v]
+        if "all" in normalized:
+            return normalized
         from piidigger.outputhandlers import HANDLER_REGISTRY  # noqa: PLC0415
 
+        # Report the name as the user spelled it, but compare case-insensitively.
         unknown = [name for name in v if name.lower() not in HANDLER_REGISTRY]
         if unknown:
             known = ", ".join(sorted(HANDLER_REGISTRY))
             raise ValueError(f"unknown result format(s): {', '.join(unknown)}; known: {known}")
-        return v
+        return normalized
 
 
 class Config(PiiDiggerModel):

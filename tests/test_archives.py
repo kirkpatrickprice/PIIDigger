@@ -181,8 +181,13 @@ def test_archive_config_rejects_unknown_format() -> None:
 
 @pytest.mark.unit
 def test_archive_config_accepts_known_formats_case_insensitively() -> None:
+    """Mixed case validates AND is normalized to lowercase.
+
+    _enum_dir matches archive_type against these names; normalizing here means
+    the comparison no longer depends on that consumer lowercasing too.
+    """
     cfg = ArchiveConfig(formats=["ZIP", "Tar"])
-    assert cfg.formats == ["ZIP", "Tar"]
+    assert cfg.formats == ["zip", "tar"]
 
 
 @pytest.mark.unit
