@@ -57,6 +57,9 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
+          # The parallel `test` job saves this same cache key; saving here too
+          # only produces a "Unable to reserve cache" warning.
+          save-cache: false
       - name: Install dependencies
         run: uv sync --extra dev --extra test
       - name: Run slow/e2e tests
