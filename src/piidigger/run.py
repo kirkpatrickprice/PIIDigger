@@ -5,7 +5,6 @@ import math
 import multiprocessing as mp
 import os
 import re
-import shutil
 import socket
 import sys
 import tempfile
@@ -22,12 +21,20 @@ from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.coordinator import run_coordinator
 from piidigger.orchestration.logging_setup import build_worker_logger, setup_warning_capture, start_listener
 from piidigger.orchestration.progress import ProgressDisplay
+from piidigger.orchestration.secure_delete import secure_rmtree
 from piidigger.orchestration.worker import start_worker_pool
 from piidigger.outputhandlers import HANDLER_REGISTRY, CsvSink, JsonSink, TextSink
 
 _ALL_FORMATS: frozenset[str] = frozenset(HANDLER_REGISTRY)
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 _ADMIN_PROMPT_TIMEOUT: int = 10
+
+# Process exit codes.  A scan that did not finish must never report success —
+# automation gating on the exit code would treat a truncated scan as clean.
+EXIT_OK: int = 0
+EXIT_ABORTED: int = 1  # refused to start (e.g. admin check declined)
+EXIT_INCOMPLETE: int = 2  # ran, but exited with work still outstanding
+EXIT_INTERRUPTED: int = 130  # CTRL-C; 128 + SIGINT, the shell convention
 
 
 def _is_admin() -> bool:
@@ -163,7 +170,7 @@ def _build_sinks(config: Config) -> list[Any]:
 
 
 def run_scan(config: Config) -> int:
-    """Run a full PII scan against config. Returns 0 on success.
+    """Run a full PII scan against config.  Returns a process exit code.
 
     Wiring order:
       1. Build and open output sinks (create parent dirs as needed)
@@ -174,7 +181,11 @@ def run_scan(config: Config) -> int:
       6. Run coordinator (seeds tasks, fan-out loop, teardown)
 
     Teardown (join workers, flush sinks, stop listener, stop progress)
-    is owned by run_coordinator's finally block.
+    is owned by run_coordinator's finally block.  The temp workspace is owned
+    here and removed in a finally, so an exception escaping the coordinator
+    cannot leave extracted archive members — plaintext PII — on disk.
+
+    Exit codes: EXIT_OK, EXIT_ABORTED, EXIT_INCOMPLETE, EXIT_INTERRUPTED.
     """
     log_queue: mp.Queue[object] = mp.Queue()
     task_queue: mp.Queue[object] = mp.Queue()
@@ -196,7 +207,7 @@ def run_scan(config: Config) -> int:
         for sink in sinks:
             sink.close()
         listener.stop()
-        return 1
+        return EXIT_ABORTED
 
     # Create a PIIDigger-owned temp root and exclude it from directory scanning
     # so ENUM_DIR workers never attempt to scan extracted archive members.
@@ -220,9 +231,19 @@ def run_scan(config: Config) -> int:
     progress = ProgressDisplay()
     progress.start()
 
-    with keep.running(on_fail="pass") as wake_mode:
-        _emit_startup_info(progress, run_logger, config, worker_count, wake_mode)
-        run_coordinator(ctx, workers, listener, sinks, progress)
+    try:
+        with keep.running(on_fail="pass") as wake_mode:
+            _emit_startup_info(progress, run_logger, config, worker_count, wake_mode)
+            outcome = run_coordinator(ctx, workers, listener, sinks, progress)
+    finally:
+        # secure_rmtree, not shutil.rmtree: a worker killed by terminate() never
+        # unwinds its own finally, so its extracted members survive to here.
+        secure_rmtree(temp_base)
 
-    shutil.rmtree(temp_base, ignore_errors=True)
-    return 0
+    if outcome.interrupted:
+        run_logger.warning("scan interrupted by user")
+        return EXIT_INTERRUPTED
+    if outcome.unfinished:
+        run_logger.error("scan incomplete: %d task(s) unaccounted for", outcome.unfinished)
+        return EXIT_INCOMPLETE
+    return EXIT_OK

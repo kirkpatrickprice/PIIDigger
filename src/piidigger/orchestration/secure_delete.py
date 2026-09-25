@@ -14,6 +14,7 @@ This limitation is documented in the user guide under Security Considerations.
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 
@@ -42,3 +43,22 @@ def secure_delete(path: Path) -> None:
     except OSError:
         pass
     path.unlink(missing_ok=True)
+
+
+def secure_rmtree(root: Path) -> None:
+    """Securely delete every file under *root*, then remove the directory tree.
+
+    secure_delete() is called only on files — unlink() raises IsADirectoryError
+    on directories, which missing_ok=True does not suppress.  shutil.rmtree()
+    then removes the now-empty tree.  No-ops when root does not exist.
+
+    Used both per-task by workers and as the run-level backstop, so a temp tree
+    left behind by a terminated worker is still overwritten rather than merely
+    unlinked.
+    """
+    if not root.exists():
+        return
+    for path in root.rglob("*"):
+        if path.is_file():
+            secure_delete(path)
+    shutil.rmtree(root, ignore_errors=True)

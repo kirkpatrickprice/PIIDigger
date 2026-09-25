@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import os
-import shutil
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -12,7 +11,7 @@ from typing import Any
 from piidigger.models.tasks import SHUTDOWN, ShutdownSentinel, Task, TaskResult, TaskStarted, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger, setup_warning_capture
-from piidigger.orchestration.secure_delete import secure_delete
+from piidigger.orchestration.secure_delete import secure_rmtree
 from piidigger.orchestration.worker._enum_archive import handle_enum_archive_members
 from piidigger.orchestration.worker._enum_dir import handle_enum_dir
 from piidigger.orchestration.worker._scan_archive_member import handle_scan_archive_member
@@ -55,21 +54,16 @@ DISPATCH: dict[TaskType, _HandlerFn] = {
 
 
 def _cleanup_temp_workspace(temp_base: Path, task_id: str) -> None:
-    """Securely delete per-task temp files then remove the task temp directory.
+    """Securely delete this task's temp files then remove its temp directory.
 
-    Walks task_temp recursively so handlers need not flatten extracted files
-    to a single level.  secure_delete() is called only on files — unlink()
-    raises IsADirectoryError on directories, which missing_ok=True does not
-    suppress.  shutil.rmtree() removes the now-empty directory tree.
-    No-ops gracefully when the task created no temp files.
+    Walks the task temp dir recursively so handlers need not flatten extracted
+    files to a single level.  No-ops gracefully when the task created no temp
+    files.
+
+    Note this runs in worker_loop's finally block, which a terminate() does NOT
+    unwind — run_scan's own secure_rmtree of temp_base is the backstop for that.
     """
-    task_temp = temp_base / task_id
-    if not task_temp.exists():
-        return
-    for path in task_temp.rglob("*"):
-        if path.is_file():
-            secure_delete(path)
-    shutil.rmtree(task_temp, ignore_errors=True)
+    secure_rmtree(temp_base / task_id)
 
 
 def _dispatch(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:

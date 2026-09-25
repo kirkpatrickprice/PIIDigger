@@ -21,6 +21,7 @@ from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.coordinator import (
     HEARTBEAT_CHECK_INTERVAL,
     _run_with_internal_workers,
+    build_seed_tasks,
     run_coordinator,
 )
 from piidigger.orchestration.logging_setup import start_listener, stop_listener
@@ -571,3 +572,96 @@ def test_crash_before_heartbeat_requeues_task(tmp_path: Path) -> None:
     assert task_requeued, "orphaned task was never re-queued after crash"
     assert pending == 0, f"pending did not reach 0; remaining={pending}"
     assert time.monotonic() - test_start < TEST_LIMIT
+
+
+# ---------------------------------------------------------------------------
+# Regression guards: seed timeout, malformed child tasks, run outcome
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_seeded_tasks_use_configured_timeout(tmp_path: Path) -> None:
+    """Seed ENUM_DIR tasks carry config.default_timeout_seconds, not the model default.
+
+    Regression: the seed omitted timeout_seconds, so root tasks silently used the
+    Task model's hardcoded 30 while every descendant used the configured value.
+    """
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+
+    seeds = build_seed_tasks(Config(start_dirs=[a, b], default_timeout_seconds=123))
+
+    assert len(seeds) == 2
+    assert all(t.task_type == TaskType.ENUM_DIR for t in seeds)
+    assert all(t.timeout_seconds == 123 for t in seeds)
+    assert {t.payload["path"] for t in seeds} == {str(a), str(b)}
+    assert all(t.payload["depth"] == 0 for t in seeds)
+
+
+@pytest.mark.unit
+def test_seeded_tasks_empty_when_no_start_dirs() -> None:
+    """No start dirs means no seed tasks, so the coordinator exits immediately."""
+    assert build_seed_tasks(Config(start_dirs=[])) == []
+
+
+@pytest.mark.integration
+def test_malformed_child_task_is_dropped_and_scan_completes(tmp_path: Path) -> None:
+    """A producer emitting an invalid new_tasks dict must not abort the whole scan.
+
+    Task has extra="forbid"; unguarded, the ValidationError escaped run_coordinator,
+    skipped temp cleanup, and ended the run.  It should now drop that one child.
+    """
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    (scan_root / "a.txt").write_text("hello")
+
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    log_queue: mp.Queue[object] = mp.Queue()
+    stop_event = mp.Event()
+
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [scan_root])
+    listener = start_listener(log_queue, tmp_path / "malformed.log", "DEBUG")
+    workers = start_worker_pool(ctx, 1)
+    progress = _non_tty_progress()
+
+    # Inject a bogus child task alongside the real seed so the coordinator hits the
+    # guard mid-run rather than at a quiescent moment.
+    result_queue.put(
+        TaskResult(
+            task_id="not-a-tracked-id",
+            task_type=TaskType.NOOP,
+            status="ok",
+            new_tasks=[{"task_type": "enum_dir", "payload": {}, "no_such_field": 1}],
+        )
+    )
+
+    outcome = run_coordinator(ctx, workers, listener, [], progress)
+
+    assert outcome.interrupted is False
+    assert all(not w.is_alive() for w in workers)
+
+
+@pytest.mark.integration
+def test_clean_run_reports_no_unfinished_work(tmp_path: Path) -> None:
+    """A normal scan reports interrupted=False and unfinished=0."""
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    (scan_root / "a.txt").write_text("hello")
+
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    log_queue: mp.Queue[object] = mp.Queue()
+    stop_event = mp.Event()
+
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [scan_root])
+    listener = start_listener(log_queue, tmp_path / "clean.log", "WARNING")
+    workers = start_worker_pool(ctx, 2)
+    progress = _non_tty_progress()
+
+    outcome = run_coordinator(ctx, workers, listener, [], progress)
+
+    assert outcome.interrupted is False
+    assert outcome.unfinished == 0

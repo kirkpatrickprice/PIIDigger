@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import math
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from piidigger.models.config import Config, ResultsConfig
-from piidigger.run import _build_sinks, _resolve_workers, run_scan
+from piidigger.run import EXIT_OK, _build_sinks, _resolve_workers, run_scan
 
 
 @pytest.mark.unit
@@ -119,6 +120,60 @@ def test_run_scan_returns_0_on_success(tmp_path: Path) -> None:
 
     rc = run_scan(config)
 
-    assert rc == 0
+    assert rc == EXIT_OK
     txt_files = list(results_dir.glob("*.txt"))
     assert len(txt_files) == 1, f"expected one .txt output file; got {txt_files}"
+
+
+@pytest.mark.integration
+def test_run_scan_removes_temp_workspace(tmp_path: Path) -> None:
+    """The piidigger_* temp root is removed after a successful scan.
+
+    Guards the try/finally around run_coordinator: extracted archive members are
+    plaintext PII, so the workspace must not survive the run.
+    """
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    (scan_root / "hello.txt").write_text("hello world")
+
+    before = set(Path(tempfile.gettempdir()).glob("piidigger_*"))
+    run_scan(
+        Config(
+            start_dirs=[scan_root],
+            log_file=tmp_path / "test.log",
+            results=ResultsConfig(path=tmp_path / "results", formats=["text"]),
+        )
+    )
+    leaked = set(Path(tempfile.gettempdir()).glob("piidigger_*")) - before
+    assert not leaked, f"temp workspace(s) left behind: {leaked}"
+
+
+@pytest.mark.integration
+def test_run_scan_temp_workspace_removed_when_coordinator_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An exception escaping run_coordinator still removes the temp workspace.
+
+    Before the try/finally this was the leak path: the scan aborted with a
+    traceback and left extracted archive members on disk.
+    """
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    (scan_root / "hello.txt").write_text("hello world")
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("coordinator exploded")
+
+    monkeypatch.setattr("piidigger.run.run_coordinator", _boom)
+
+    before = set(Path(tempfile.gettempdir()).glob("piidigger_*"))
+    with pytest.raises(RuntimeError, match="coordinator exploded"):
+        run_scan(
+            Config(
+                start_dirs=[scan_root],
+                log_file=tmp_path / "test.log",
+                results=ResultsConfig(path=tmp_path / "results", formats=["text"]),
+            )
+        )
+    leaked = set(Path(tempfile.gettempdir()).glob("piidigger_*")) - before
+    assert not leaked, f"temp workspace(s) left behind after a raise: {leaked}"

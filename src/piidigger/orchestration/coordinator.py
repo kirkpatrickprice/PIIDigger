@@ -5,8 +5,12 @@ import logging.handlers
 import multiprocessing as mp
 import queue
 import time
+from dataclasses import dataclass
 from typing import Any
 
+from pydantic import ValidationError
+
+from piidigger.models.config import Config
 from piidigger.models.tasks import Task, TaskResult, TaskStarted, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
@@ -23,6 +27,22 @@ HEARTBEAT_CHECK_INTERVAL: float = 1.0
 _CRASH_DETECT_TIMEOUT: float = 30.0
 
 _ACCESS_DENIED_PHRASES: tuple[str, ...] = ("Access is denied", "Permission denied", "WinError 5", "Errno 13")
+
+
+@dataclass(frozen=True)
+class CoordinatorResult:
+    """How the scan ended, so the caller can pick an exit code.
+
+    The coordinator deliberately does not choose exit codes itself — that is a
+    CLI concern, and run_scan owns the mapping.
+
+    unfinished > 0 means the loop exited with work still outstanding.  On a clean
+    run that is impossible; it is reported rather than swallowed so a truncated
+    scan cannot masquerade as a successful one.
+    """
+
+    interrupted: bool = False
+    unfinished: int = 0
 
 
 def _truncate_path(path: str, max_len: int = 60) -> str:
@@ -91,13 +111,30 @@ def _task_path(task: Task | None) -> str:
     return ""
 
 
+def build_seed_tasks(config: Config) -> list[Task]:
+    """Build one ENUM_DIR task per configured start directory.
+
+    Separate from run_coordinator so the seeding contract is testable without
+    spawning processes — in particular that seeds carry
+    config.default_timeout_seconds rather than the Task model's own default.
+    """
+    return [
+        Task(
+            task_type=TaskType.ENUM_DIR,
+            payload={"path": str(path), "depth": 0},
+            timeout_seconds=config.default_timeout_seconds,
+        )
+        for path in config.start_dirs
+    ]
+
+
 def run_coordinator(
     ctx: WorkerContext,
     workers: list[mp.Process],
     listener: logging.handlers.QueueListener,
     sinks: list[Any],
     progress: ProgressDisplay,
-) -> None:
+) -> CoordinatorResult:
     """Drive the fan-out scan loop until all work is accounted for.
 
     Seeds one ENUM_DIR task per config.start_dirs, then drains result_queue
@@ -114,6 +151,9 @@ def run_coordinator(
         listener: Logging QueueListener started before this call; stopped here.
         sinks: OutputSink instances to receive findings (empty list in Phase 2).
         progress: Progress display owned by this coordinator.
+
+    Returns:
+        CoordinatorResult describing how the run ended, for exit-code mapping.
     """
     logger = build_worker_logger(ctx.log_queue, "coordinator")
 
@@ -304,8 +344,7 @@ def run_coordinator(
     progress.update({"dirs_found": len(ctx.config.start_dirs)})
 
     pending = 0
-    for path in ctx.config.start_dirs:
-        task = Task(task_type=TaskType.ENUM_DIR, payload={"path": str(path), "depth": 0})
+    for task in build_seed_tasks(ctx.config):
         _enqueue(task)
         pending += 1
 
@@ -354,7 +393,20 @@ def run_coordinator(
                     progress.log_event("ERROR", f"Error: {_truncate_path(file_path)} — {_short_error(msg)}")
 
             for new_task_dict in result.new_tasks:
-                new_task = Task(**new_task_dict)
+                # Task has extra="forbid", so a malformed producer dict raises
+                # ValidationError.  Unguarded that would escape the loop entirely
+                # and abort the whole scan over one bad child task.
+                try:
+                    new_task = Task(**new_task_dict)
+                except ValidationError:
+                    logger.exception(
+                        "[%s] dropping malformed child task from %r: %r",
+                        result.task_type.value,
+                        _task_path(pending_task),
+                        new_task_dict,
+                    )
+                    progress.log_event("ERROR", f"Malformed task from {_truncate_path(_task_path(pending_task))}")
+                    continue
                 _enqueue(new_task)
                 pending += 1
 
@@ -414,6 +466,10 @@ def run_coordinator(
 
         finally:
             progress.stop()
+
+    if pending > 0 and not _interrupted:
+        logger.error("coordinator exited with %d task(s) still outstanding", pending)
+    return CoordinatorResult(interrupted=_interrupted, unfinished=max(pending, 0))
 
 
 # ---------------------------------------------------------------------------
