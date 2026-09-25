@@ -1044,7 +1044,7 @@ test = [
     { name = "pytest-cov" },
 ]
 win = [
-    { name = "pywin32" },
+    { name = "pywin32", marker = "sys_platform == 'win32'" },
 ]
 
 [package.dev-dependencies]
@@ -1082,7 +1082,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.4.4" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=5.0" },
-    { name = "pywin32", marker = "extra == 'win'" },
+    { name = "pywin32", marker = "sys_platform == 'win32' and extra == 'win'" },
     { name = "pyyaml", specifier = "==6.0.3" },
     { name = "rich", specifier = ">=13.7,<15" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
@@ -1094,7 +1094,7 @@ requires-dist = [
 provides-extras = ["dev", "test", "win", "build", "pypi", "docs"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "piidigger", extras = ["win"], editable = "." }]
+dev = [{ name = "piidigger", extras = ["win"] }]
 
 [[package]]
 name = "platformdirs"
