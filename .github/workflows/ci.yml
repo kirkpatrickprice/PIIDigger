@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --extra dev --extra test
+      - name: Lint (ruff)
+        run: uv run ruff check src/ tests/
+      # `ruff format --check` is not run yet: several files predate the current
+      # formatter and need a one-off `ruff format` pass first.
+      - name: Type check (mypy)
+        run: uv run mypy src/
+      - name: Run tests
+        run: >
+          uv run pytest tests/ -m "not slow and not e2e" -v
+          --cov=src/piidigger --cov-report=term-missing --cov-fail-under=80
+
+  slow-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          # The parallel `test` job saves this same cache key; saving here too
+          # only produces a "Unable to reserve cache" warning.
+          save-cache: false
+      - name: Install dependencies
+        run: uv sync --extra dev --extra test
+      - name: Run slow/e2e tests
+        run: uv run pytest tests/ -m "slow or e2e" -v

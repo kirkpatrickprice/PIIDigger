@@ -1,76 +1,69 @@
-'''Process DOCX files'''
+"""Process DOCX files"""
 
 import warnings
 from collections.abc import Iterator
+from io import BytesIO
+from zipfile import BadZipFile
 
 from docx2python import docx2python
 from docx2python.iterators import iter_paragraphs
 
-from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.globalvars import maxChunkSize
-from piidigger.globalvars import defaultChunkCount
-from piidigger.logmanager import LogManager
+from piidigger.filehandlers._sharedfuncs import ContentBuffer
+from piidigger.models.config import Config
 
-warnings.filterwarnings('ignore', category=UserWarning, module='docx2python')
+warnings.filterwarnings("ignore", category=UserWarning, module="docx2python")
 
-# Each filehandler must have the following:
-#   "handles" -     dictionary to identify lists of file extensions and mime types that the handler will manage.
-#                   This will be read by globals upon initial load to build the full list of supported mime types and file extensions
-#   "processFile" - Function that manages opening and reading of the file.  The main module will call this handler wtih the "processFile(filename)" function.
-#                   processFile should provide the lines of text to each of the dataHandlers
-
-handles={
-    'ext': [
-        '.docx',
+HANDLES = {
+    "ext": [
+        ".docx",
     ],
-    'mime': [
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        ],
+    "mime": [
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ],
 }
 
-def readFile(filename: str, 
-             logManager: LogManager,
-             maxChunkCount = defaultChunkCount) -> Iterator[str]:
-    ''''
-    Handle all file IO and text extraction operations for this file type.  Returns a list of results that have been validated by each datahandler.  
-    "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
-    '''
+handles = HANDLES
 
-    logger = logManager.getLogger('docx_handler')
-    
-    try:
-        # Read in all of the docx content and close the file
-        docxContent=docx2python(filename)
-        handler: ContentHandler = ContentHandler(maxContentSize = maxChunkSize * maxChunkCount)
 
-        # This will iterate of the header, body and footer of the document, including all of the text and tables
-        for line in iter_paragraphs(docxContent.document):
-            handler.appendContent(line)
-            if handler.contentBufferFull():
-                yield handler.getContent()
+class DocxHandler:
+    """FileHandler for DOCX files.
 
-        for comment in docxContent.comments:
-            if not comment is None:
-                handler.appendContent(comment[3])
-                if handler.contentBufferFull():
-                    yield handler.strip()
+    Preferred path (archive members): source.open_bytes() returns bytes which
+    are wrapped in BytesIO and passed directly to docx2python — no temp file.
 
-        # No size check -- we'll just append the properties to the end of the content and send it
-        handler.appendContent(str(docxContent.core_properties))
+    Fallback path (on-disk files): source.open_bytes() returns None, so
+    source.materialize() is called to obtain a filesystem path.  For
+    FilesystemItem materialize() is a no-op (returns the path itself).
+    """
 
-        # Once we've processed the entire file, it's time to send that last bit of info that hasn't already been sent.
-        logger.debug('%s: Read %d lines', filename, handler.totalBytes)
+    def read(self, source, config: Config) -> Iterator[str]:  # source: ScannableItem
+        data = source.open_bytes()
+        docx_arg: BytesIO | str = BytesIO(data) if data is not None else str(source.materialize())
+        content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
 
-        # Return the last chunk of content    
-        yield handler.finalizeContent()
-        
-    except FileNotFoundError:
-        logger.error('%s: Previously discovered file no longer exists. File skipped', filename)
-    except PermissionError as e:
-        logger.error('%s: PermissionError.  File skipped.  Error message: %s', filename, str(e))
-    except OSError as e:
-        logger.error('%s: OSError.  File skipped.  Error message: %s', filename, str(e))
-    except Exception as e:
-        logger.error('%s: Unknown exception.  File skipped.  Error message: %s', filename, str(e))
-    
+        try:
+            docx_content = docx2python(docx_arg)
+            # .document is a lazy property that opens the ZIP — catch corruption here
+            document_lines = list(iter_paragraphs(docx_content.document))
+        except BadZipFile:
+            return
 
+        for line in document_lines:
+            content_buffer.append_content(line)
+            if content_buffer.content_buffer_full():
+                yield content_buffer.get_content()
+
+        for comment in docx_content.comments:
+            if comment is not None:
+                content_buffer.append_content(comment[3])
+                if content_buffer.content_buffer_full():
+                    yield content_buffer.get_content()
+
+        content_buffer.append_content(str(docx_content.core_properties))
+
+        final = content_buffer.finalize_content()
+        if final:
+            yield final
+
+
+handler = DocxHandler()
