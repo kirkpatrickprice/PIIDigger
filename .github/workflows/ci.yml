@@ -22,22 +22,19 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version-file: .python-version
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
       - name: Install dependencies
         run: uv sync --extra dev --extra test
       - name: Lint (ruff)
         run: uv run ruff check src/ tests/
-      # `ruff format --check` is intentionally NOT run here: ruff 0.15.17's
-      # formatter corrupts `except (A, B):` into invalid Python 3 syntax
-      # (`except A, B:`) in src/piidigger/filehandlers/pdf.py and
-      # src/piidigger/run.py. Re-enable only after confirming a ruff release
-      # fixes this (verify with `ruff format --diff` before flipping it on).
+      # `ruff format --check` is not run yet: several files predate the current
+      # formatter and need a one-off `ruff format` pass first.
       - name: Type check (mypy)
         run: uv run mypy src/
       - name: Run tests
@@ -46,7 +43,6 @@ jobs:
           --cov=src/piidigger --cov-report=term-missing --cov-fail-under=80
 
   slow-tests:
-    if: github.event_name == 'push'
     strategy:
       fail-fast: false
       matrix:
@@ -54,11 +50,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version-file: .python-version
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
       - name: Install dependencies

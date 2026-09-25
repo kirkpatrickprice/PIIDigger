@@ -13,6 +13,5 @@ jobs:
   update-draft:
     runs-on: ubuntu-latest
     steps:
-      - uses: release-drafter/release-drafter@v6
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # v7 reads the token from its `token` input, which defaults to github.token.
+      - uses: release-drafter/release-drafter@v7
