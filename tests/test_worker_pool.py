@@ -7,71 +7,15 @@ silently-dropped-worker defects lived.
 
 from __future__ import annotations
 
-import itertools
 import logging
 
 import pytest
 
 from piidigger.orchestration import pool as pool_module
 from piidigger.orchestration.pool import WorkerPool, spawn_worker
+from tests._fakes import Spawner
 
 _LOG = logging.getLogger("tests.worker_pool")
-
-
-class FakeProcess:
-    """A process stand-in whose response to stop signals is configurable."""
-
-    _pids = itertools.count(1000)
-
-    def __init__(self) -> None:
-        self.pid: int | None = next(FakeProcess._pids)
-        self.exitcode: int | None = None
-        self.obeys_terminate = True
-        self.obeys_kill = True
-        self.terminate_calls = 0
-        self.kill_calls = 0
-        self._alive = True
-
-    def is_alive(self) -> bool:
-        return self._alive
-
-    def terminate(self) -> None:
-        self.terminate_calls += 1
-        if self.obeys_terminate:
-            self._die(-15)
-
-    def kill(self) -> None:
-        self.kill_calls += 1
-        if self.obeys_kill:
-            self._die(-9)
-
-    def join(self, timeout: float | None = None) -> None:
-        pass
-
-    def crash(self, exitcode: int = -11) -> None:
-        """Die unprompted, as a worker does when a C extension segfaults."""
-        self._die(exitcode)
-
-    def _die(self, exitcode: int) -> None:
-        if self._alive:
-            self._alive = False
-            self.exitcode = exitcode
-
-
-class Spawner:
-    """Factory that records every process it starts and can be told to fail."""
-
-    def __init__(self) -> None:
-        self.spawned: list[FakeProcess] = []
-        self.failures_remaining = 0
-
-    def __call__(self) -> FakeProcess:
-        if self.failures_remaining:
-            self.failures_remaining -= 1
-            raise OSError("resource temporarily unavailable")
-        proc = FakeProcess()
-        self.spawned.append(proc)
-        return proc
 
 
 def _pool(n: int = 3) -> tuple[WorkerPool, Spawner]:
@@ -384,3 +328,87 @@ def test_spawn_worker_starts_a_daemonic_worker_loop(monkeypatch: pytest.MonkeyPa
     assert proc.target is pool_module.worker_loop
     assert proc.args == (ctx,)
     assert proc.started
+
+
+# ---------------------------------------------------------------------------
+# Teardown: terminate_all and join
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_join_leaves_cleanly_exited_workers_alone() -> None:
+    """Workers that honoured their shutdown sentinel are not signalled."""
+    pool, spawner = _pool(3)
+    for proc in spawner.spawned:
+        proc.exit_cleanly()
+
+    pool.join(timeout=0.0)
+
+    assert all(p.terminate_calls == 0 for p in spawner.spawned)
+    assert pool.stragglers == []
+
+
+@pytest.mark.unit
+def test_join_stops_workers_that_outlive_the_budget() -> None:
+    pool, spawner = _pool(3)
+    spawner.spawned[0].exit_cleanly()
+    lingering = spawner.spawned[1:]
+
+    pool.join(timeout=0.0)
+
+    assert all(p.terminate_calls == 1 for p in lingering)
+    assert all(not p.is_alive() for p in spawner.spawned)
+    assert len(spawner.spawned) == 3, "teardown must never start a replacement"
+
+
+@pytest.mark.unit
+def test_join_escalates_and_keeps_survivors_as_stragglers() -> None:
+    pool, spawner = _pool(2)
+    stuck = spawner.spawned[0]
+    stuck.obeys_terminate = False
+    stuck.obeys_kill = False
+
+    pool.join(timeout=0.0)
+
+    assert stuck.kill_calls == 1
+    assert pool.stragglers == [stuck]
+    assert stuck in pool.processes
+
+
+@pytest.mark.unit
+def test_join_signals_every_stuck_worker_before_escalating() -> None:
+    """Batch escalation: N stuck workers cost two grace periods, not 2N."""
+    order: list[tuple[str, int | None]] = []
+    pool, spawner = _pool(3)
+    for proc in spawner.spawned:
+        proc.obeys_terminate = False
+        original_terminate, original_kill = proc.terminate, proc.kill
+
+        def terminate(p=proc, f=original_terminate) -> None:  # type: ignore[no-untyped-def]
+            order.append(("terminate", p.pid))
+            f()
+
+        def kill(p=proc, f=original_kill) -> None:  # type: ignore[no-untyped-def]
+            order.append(("kill", p.pid))
+            f()
+
+        proc.terminate = terminate  # type: ignore[method-assign]
+        proc.kill = kill  # type: ignore[method-assign]
+
+    pool.join(timeout=0.0)
+
+    kinds = [kind for kind, _ in order]
+    assert kinds == ["terminate"] * 3 + ["kill"] * 3
+
+
+@pytest.mark.unit
+def test_terminate_all_signals_live_processes_only() -> None:
+    pool, spawner = _pool(3)
+    dead = spawner.spawned[0]
+    dead.crash()
+
+    pool.terminate_all()
+
+    assert dead.terminate_calls == 0
+    assert all(p.terminate_calls == 1 for p in spawner.spawned[1:])
+    assert len(spawner.spawned) == 3, "terminate_all must not start replacements"

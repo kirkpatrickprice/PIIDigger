@@ -19,10 +19,15 @@ from wakepy import keep
 from piidigger.models.config import Config
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.coordinator import run_coordinator
-from piidigger.orchestration.logging_setup import build_worker_logger, setup_warning_capture, start_listener
+from piidigger.orchestration.logging_setup import (
+    build_worker_logger,
+    setup_warning_capture,
+    start_listener,
+    stop_listener,
+)
+from piidigger.orchestration.pool import WorkerPool, spawn_worker
 from piidigger.orchestration.progress import ProgressDisplay
 from piidigger.orchestration.secure_delete import secure_rmtree
-from piidigger.orchestration.worker import start_worker_pool
 from piidigger.outputhandlers import HANDLER_REGISTRY, CsvSink, JsonSink, TextSink
 
 _ALL_FORMATS: frozenset[str] = frozenset(HANDLER_REGISTRY)
@@ -226,7 +231,8 @@ def run_scan(config: Config) -> int:
     logical_cores = os.cpu_count() or 1
     physical_cores = psutil.cpu_count(logical=False) or logical_cores
     worker_count = _resolve_workers(config.performance, physical_cores, logical_cores)
-    workers = start_worker_pool(ctx, worker_count)
+    pool = WorkerPool(lambda: spawn_worker(ctx), logger=build_worker_logger(log_queue, "pool"))
+    pool.start(worker_count)
 
     progress = ProgressDisplay()
     progress.start()
@@ -234,16 +240,22 @@ def run_scan(config: Config) -> int:
     try:
         with keep.running(on_fail="pass") as wake_mode:
             _emit_startup_info(progress, run_logger, config, worker_count, wake_mode)
-            outcome = run_coordinator(ctx, workers, listener, sinks, progress)
+            outcome = run_coordinator(ctx, pool, listener, sinks, progress)
     finally:
         # secure_rmtree, not shutil.rmtree: a worker killed by terminate() never
         # unwinds its own finally, so its extracted members survive to here.
         secure_rmtree(temp_base)
+        # run_coordinator stops the listener during its own teardown.  This is
+        # the backstop for anything that raises before that teardown runs.
+        # Without it the listener thread is left running and queued records,
+        # including the one describing the failure, may never reach the log
+        # file.  Stopping an already-stopped listener is a no-op.
+        stop_listener(listener)
 
+    # No logging from here on: the listener is stopped, so records would be
+    # dropped.  run_coordinator has already logged both of these outcomes.
     if outcome.interrupted:
-        run_logger.warning("scan interrupted by user")
         return EXIT_INTERRUPTED
     if outcome.unfinished:
-        run_logger.error("scan incomplete: %d task(s) unaccounted for", outcome.unfinished)
         return EXIT_INCOMPLETE
     return EXIT_OK

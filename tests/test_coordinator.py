@@ -6,28 +6,30 @@ Windows spawn can import them without re-running test code.
 
 from __future__ import annotations
 
+import logging
 import multiprocessing as mp
 import os
-import queue
 import signal
+import threading
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
 
 from piidigger.models.config import Config
-from piidigger.models.tasks import Task, TaskResult, TaskStarted, TaskType
+from piidigger.models.tasks import ShutdownSentinel, Task, TaskResult, TaskStarted, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.coordinator import (
-    HEARTBEAT_CHECK_INTERVAL,
+    CoordinatorResult,
     _run_with_internal_workers,
     build_seed_tasks,
     run_coordinator,
 )
-from piidigger.orchestration.logging_setup import start_listener, stop_listener
+from piidigger.orchestration.logging_setup import start_listener
+from piidigger.orchestration.pool import WorkerPool
 from piidigger.orchestration.progress import ProgressDisplay
-from piidigger.orchestration.registry import MAX_RETRIES
-from piidigger.orchestration.worker import broadcast_shutdown, join_workers, start_worker_pool, worker_loop
+from piidigger.orchestration.worker import worker_loop
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -64,6 +66,45 @@ def _crash_before_heartbeat_worker(ctx: WorkerContext) -> None:
     Simulates a worker that dies between task_queue.get() and result_queue.put(TaskStarted(...)).
     """
     ctx.task_queue.get()
+    os._exit(1)
+
+
+_POOL_LOG = logging.getLogger("tests.coordinator.pool")
+
+
+def _spawn(ctx: WorkerContext, target: Callable[[WorkerContext], None] = worker_loop) -> mp.Process:
+    """Start one daemonic process running target, as spawn_worker does for worker_loop."""
+    proc = mp.Process(target=target, args=(ctx,), daemon=True)
+    proc.start()
+    return proc
+
+
+def _start_pool(ctx: WorkerContext, n: int, *, targets: Sequence[Callable[[WorkerContext], None]] = ()) -> WorkerPool:
+    """A started pool.
+
+    The first len(targets) processes run those targets.  The rest, and every
+    replacement the coordinator asks for, run the real worker_loop.
+    """
+    remaining = iter(targets)
+    pool = WorkerPool(lambda: _spawn(ctx, next(remaining, worker_loop)), logger=_POOL_LOG)
+    pool.start(n)
+    return pool
+
+
+def _crash_after_heartbeat_worker(ctx: WorkerContext) -> None:
+    """Dequeue a task, announce it, then die without finishing it.
+
+    TEST-ONLY: module-level so Windows mp.spawn can import it.  Simulates a
+    worker killed mid-task, by a segfaulting parser for instance.  The result
+    queue is flushed before exiting: put() hands off to a feeder thread, and
+    os._exit() would otherwise kill that thread with the heartbeat still unsent.
+    """
+    item = ctx.task_queue.get()
+    if isinstance(item, ShutdownSentinel):
+        return
+    ctx.result_queue.put(TaskStarted(task_id=item.task_id, worker_pid=os.getpid()))
+    ctx.result_queue.close()
+    ctx.result_queue.join_thread()
     os._exit(1)
 
 
@@ -107,12 +148,12 @@ def test_pending_arithmetic_single_start_dir(tmp_path: Path) -> None:
 
     ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [scan_root])
     listener = start_listener(log_queue, tmp_path / "arith.log", "WARNING")
-    workers = start_worker_pool(ctx, 2)
+    pool = _start_pool(ctx, 2)
     progress = _non_tty_progress()
 
-    run_coordinator(ctx, workers, listener, [], progress)
+    run_coordinator(ctx, pool, listener, [], progress)
 
-    assert all(not w.is_alive() for w in workers)
+    assert all(not w.is_alive() for w in pool.processes)
 
 
 @pytest.mark.integration
@@ -136,10 +177,10 @@ def test_coordinator_accumulates_counters(tmp_path: Path) -> None:
 
     ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [scan_root])
     listener = start_listener(log_queue, tmp_path / "counters.log", "WARNING")
-    workers = start_worker_pool(ctx, 2)
+    pool = _start_pool(ctx, 2)
     progress = _non_tty_progress()
 
-    run_coordinator(ctx, workers, listener, [], progress)
+    run_coordinator(ctx, pool, listener, [], progress)
 
     assert progress._counters.get("dirs_scanned", 0) == 3
     assert progress._counters.get("files_scanned", 0) == 3
@@ -167,12 +208,12 @@ def test_full_fanout_multiple_start_dirs(tmp_path: Path) -> None:
 
     ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, start_dirs)
     listener = start_listener(log_queue, tmp_path / "multi.log", "WARNING")
-    workers = start_worker_pool(ctx, 3)
+    pool = _start_pool(ctx, 3)
     progress = _non_tty_progress()
 
-    run_coordinator(ctx, workers, listener, [], progress)
+    run_coordinator(ctx, pool, listener, [], progress)
 
-    assert all(not w.is_alive() for w in workers)
+    assert all(not w.is_alive() for w in pool.processes)
     assert progress._counters.get("dirs_scanned", 0) == 3
     assert progress._counters.get("files_scanned", 0) == 3
 
@@ -223,14 +264,14 @@ def test_ctrl_c_exits_within_5_seconds(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Integration: queue.Empty fires → _check_worker_deadlines is called
+# Integration: sweep cadence
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.integration
-def test_coordinator_calls_deadline_check_on_queue_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """With a 1 ms HEARTBEAT_CHECK_INTERVAL, queue.Empty fires on almost every
-    iteration, exercising the _check_worker_deadlines body with no expired tasks.
+def test_frequent_sweeps_do_not_disturb_a_normal_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a 1 ms sweep interval the health sweep runs on almost every
+    iteration.  A healthy scan must come through that untouched.
     """
     import piidigger.orchestration.coordinator as coord_mod
 
@@ -247,332 +288,189 @@ def test_coordinator_calls_deadline_check_on_queue_empty(tmp_path: Path, monkeyp
 
     ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [scan_root])
     listener = start_listener(log_queue, tmp_path / "heartbeat.log", "WARNING")
-    workers = start_worker_pool(ctx, 2)
+    pool = _start_pool(ctx, 2)
     progress = _non_tty_progress()
 
-    run_coordinator(ctx, workers, listener, [], progress)
+    run_coordinator(ctx, pool, listener, [], progress)
 
-    assert all(not w.is_alive() for w in workers)
+    assert all(not w.is_alive() for w in pool.processes)
     assert progress._counters.get("files_scanned", 0) == 1
 
 
+@pytest.mark.slow
+def test_sweep_runs_while_results_keep_arriving(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The defect 6 guard: detection must not wait for an idle result queue.
+
+    One worker works through a stream of short tasks, so a message (heartbeat or
+    result) arrives every fraction of a second and the queue is never quiet for
+    a full sweep interval.  The old coordinator swept only on queue.Empty, so it
+    would sweep zero times in this window; hung or crashed workers went
+    undetected for as long as a scan stayed busy.
+    """
+    import piidigger.orchestration.coordinator as coord_mod
+
+    sweeps: list[float] = []
+    results: list[float] = []
+    original_tick = coord_mod.HealthMonitor.tick
+    original_handle = coord_mod._handle_result
+
+    def counting_tick(self: coord_mod.HealthMonitor) -> coord_mod.SweepResult:
+        sweeps.append(time.monotonic())
+        return original_tick(self)
+
+    def recording_handle(*args: object, **kwargs: object) -> None:
+        results.append(time.monotonic())
+        original_handle(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(coord_mod.HealthMonitor, "tick", counting_tick)
+    monkeypatch.setattr(coord_mod, "_handle_result", recording_handle)
+
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    log_queue: mp.Queue[object] = mp.Queue()
+    stop_event = mp.Event()
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [])
+    listener = start_listener(log_queue, tmp_path / "busy.log", "WARNING")
+    pool = _start_pool(ctx, 1)
+    progress = _non_tty_progress()
+
+    seeds = [Task(task_type=TaskType.NOOP, payload={"delay_seconds": 0.25}) for _ in range(16)]
+    run_coordinator(ctx, pool, listener, [], progress, seed_tasks=seeds)
+
+    assert len(results) == 16
+    busy = [t for t in sweeps if results[0] < t < results[-1]]
+    assert len(busy) >= 2, f"only {len(busy)} sweep(s) ran during {results[-1] - results[0]:.1f}s of steady results"
+
+
 # ---------------------------------------------------------------------------
-# Integration: deadline detection
+# Integration: deadline detection, driven through the real run_coordinator
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.slow
-def test_deadline_detection_terminates_hung_worker(tmp_path: Path) -> None:
-    """A slow NOOP task (delay_seconds=120, timeout=2s) triggers deadline detection.
+def test_deadline_detection_replaces_hung_worker(tmp_path: Path) -> None:
+    """A NOOP that sleeps far past its deadline is abandoned and its worker replaced.
 
-    The coordinator-like inline loop below exercises the same deadline logic
-    as run_coordinator._check_worker_deadlines() — verifying: the hung worker
-    is terminated, a replacement is spawned, pending reaches 0, and the whole
-    test completes well within the 15-second limit.
+    delay 120 s against a 2 s timeout, so the deadline (2 x timeout) fires at
+    about 4 s.  The scan still completes, and the pool is the same size after.
     """
     task_queue: mp.Queue[object] = mp.Queue()
     result_queue: mp.Queue[object] = mp.Queue()
     log_queue: mp.Queue[object] = mp.Queue()
     stop_event = mp.Event()
-
     ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [])
-
-    slow_task = Task(task_type=TaskType.NOOP, payload={"delay_seconds": 120}, timeout_seconds=2)
-    noop_task = Task(task_type=TaskType.NOOP)
-
-    task_queue.put(slow_task)
-    task_queue.put(noop_task)
-
-    workers = start_worker_pool(ctx, 2)
     listener = start_listener(log_queue, tmp_path / "deadline.log", "DEBUG")
+    pool = _start_pool(ctx, 2)
+    original_pids = pool.pids()
     progress = _non_tty_progress()
 
-    # Inline coordinator-like loop: exercises the same pending + deadline logic
-    # as run_coordinator without the seeding path (start_dirs=[]).
-    pending = 2
-    _in_flight: dict[str, tuple[int, float, int]] = {}
-    _pending_tasks: dict[str, Task] = {
-        slow_task.task_id: slow_task,
-        noop_task.task_id: noop_task,
-    }
-    _pid_to_proc: dict[int, mp.Process] = {p.pid: p for p in workers if p.pid is not None}
+    seeds = [
+        Task(task_type=TaskType.NOOP, payload={"delay_seconds": 120}, timeout_seconds=2),
+        Task(task_type=TaskType.NOOP),
+    ]
+    started = time.monotonic()
+    outcome = run_coordinator(ctx, pool, listener, [], progress, seed_tasks=seeds)
 
-    deadline_fired = False
-    test_start = time.monotonic()
-    TEST_LIMIT = 15.0
-
-    while pending > 0 and time.monotonic() - test_start < TEST_LIMIT:
-        try:
-            raw = result_queue.get(timeout=HEARTBEAT_CHECK_INTERVAL)
-        except queue.Empty:
-            now = time.monotonic()
-            for task_id, (pid, dispatch_time, timeout_secs) in list(_in_flight.items()):
-                if now - dispatch_time > 2 * timeout_secs:
-                    deadline_fired = True
-                    _in_flight.pop(task_id)
-                    _pending_tasks.pop(task_id, None)
-                    old_proc = _pid_to_proc.pop(pid, None)
-                    if old_proc is not None:
-                        old_proc.terminate()
-                        old_proc.join(timeout=2.0)
-                        if old_proc in workers:
-                            workers.remove(old_proc)
-                    new_proc = mp.Process(target=worker_loop, args=(ctx,))
-                    new_proc.start()
-                    if new_proc.pid is not None:
-                        _pid_to_proc[new_proc.pid] = new_proc
-                    workers.append(new_proc)
-                    pending -= 1
-            continue
-
-        if isinstance(raw, TaskStarted):
-            task = _pending_tasks.get(raw.task_id)
-            if task is not None:
-                _in_flight[raw.task_id] = (raw.worker_pid, time.monotonic(), task.timeout_seconds)
-            continue
-
-        if isinstance(raw, TaskResult):
-            _in_flight.pop(raw.task_id, None)
-            _pending_tasks.pop(raw.task_id, None)
-            pending -= 1
-
-    broadcast_shutdown(task_queue, len(workers))
-    join_workers(workers, timeout=5.0)
-    stop_listener(listener)
-    progress.stop()
-
-    assert deadline_fired, "deadline detection never fired for the slow NOOP task"
-    assert pending == 0, f"pending did not reach 0; remaining={pending}"
-    assert time.monotonic() - test_start < TEST_LIMIT
-
-
-# ---------------------------------------------------------------------------
-# Integration: hung worker replaced while other workers continue
-# ---------------------------------------------------------------------------
+    assert time.monotonic() - started < 15.0
+    assert outcome == CoordinatorResult(interrupted=False, unfinished=0)
+    assert progress.incomplete.timed_out == 1
+    assert progress._tasks_completed == 1
+    assert pool.size == 2
+    assert pool.pids() != original_pids, "the hung worker should have been replaced"
 
 
 @pytest.mark.slow
 def test_hung_worker_replaced_other_workers_continue(tmp_path: Path) -> None:
-    """3 workers, 1 hung task + 5 quick tasks: the hung worker is terminated and
-    replaced while the other workers process the quick tasks uninterrupted.
+    """3 workers, 1 hung task + 5 quick tasks.
 
-    Asserts:
-    - All 5 quick NOOP tasks complete with status='ok' (other workers kept running).
-    - The deadline fires, the hung worker is terminated, and a replacement is spawned.
-    - pending reaches 0 (scan completes despite the hung worker).
-    - Whole test finishes well within the 15-second safety limit.
-
-    Uses the same coordinator-like inline loop as test_deadline_detection_terminates_hung_worker
-    because run_coordinator() seeds tasks only from start_dirs; pre-injecting arbitrary
-    task types requires driving the queue directly.
+    The quick tasks all complete while the hung worker is detected and replaced,
+    and the pool ends the run at its original size — the regression guard for
+    the old double replacement, which grew the pool.
     """
     task_queue: mp.Queue[object] = mp.Queue()
     result_queue: mp.Queue[object] = mp.Queue()
     log_queue: mp.Queue[object] = mp.Queue()
     stop_event = mp.Event()
-
     ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [])
-
-    # One task that will hang (120 s delay, 2 s timeout → deadline fires at ~4 s).
-    hung_task = Task(task_type=TaskType.NOOP, payload={"delay_seconds": 120}, timeout_seconds=2)
-    # Five tasks that complete normally — their ok results prove the other workers
-    # kept running while the hung worker was being detected and replaced.
-    quick_tasks = [Task(task_type=TaskType.NOOP) for _ in range(5)]
-    all_tasks = [hung_task, *quick_tasks]
-
-    for t in all_tasks:
-        task_queue.put(t)
-
-    workers = start_worker_pool(ctx, 3)
     listener = start_listener(log_queue, tmp_path / "hung.log", "DEBUG")
+    pool = _start_pool(ctx, 3)
     progress = _non_tty_progress()
 
-    pending = len(all_tasks)
-    _pending_tasks: dict[str, Task] = {t.task_id: t for t in all_tasks}
-    _in_flight: dict[str, tuple[int, float, int]] = {}
-    _pid_to_proc: dict[int, mp.Process] = {p.pid: p for p in workers if p.pid is not None}
+    hung = Task(task_type=TaskType.NOOP, payload={"delay_seconds": 120}, timeout_seconds=2)
+    quick = [Task(task_type=TaskType.NOOP) for _ in range(5)]
+    started = time.monotonic()
+    outcome = run_coordinator(ctx, pool, listener, [], progress, seed_tasks=[hung, *quick])
 
-    deadline_fired = False
-    replacement_spawned = False
-    ok_completed = 0
-    test_start = time.monotonic()
-    TEST_LIMIT = 15.0
-
-    while pending > 0 and time.monotonic() - test_start < TEST_LIMIT:
-        try:
-            raw = result_queue.get(timeout=HEARTBEAT_CHECK_INTERVAL)
-        except queue.Empty:
-            now = time.monotonic()
-            for task_id, (pid, dispatch_time, timeout_secs) in list(_in_flight.items()):
-                if now - dispatch_time > 2 * timeout_secs:
-                    deadline_fired = True
-                    _in_flight.pop(task_id)
-                    _pending_tasks.pop(task_id, None)
-                    old_proc = _pid_to_proc.pop(pid, None)
-                    if old_proc is not None:
-                        old_proc.terminate()
-                        old_proc.join(timeout=2.0)
-                        if old_proc in workers:
-                            workers.remove(old_proc)
-                    new_proc = mp.Process(target=worker_loop, args=(ctx,))
-                    new_proc.start()
-                    replacement_spawned = True
-                    if new_proc.pid is not None:
-                        _pid_to_proc[new_proc.pid] = new_proc
-                    workers.append(new_proc)
-                    pending -= 1
-            continue
-
-        if isinstance(raw, TaskStarted):
-            task = _pending_tasks.get(raw.task_id)
-            if task is not None:
-                _in_flight[raw.task_id] = (raw.worker_pid, time.monotonic(), task.timeout_seconds)
-            continue
-
-        if isinstance(raw, TaskResult):
-            _in_flight.pop(raw.task_id, None)
-            _pending_tasks.pop(raw.task_id, None)
-            if raw.status == "ok":
-                ok_completed += 1
-            pending -= 1
-
-    broadcast_shutdown(task_queue, len(workers))
-    join_workers(workers, timeout=5.0)
-    stop_listener(listener)
-    progress.stop()
-
-    assert deadline_fired, "deadline detection never fired for the hung task"
-    assert replacement_spawned, "no replacement worker was spawned after the hung worker was terminated"
-    assert ok_completed == 5, f"expected 5 quick tasks to complete with ok, got {ok_completed}"
-    assert pending == 0, f"pending did not reach 0; remaining={pending}"
-    assert time.monotonic() - test_start < TEST_LIMIT
+    assert time.monotonic() - started < 15.0
+    assert outcome.unfinished == 0
+    assert progress._tasks_completed == 5
+    assert progress.incomplete.timed_out == 1
+    assert pool.size == 3
 
 
 # ---------------------------------------------------------------------------
-# Integration: crash-before-heartbeat recovery
+# Integration: crash recovery, driven through the real run_coordinator
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.slow
-def test_crash_before_heartbeat_requeues_task(tmp_path: Path) -> None:
-    """Worker that crashes before TaskStarted causes the orphaned task to be re-queued.
+def test_crash_after_heartbeat_is_redispatched_and_completed(tmp_path: Path) -> None:
+    """A worker that dies mid-task has the task re-dispatched to its replacement.
 
-    Exercises the crash-before-heartbeat path in coordinator._check_worker_deadlines
-    (coordinator.py lines ~205-258):
-      1. Dead worker detected via is_alive() == False.
-      2. Replacement worker spawned.
-      3. Task identified as crash orphan (in _pending_tasks, not in _in_flight,
-         waited > CRASH_DETECT_TIMEOUT=0.1s used in this inline loop).
-      4. Task re-queued with retry_count=1; replacement worker completes it; pending reaches 0.
-
-    Asserts:
-    - The crash is detected (crash_worker.is_alive() == False seen by the loop).
-    - The orphaned task is re-queued under a new task_id.
-    - pending reaches 0 (scan completes despite the crash).
-    - Whole test finishes well within the 10-second safety limit.
+    The first worker dequeues the task, announces it, then exits hard.  The
+    crash sweep replaces it and puts the task back on the queue under the same
+    id; the replacement is a normal worker and completes it.
     """
-    # Crash-orphan window patched down from 30s so the test runs in ~2s:
-    # HEARTBEAT_CHECK_INTERVAL fires after 1s → task has waited ~1s >> 0.1s threshold.
-    CRASH_DETECT_TIMEOUT = 0.1
-
     task_queue: mp.Queue[object] = mp.Queue()
     result_queue: mp.Queue[object] = mp.Queue()
     log_queue: mp.Queue[object] = mp.Queue()
     stop_event = mp.Event()
-
     ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [])
-
-    # One task for the crash worker to dequeue and drop (no TaskStarted will be sent).
-    crash_task = Task(task_type=TaskType.NOOP)
-    task_queue.put(crash_task)
-    enqueue_time = time.monotonic()
-
-    # Only one worker initially: the crash worker.  The inline loop spawns the
-    # replacement after detecting the crash.
-    crash_worker = mp.Process(target=_crash_before_heartbeat_worker, args=(ctx,))
-    crash_worker.start()
-
-    listener = start_listener(log_queue, tmp_path / "crash.log", "DEBUG")
+    log_file = tmp_path / "crash.log"
+    listener = start_listener(log_queue, log_file, "DEBUG")
+    pool = _start_pool(ctx, 1, targets=[_crash_after_heartbeat_worker])
     progress = _non_tty_progress()
 
-    pending = 1
-    _pending_tasks: dict[str, Task] = {crash_task.task_id: crash_task}
-    _in_flight: dict[str, tuple[int, float, int]] = {}
-    _task_enqueue_time: dict[str, float] = {crash_task.task_id: enqueue_time}
-    _task_retries: dict[str, int] = {crash_task.task_id: 0}
-    workers: list[mp.Process] = [crash_worker]
-    _pid_to_proc: dict[int, mp.Process] = {crash_worker.pid: crash_worker}  # type: ignore[index]
+    outcome = run_coordinator(ctx, pool, listener, [], progress, seed_tasks=[Task(task_type=TaskType.NOOP)])
 
-    crash_detected = False
-    task_requeued = False
-    test_start = time.monotonic()
-    TEST_LIMIT = 10.0
+    assert outcome.unfinished == 0
+    assert progress._tasks_completed == 1
+    assert progress.incomplete.abandoned == 0
+    assert "re-dispatching" in log_file.read_text()
 
-    while pending > 0 and time.monotonic() - test_start < TEST_LIMIT:
-        try:
-            raw = result_queue.get(timeout=HEARTBEAT_CHECK_INTERVAL)
-        except queue.Empty:
-            now = time.monotonic()
 
-            # --- Crash-before-heartbeat detection (mirrors coordinator._check_worker_deadlines) ---
-            dead_pids = [pid for pid, proc in _pid_to_proc.items() if not proc.is_alive()]
-            if dead_pids:
-                crash_detected = True
-                for pid in dead_pids:
-                    old_proc = _pid_to_proc.pop(pid)
-                    if old_proc in workers:
-                        workers.remove(old_proc)
-                    new_proc = mp.Process(target=worker_loop, args=(ctx,))
-                    new_proc.start()
-                    if new_proc.pid is not None:
-                        _pid_to_proc[new_proc.pid] = new_proc
-                    workers.append(new_proc)
+@pytest.mark.slow
+def test_poison_task_is_abandoned_rather_than_retried_forever(tmp_path: Path) -> None:
+    """A task that kills every worker it reaches ends the scan instead of looping.
 
-                crash_orphans = [
-                    task_id
-                    for task_id in _pending_tasks
-                    if task_id not in _in_flight
-                    and now - _task_enqueue_time.get(task_id, now) > CRASH_DETECT_TIMEOUT
-                ]
-                for task_id in crash_orphans:
-                    task = _pending_tasks.pop(task_id)
-                    _task_enqueue_time.pop(task_id, None)
-                    retries = _task_retries.pop(task_id, 0)
-                    pending -= 1
-                    if retries < MAX_RETRIES:
-                        new_task = Task(
-                            task_type=task.task_type,
-                            payload=task.payload,
-                            timeout_seconds=task.timeout_seconds,
-                        )
-                        task_queue.put(new_task)
-                        _pending_tasks[new_task.task_id] = new_task
-                        _task_enqueue_time[new_task.task_id] = time.monotonic()
-                        _task_retries[new_task.task_id] = retries + 1
-                        pending += 1
-                        task_requeued = True
-            continue
+    Every worker the pool starts crashes on its first task.  The coordinator must
+    give up after MAX_RETRIES re-dispatches.  Run in a thread with a join
+    timeout so a regression fails the test instead of hanging the suite.
+    """
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    log_queue: mp.Queue[object] = mp.Queue()
+    stop_event = mp.Event()
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [])
+    listener = start_listener(log_queue, tmp_path / "poison.log", "DEBUG")
+    pool = WorkerPool(lambda: _spawn(ctx, _crash_after_heartbeat_worker), logger=_POOL_LOG)
+    pool.start(1)
+    progress = _non_tty_progress()
 
-        if isinstance(raw, TaskStarted):
-            task = _pending_tasks.get(raw.task_id)
-            if task is not None:
-                _in_flight[raw.task_id] = (raw.worker_pid, time.monotonic(), task.timeout_seconds)
-            continue
+    outcomes: list[CoordinatorResult] = []
+    runner = threading.Thread(
+        target=lambda: outcomes.append(
+            run_coordinator(ctx, pool, listener, [], progress, seed_tasks=[Task(task_type=TaskType.NOOP)])
+        ),
+        daemon=True,
+    )
+    runner.start()
+    runner.join(timeout=90.0)
 
-        if isinstance(raw, TaskResult):
-            _in_flight.pop(raw.task_id, None)
-            _pending_tasks.pop(raw.task_id, None)
-            pending -= 1
-
-    broadcast_shutdown(task_queue, len(workers))
-    join_workers(workers, timeout=5.0)
-    stop_listener(listener)
-    progress.stop()
-
-    assert crash_detected, "crash worker death was never detected"
-    assert task_requeued, "orphaned task was never re-queued after crash"
-    assert pending == 0, f"pending did not reach 0; remaining={pending}"
-    assert time.monotonic() - test_start < TEST_LIMIT
+    assert not runner.is_alive(), "coordinator never gave up on a task that crashes every worker"
+    assert outcomes and outcomes[0].unfinished == 0
+    assert progress.incomplete.abandoned == 1
+    assert progress._tasks_completed == 0
 
 
 # ---------------------------------------------------------------------------
@@ -613,36 +511,38 @@ def test_malformed_child_task_is_dropped_and_scan_completes(tmp_path: Path) -> N
 
     Task has extra="forbid"; unguarded, the ValidationError escaped run_coordinator,
     skipped temp cleanup, and ended the run.  It should now drop that one child.
-    """
-    scan_root = tmp_path / "scan_root"
-    scan_root.mkdir()
-    (scan_root / "a.txt").write_text("hello")
 
+    A result carrying the malformed child is injected for a task the registry
+    really is tracking.  An untracked id would be dropped as a duplicate before
+    its children were ever parsed, and the guard would go unexercised.  The
+    worker's own result for the same task arrives later and is the duplicate.
+    """
     task_queue: mp.Queue[object] = mp.Queue()
     result_queue: mp.Queue[object] = mp.Queue()
     log_queue: mp.Queue[object] = mp.Queue()
     stop_event = mp.Event()
 
-    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [scan_root])
-    listener = start_listener(log_queue, tmp_path / "malformed.log", "DEBUG")
-    workers = start_worker_pool(ctx, 1)
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [])
+    log_file = tmp_path / "malformed.log"
+    listener = start_listener(log_queue, log_file, "DEBUG")
+    pool = _start_pool(ctx, 1)
     progress = _non_tty_progress()
 
-    # Inject a bogus child task alongside the real seed so the coordinator hits the
-    # guard mid-run rather than at a quiescent moment.
+    seed = Task(task_type=TaskType.NOOP)
     result_queue.put(
         TaskResult(
-            task_id="not-a-tracked-id",
+            task_id=seed.task_id,
             task_type=TaskType.NOOP,
             status="ok",
             new_tasks=[{"task_type": "enum_dir", "payload": {}, "no_such_field": 1}],
         )
     )
 
-    outcome = run_coordinator(ctx, workers, listener, [], progress)
+    outcome = run_coordinator(ctx, pool, listener, [], progress, seed_tasks=[seed])
 
-    assert outcome.interrupted is False
-    assert all(not w.is_alive() for w in workers)
+    assert outcome == CoordinatorResult(interrupted=False, unfinished=0)
+    assert all(not w.is_alive() for w in pool.processes)
+    assert "dropping malformed child task" in log_file.read_text()
 
 
 @pytest.mark.integration
@@ -659,10 +559,34 @@ def test_clean_run_reports_no_unfinished_work(tmp_path: Path) -> None:
 
     ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [scan_root])
     listener = start_listener(log_queue, tmp_path / "clean.log", "WARNING")
-    workers = start_worker_pool(ctx, 2)
+    pool = _start_pool(ctx, 2)
     progress = _non_tty_progress()
 
-    outcome = run_coordinator(ctx, workers, listener, [], progress)
+    outcome = run_coordinator(ctx, pool, listener, [], progress)
 
     assert outcome.interrupted is False
     assert outcome.unfinished == 0
+
+
+@pytest.mark.integration
+def test_failed_task_is_reported_as_not_scanned(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A task that returns an error shows up on the summary's "Not fully scanned" line.
+
+    A missing start directory makes ENUM_DIR return status="error", which is
+    the same path an access-denied folder takes.
+    """
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    log_queue: mp.Queue[object] = mp.Queue()
+    stop_event = mp.Event()
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [])
+    listener = start_listener(log_queue, tmp_path / "failed.log", "WARNING")
+    pool = _start_pool(ctx, 1)
+    progress = _non_tty_progress()
+
+    missing = Task(task_type=TaskType.ENUM_DIR, payload={"path": str(tmp_path / "does-not-exist"), "depth": 0})
+    outcome = run_coordinator(ctx, pool, listener, [], progress, seed_tasks=[missing])
+
+    assert outcome == CoordinatorResult(interrupted=False, unfinished=0)
+    assert progress.incomplete.failed == 1
+    assert "1 failed with an error" in capsys.readouterr().out

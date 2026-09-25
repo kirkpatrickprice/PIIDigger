@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
-import multiprocessing as mp
 import queue
 import time
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import ValidationError
@@ -14,18 +14,19 @@ from piidigger.models.config import Config
 from piidigger.models.tasks import Task, TaskResult, TaskStarted, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
+from piidigger.orchestration.pool import WorkerPool, spawn_worker
 from piidigger.orchestration.progress import ProgressDisplay
-from piidigger.orchestration.registry import MAX_RETRIES
-from piidigger.orchestration.worker import broadcast_shutdown, join_workers, worker_loop
+from piidigger.orchestration.registry import TaskRecord, TaskRegistry
+from piidigger.orchestration.worker import broadcast_shutdown
 
-# How often (seconds) the coordinator checks for worker deadline violations
-# when the result queue is empty.
+# How often (seconds) the coordinator runs its health sweep.  The sweep is
+# scheduled by elapsed time, not by the result queue going quiet, so a busy scan
+# is checked on the same cadence as an idle one.
 HEARTBEAT_CHECK_INTERVAL: float = 1.0
 
-# A task that has been in _pending_tasks but not in _in_flight (no heartbeat)
-# for longer than this many seconds is a candidate for crash-orphan re-queue,
-# provided at least one worker process has died unexpectedly.
-_CRASH_DETECT_TIMEOUT: float = 30.0
+# How long teardown waits for workers to exit before stopping them.
+_JOIN_TIMEOUT: float = 5.0
+_INTERRUPT_JOIN_TIMEOUT: float = 2.0
 
 _ACCESS_DENIED_PHRASES: tuple[str, ...] = ("Access is denied", "Permission denied", "WinError 5", "Errno 13")
 
@@ -48,6 +49,96 @@ class CoordinatorResult:
 
     interrupted: bool = False
     unfinished: int = 0
+
+
+@dataclass(frozen=True)
+class SweepResult:
+    """What one health sweep found and did, for the coordinator to report.
+
+    Holds the affected records rather than bare task ids.  By the time the report
+    is rendered those tasks have left the registry, and the report still needs
+    each task's path and timeout.
+
+    A dataclass rather than a Pydantic model: every field is state the monitor
+    read from our own registry and pool.
+    """
+
+    now: float
+    timed_out: list[TaskRecord] = field(default_factory=list)
+    crashed: list[tuple[int, int | None]] = field(default_factory=list)
+    redispatched: list[TaskRecord] = field(default_factory=list)
+    abandoned: list[TaskRecord] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        """True when the sweep has anything to report."""
+        return bool(self.timed_out or self.crashed or self.redispatched or self.abandoned)
+
+
+class HealthMonitor:
+    """The coordinator's periodic health sweep.
+
+    Kept apart from the drain loop, with its collaborators injected, so it can be
+    unit-tested without spawning a process.  tick() runs two checks, and the
+    order matters:
+
+    1. Deadline sweep.  A RUNNING task past its deadline is abandoned and its
+       worker replaced.  Timeouts are not retried: a task that hung once will
+       most likely hang again.
+    2. Crash sweep.  Workers that died unprompted are replaced.  Then every
+       RUNNING task whose worker is no longer in the pool is re-dispatched, or
+       abandoned once its retry budget is spent.  Matching on "not in the pool"
+       rather than "died this tick" also catches a heartbeat that arrived after
+       its worker had already been reaped.
+
+    Because the deadline sweep runs first, a worker replaced for a timeout has
+    already left the pool, so the crash sweep cannot replace it a second time.
+
+    A task lost before its heartbeat is invisible to both checks, because no
+    worker is recorded as holding it.
+    """
+
+    def __init__(
+        self,
+        registry: TaskRegistry,
+        pool: WorkerPool,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._registry = registry
+        self._pool = pool
+        self._clock = clock
+
+    def tick(self) -> SweepResult:
+        """Run one sweep and report what it did."""
+        now = self._clock()
+
+        timed_out: list[TaskRecord] = []
+        for record in self._registry.expired(now):
+            self._registry.abandon(record.task_id, reason="timed_out")
+            if record.worker_pid is not None:
+                self._pool.replace(record.worker_pid)
+            timed_out.append(record)
+
+        crashed = self._pool.reap_dead()
+        live = self._pool.pids()
+        redispatched: list[TaskRecord] = []
+        abandoned: list[TaskRecord] = []
+        for record in self._registry.running():
+            if record.worker_pid in live:
+                continue
+            if self._registry.redispatch(record.task_id) is not None:
+                redispatched.append(record)
+            else:
+                self._registry.abandon(record.task_id, reason="crashed")
+                abandoned.append(record)
+
+        return SweepResult(
+            now=now,
+            timed_out=timed_out,
+            crashed=crashed,
+            redispatched=redispatched,
+            abandoned=abandoned,
+        )
 
 
 def _truncate_path(path: str, max_len: int = 60) -> str:
@@ -135,346 +226,331 @@ def build_seed_tasks(config: Config) -> list[Task]:
 
 def run_coordinator(
     ctx: WorkerContext,
-    workers: list[mp.Process],
+    pool: WorkerPool,
     listener: logging.handlers.QueueListener,
     sinks: list[Any],
     progress: ProgressDisplay,
+    *,
+    seed_tasks: Sequence[Task] | None = None,
 ) -> CoordinatorResult:
-    """Drive the fan-out scan loop until all work is accounted for.
+    """Drive the fan-out scan until every task is accounted for.
 
-    Seeds one ENUM_DIR task per config.start_dirs, then drains result_queue
-    and re-enqueues any new tasks discovered by workers.  Terminates when
-    pending == 0 (every enqueued task has produced exactly one result).
+    Seeds the task registry, then drains the result queue.  Each result retires
+    its task and may enqueue children; the loop ends when the registry is empty.
+    A health sweep runs every HEARTBEAT_CHECK_INTERVAL seconds, however busy the
+    result queue is.
 
-    Post-loop teardown (broadcast_shutdown, join_workers, flush_sinks,
-    stop_listener) runs in a finally block so it always executes — both on
-    normal completion and on KeyboardInterrupt.
+    Teardown (stop the workers, flush the sinks, stop the listener and the
+    display) runs in a finally block, on normal completion and on
+    KeyboardInterrupt alike.
 
     Args:
-        ctx: Shared context (queues, config, stop_event) for workers.
-        workers: Live worker processes — updated in-place on replacement.
+        ctx: Shared context (queues, config) for workers.
+        pool: Started worker pool.  The coordinator replaces workers through it
+            and stops all of them at teardown.
         listener: Logging QueueListener started before this call; stopped here.
-        sinks: OutputSink instances to receive findings (empty list in Phase 2).
-        progress: Progress display owned by this coordinator.
+        sinks: Opened OutputSink instances that receive findings; closed here.
+        progress: Progress display owned by this coordinator; stopped here.
+        seed_tasks: Initial tasks.  Defaults to one ENUM_DIR per
+            config.start_dirs.  Tests pass their own to drive particular task
+            types through the real loop.
 
     Returns:
         CoordinatorResult describing how the run ended, for exit-code mapping.
     """
     logger = build_worker_logger(ctx.log_queue, "coordinator")
+    registry = TaskRegistry(ctx.task_queue.put)
+    monitor = HealthMonitor(registry, pool)
 
-    # task_id → Task for all tasks that have been enqueued but not yet completed.
-    # Used to look up timeout_seconds when a TaskStarted heartbeat arrives.
-    _pending_tasks: dict[str, Task] = {}
-
-    # task_id → (worker_pid, dispatch_monotonic, timeout_seconds) for in-flight tasks
-    # (TaskStarted received but TaskResult not yet received).
-    _in_flight: dict[str, tuple[int, float, int]] = {}
-
-    # pid → Process for fast lookup during deadline termination.
-    _pid_to_proc: dict[int, mp.Process] = {p.pid: p for p in workers if p.pid is not None}
-
-    # task_id → monotonic time when the task was enqueued; used to detect
-    # tasks that have been waiting too long without a heartbeat (crash orphans).
-    _task_enqueue_time: dict[str, float] = {}
-
-    # task_id → number of times this task has been re-queued after a crash.
-    _task_retries: dict[str, int] = {}
-
-    def _enqueue(task: Task, retry_count: int = 0) -> None:
-        ctx.task_queue.put(task)
-        _pending_tasks[task.task_id] = task
-        _task_enqueue_time[task.task_id] = time.monotonic()
-        _task_retries[task.task_id] = retry_count
-
-    def _record_heartbeat(msg: TaskStarted) -> None:
-        task = _pending_tasks.get(msg.task_id)
-        if task is None:
-            logger.warning("heartbeat for unknown task %s — ignoring", msg.task_id)
-            return
-        _in_flight[msg.task_id] = (msg.worker_pid, time.monotonic(), task.timeout_seconds)
-
-    def _check_worker_deadlines(pending: int) -> int:
-        """Scan for deadline violations and crashed workers; synthesise results as needed.
-
-        Returns the updated pending count after any synthesised results.
-
-        Two detection paths:
-        1. Timeout: task in _in_flight past 2 × timeout_seconds — terminate worker,
-           spawn replacement, synthesise status='timeout', decrement pending.
-        2. Crash-before-heartbeat: worker dead but its task has no heartbeat entry —
-           re-queue up to MAX_RETRIES times; after that synthesise status='error'.
-        """
-        now = time.monotonic()
-        timed_out: list[str] = []
-
-        for task_id, (_pid, dispatch_time, timeout_seconds) in _in_flight.items():
-            if now - dispatch_time > 2 * timeout_seconds:
-                timed_out.append(task_id)
-
-        for task_id in timed_out:
-            pid, dispatch_time, timeout_sec = _in_flight.pop(task_id)
-            task = _pending_tasks.pop(task_id, None)
-            _task_enqueue_time.pop(task_id, None)
-            _task_retries.pop(task_id, None)
-            elapsed = now - dispatch_time
-
-            task_type_str = task.task_type.value if task is not None else "unknown"
-            source_path = _task_path(task)
-
-            logger.warning(
-                "deadline exceeded: type=%s path=%r pid=%d elapsed=%.1fs"
-                " timeout=%ds — worker terminated; replacement spawned",
-                task_type_str,
-                source_path,
-                pid,
-                elapsed,
-                timeout_sec,
-            )
-
-            # Terminate the hung worker and spawn a replacement
-            old_proc = _pid_to_proc.pop(pid, None)
-            if old_proc is not None:
-                old_proc.terminate()
-                old_proc.join(timeout=2.0)
-                # Remove from the shared workers list so join_workers sees the replacement
-                if old_proc in workers:
-                    workers.remove(old_proc)
-
-            new_proc = mp.Process(target=worker_loop, args=(ctx,))
-            new_proc.start()
-            if new_proc.pid is not None:
-                _pid_to_proc[new_proc.pid] = new_proc
-            workers.append(new_proc)
-            logger.info("spawned replacement worker pid=%s", new_proc.pid)
-
-            short_path = _truncate_path(source_path) if source_path else f"task {task_id[:8]}…"
-            progress.log_event(
-                "WARNING",
-                f"Timeout [{task_type_str}] {short_path}"
-                f" — pid={pid}, {elapsed:.0f}s/{timeout_sec}s, replacement spawned",
-            )
-            pending -= 1
-
-        # --- Crash-before-heartbeat detection ---
-        # A worker that died without our explicit terminate() may have dequeued a
-        # task before crashing, leaving that task orphaned (no heartbeat, no result).
-        dead_pids = [pid for pid, proc in _pid_to_proc.items() if not proc.is_alive()]
-        if dead_pids:
-            for pid in dead_pids:
-                old_proc = _pid_to_proc.pop(pid)
-                if old_proc in workers:
-                    workers.remove(old_proc)
-                new_proc = mp.Process(target=worker_loop, args=(ctx,))
-                new_proc.start()
-                if new_proc.pid is not None:
-                    _pid_to_proc[new_proc.pid] = new_proc
-                workers.append(new_proc)
-                logger.warning("worker pid=%d crashed; replacement pid=%s", pid, new_proc.pid)
-                progress.log_event("WARNING", f"Worker pid={pid} crashed unexpectedly")
-
-            # Any task pending without a heartbeat for > _CRASH_DETECT_TIMEOUT may
-            # have been dequeued by the crashed worker.  Re-queue up to MAX_RETRIES.
-            crash_orphans = [
-                task_id
-                for task_id in _pending_tasks
-                if task_id not in _in_flight and now - _task_enqueue_time.get(task_id, now) > _CRASH_DETECT_TIMEOUT
-            ]
-            for task_id in crash_orphans:
-                task = _pending_tasks.pop(task_id)
-                _task_enqueue_time.pop(task_id, None)
-                retries = _task_retries.pop(task_id, 0)
-                pending -= 1
-
-                if retries < MAX_RETRIES:
-                    new_task = Task(
-                        task_type=task.task_type,
-                        payload=task.payload,
-                        timeout_seconds=task.timeout_seconds,
-                    )
-                    logger.warning(
-                        "crash-orphan: re-queuing %s as %s (retry %d/%d)",
-                        task_id,
-                        new_task.task_id,
-                        retries + 1,
-                        MAX_RETRIES,
-                    )
-                    _enqueue(new_task, retries + 1)
-                    pending += 1
-                else:
-                    logger.error(
-                        "crash-orphan: task %s exceeded MAX_RETRIES=%d; dropping",
-                        task_id,
-                        MAX_RETRIES,
-                    )
-                    progress.log_event(
-                        "ERROR",
-                        f"Crash orphan: task={task_id[:8]}… exceeded {MAX_RETRIES} retries",
-                    )
-
-        return pending
-
-    def _route_to_sinks(findings: list[dict[str, Any]], output_sinks: list[Any]) -> None:
-        """Forward findings to each OutputSink.  No-op when sinks list is empty (Phase 2).
-
-        Findings cross the process boundary as plain dicts (picklable); sinks
-        expect validated ResultRecord objects, so we reconstitute them here at
-        the coordinator boundary.
-        """
-        from piidigger.models.results import ResultRecord  # local: avoids circular at module level
-
-        for finding_dict in findings:
-            try:
-                record = ResultRecord.model_validate(finding_dict)
-            except Exception:  # noqa: BLE001
-                logger.warning("coordinator: could not deserialize finding: %r", finding_dict)
-                continue
-            for sink in output_sinks:
-                sink.write(record)
-
-    def _flush_sinks(output_sinks: list[Any]) -> None:
-        """Close all output sinks after the coordinator loop exits."""
-        for sink in output_sinks:
-            try:
-                sink.close()
-            except Exception:  # noqa: BLE001
-                logger.exception("error closing sink %r", sink)
-
-    # ------------------------------------------------------------------
-    # Seed initial tasks — one ENUM_DIR per configured start directory
-    # ------------------------------------------------------------------
-
+    seeds = build_seed_tasks(ctx.config) if seed_tasks is None else list(seed_tasks)
     # Pre-seed dirs_found so the progress bar starts at "0 / N" rather than
-    # "0 / 0".  Each ENUM_DIR result will add its discovered subdirs to the
-    # total, so the bar reaches 100% when all dirs have been scanned.
-    progress.update({"dirs_found": len(ctx.config.start_dirs)})
+    # "0 / 0".  Each ENUM_DIR result adds the subdirectories it discovers.
+    progress.update({"dirs_found": sum(1 for t in seeds if t.task_type == TaskType.ENUM_DIR)})
+    for task in seeds:
+        registry.enqueue(task)
+    logger.info("coordinator seeded %d initial task(s)", len(seeds))
 
-    pending = 0
-    for task in build_seed_tasks(ctx.config):
-        _enqueue(task)
-        pending += 1
-
-    logger.info("coordinator seeded %d initial task(s)", pending)
-
-    # ------------------------------------------------------------------
-    # Main fan-out loop
-    # ------------------------------------------------------------------
-    _interrupted = False
+    interrupted = False
     try:
-        while pending > 0:
-            try:
-                raw: Any = ctx.result_queue.get(timeout=HEARTBEAT_CHECK_INTERVAL)
-            except queue.Empty:
-                pending = _check_worker_deadlines(pending)
-                continue
-
-            if isinstance(raw, TaskStarted):
-                _record_heartbeat(raw)
-                continue
-
-            if not isinstance(raw, TaskResult):
-                logger.warning("coordinator received unexpected message type %s", type(raw).__name__)
-                continue
-
-            result: TaskResult = raw
-            _in_flight.pop(result.task_id, None)
-            pending_task = _pending_tasks.pop(result.task_id, None)
-            _task_enqueue_time.pop(result.task_id, None)
-            _task_retries.pop(result.task_id, None)
-            pending -= 1
-
-            if result.status == "error":
-                msg = result.error_message or "(no message)"
-                err_path = _task_path(pending_task)
-                logger.error(
-                    "[%s]%s: %s",
-                    result.task_type.value,
-                    f" path={err_path!r}" if err_path else "",
-                    msg,
-                )
-                if _is_access_denied(msg):
-                    progress.log_event("WARNING", f"Access denied: {_truncate_path(_denied_path(msg))}")
-                elif result.task_type == TaskType.SCAN_FILE:
-                    file_path = pending_task.payload.get("display_path", "") if pending_task else ""
-                    progress.log_event("ERROR", f"Error: {_truncate_path(file_path)} — {_short_error(msg)}")
-
-            for new_task_dict in result.new_tasks:
-                # Task has extra="forbid", so a malformed producer dict raises
-                # ValidationError.  Unguarded that would escape the loop entirely
-                # and abort the whole scan over one bad child task.
-                try:
-                    new_task = Task(**new_task_dict)
-                except ValidationError:
-                    logger.exception(
-                        "[%s] dropping malformed child task from %r: %r",
-                        result.task_type.value,
-                        _task_path(pending_task),
-                        new_task_dict,
-                    )
-                    progress.log_event("ERROR", f"Malformed task from {_truncate_path(_task_path(pending_task))}")
-                    continue
-                _enqueue(new_task)
-                pending += 1
-
-            _route_to_sinks(result.findings, sinks)
-            if result.findings:
-                progress.log_event("INFO", _findings_summary(result.findings))
-            # Merge ETA counters with the result's own counters in one call so
-            # the display refreshes once per result.  tasks_pending is the
-            # post-adjustment snapshot (after new tasks were enqueued above).
-            progress.update({**result.counters, "tasks_completed": 1, "tasks_pending": pending})
-
-        logger.info("coordinator: all tasks complete (pending=0)")
-
+        _drain(ctx, registry, monitor, sinks, progress, logger)
+        logger.info("coordinator: all tasks accounted for")
     except KeyboardInterrupt:
-        _interrupted = True
+        interrupted = True
         logger.warning("scan interrupted by user (KeyboardInterrupt)")
         progress.log_event(
             "WARNING",
             "Scan interrupted — shutting down gracefully  (CTRL-C again to force-quit)",
         )
+    finally:
+        # Before teardown, which is where the display prints its summary.
+        progress.report_incomplete(
+            timed_out=registry.count_abandoned("timed_out"),
+            abandoned=registry.count_abandoned("crashed"),
+            unfinished=len(registry),
+            interrupted=interrupted,
+        )
+        _teardown(ctx, pool, listener, sinks, progress, logger, interrupted=interrupted)
+
+    unfinished = len(registry)
+    if unfinished and not interrupted:
+        logger.error("coordinator exited with %d task(s) still outstanding", unfinished)
+    return CoordinatorResult(interrupted=interrupted, unfinished=unfinished)
+
+
+def _drain(
+    ctx: WorkerContext,
+    registry: TaskRegistry,
+    monitor: HealthMonitor,
+    sinks: list[Any],
+    progress: ProgressDisplay,
+    logger: logging.Logger,
+) -> None:
+    """Consume results until the registry is empty, sweeping on a fixed cadence.
+
+    Whether a sweep is due is checked after every message, not only when the
+    queue times out.  A busy scan delivers messages more often than once per
+    interval.  When the sweep waited for an idle queue, a hung or crashed worker
+    went undetected for as long as the scan stayed busy.
+    """
+    next_sweep = time.monotonic() + HEARTBEAT_CHECK_INTERVAL
+    while registry:
+        try:
+            message: Any = ctx.result_queue.get(timeout=max(0.0, next_sweep - time.monotonic()))
+        except queue.Empty:
+            pass
+        else:
+            _handle_message(message, registry, sinks, progress, logger)
+        if time.monotonic() >= next_sweep:
+            _report_sweep(monitor.tick(), registry, progress, logger)
+            next_sweep = time.monotonic() + HEARTBEAT_CHECK_INTERVAL
+
+
+def _handle_message(
+    message: Any,
+    registry: TaskRegistry,
+    sinks: list[Any],
+    progress: ProgressDisplay,
+    logger: logging.Logger,
+) -> None:
+    """Dispatch one result-queue message by type."""
+    if isinstance(message, TaskStarted):
+        if not registry.record_start(message.task_id, message.worker_pid):
+            # Expected, not an error: with task ids reused across retries, a
+            # redundant copy can start after the task has already retired.
+            logger.debug("heartbeat for untracked task %s from pid %d; ignoring", message.task_id, message.worker_pid)
+    elif isinstance(message, TaskResult):
+        _handle_result(message, registry, sinks, progress, logger)
+    else:
+        logger.warning("coordinator received unexpected message type %s", type(message).__name__)
+
+
+def _handle_result(
+    result: TaskResult,
+    registry: TaskRegistry,
+    sinks: list[Any],
+    progress: ProgressDisplay,
+    logger: logging.Logger,
+) -> None:
+    """Retire the task a result reports on, then act on what the result contains.
+
+    A result for an untracked id is usually a duplicate: another copy of a
+    re-dispatched task finished first, and its findings are already written.
+    Such a result is dropped whole.  The exception is a task the coordinator
+    abandoned.  No other copy of it exists, so a late result is the only report
+    of that work, and dropping it would lose real findings.
+    """
+    record = registry.retire(result.task_id)
+    if record is None:
+        record = registry.reclaim(result.task_id)
+        if record is None:
+            logger.debug("dropping duplicate result for task %s", result.task_id)
+            return
+        logger.warning(
+            "[%s] accepting late result for %r after the coordinator gave up on it",
+            result.task_type.value,
+            _task_path(record.task),
+        )
+    task = record.task
+
+    if result.status == "error":
+        msg = result.error_message or "(no message)"
+        err_path = _task_path(task)
+        logger.error(
+            "[%s]%s: %s",
+            result.task_type.value,
+            f" path={err_path!r}" if err_path else "",
+            msg,
+        )
+        if _is_access_denied(msg):
+            progress.log_event("WARNING", f"Access denied: {_truncate_path(_denied_path(msg))}")
+        elif result.task_type == TaskType.SCAN_FILE:
+            file_path = str(task.payload.get("display_path", ""))
+            progress.log_event("ERROR", f"Error: {_truncate_path(file_path)} — {_short_error(msg)}")
+
+    for new_task_dict in result.new_tasks:
+        # Task has extra="forbid", so a malformed producer dict raises
+        # ValidationError.  Unguarded that would escape the loop entirely and
+        # abort the whole scan over one bad child task.
+        try:
+            child = Task(**new_task_dict)
+        except ValidationError:
+            logger.exception(
+                "[%s] dropping malformed child task from %r: %r",
+                result.task_type.value,
+                _task_path(task),
+                new_task_dict,
+            )
+            progress.log_event("ERROR", f"Malformed task from {_truncate_path(_task_path(task))}")
+            continue
+        registry.enqueue(child)
+
+    _route_to_sinks(result.findings, sinks, logger)
+    if result.findings:
+        progress.log_event("INFO", _findings_summary(result.findings))
+    # One update per result, so the display refreshes once.  tasks_pending is
+    # read after the children above were enqueued.  A failed task counts as
+    # completed for the ETA, and separately as not scanned for the summary.
+    update = {**result.counters, "tasks_completed": 1, "tasks_pending": len(registry)}
+    if result.status == "error":
+        update["tasks_failed"] = 1
+    progress.update(update)
+
+
+def _report_sweep(
+    sweep: SweepResult,
+    registry: TaskRegistry,
+    progress: ProgressDisplay,
+    logger: logging.Logger,
+) -> None:
+    """Turn a SweepResult into log records, display events, and summary counters."""
+    if not sweep:
+        return
+
+    for record in sweep.timed_out:
+        task_type = record.task.task_type.value
+        timeout = record.task.timeout_seconds
+        elapsed = sweep.now - record.started_at if record.started_at is not None else 0.0
+        logger.warning(
+            "deadline exceeded: type=%s path=%r pid=%s elapsed=%.1fs timeout=%ds; stopping and replacing the worker",
+            task_type,
+            _task_path(record.task),
+            record.worker_pid,
+            elapsed,
+            timeout,
+        )
+        progress.log_event(
+            "WARNING",
+            f"Timeout [{task_type}] {_label(record)} — pid={record.worker_pid}, {elapsed:.0f}s/{timeout}s",
+        )
+
+    for pid, exitcode in sweep.crashed:
+        logger.warning("worker pid=%d died unexpectedly (exit code %s); replacing it", pid, exitcode)
+        progress.log_event("WARNING", f"Worker pid={pid} crashed unexpectedly (exit code {exitcode})")
+
+    for record in sweep.redispatched:
+        logger.warning(
+            "[%s] re-dispatching %r after its worker died (retry %d of %d)",
+            record.task.task_type.value,
+            _task_path(record.task),
+            record.attempt,
+            registry.max_retries,
+        )
+
+    for record in sweep.abandoned:
+        attempts = record.attempt + 1
+        logger.error(
+            "[%s] abandoning %r: its worker died on all %d attempts",
+            record.task.task_type.value,
+            _task_path(record.task),
+            attempts,
+        )
+        progress.log_event("ERROR", f"Gave up on {_label(record)} after its worker crashed {attempts} times")
+
+    # Timeout and abandonment totals are not accumulated here.  A late result can
+    # still reclaim an abandoned task, so the final counts come from the
+    # registry when the run ends.
+    progress.update({"tasks_pending": len(registry)})
+
+
+def _label(record: TaskRecord) -> str:
+    """Short display label for a task: its truncated path, or its id if it has none."""
+    path = _task_path(record.task)
+    return _truncate_path(path) if path else f"task {record.task_id[:8]}…"
+
+
+def _route_to_sinks(findings: list[dict[str, Any]], sinks: list[Any], logger: logging.Logger) -> None:
+    """Forward findings to each OutputSink.
+
+    Findings cross the process boundary as plain dicts, which pickle.  Sinks
+    expect validated ResultRecord objects, so they are reconstituted here at the
+    coordinator boundary.
+    """
+    from piidigger.models.results import ResultRecord  # local: avoids a circular import at module level
+
+    for finding_dict in findings:
+        try:
+            record = ResultRecord.model_validate(finding_dict)
+        except Exception:  # noqa: BLE001
+            logger.warning("coordinator: could not deserialize finding: %r", finding_dict)
+            continue
+        for sink in sinks:
+            sink.write(record)
+
+
+def _flush_sinks(sinks: list[Any], logger: logging.Logger) -> None:
+    """Close every output sink, logging rather than raising on failure."""
+    for sink in sinks:
+        try:
+            sink.close()
+        except Exception:  # noqa: BLE001
+            logger.exception("error closing sink %r", sink)
+
+
+def _teardown(
+    ctx: WorkerContext,
+    pool: WorkerPool,
+    listener: logging.handlers.QueueListener,
+    sinks: list[Any],
+    progress: ProgressDisplay,
+    logger: logging.Logger,
+    *,
+    interrupted: bool,
+) -> None:
+    """Stop the workers, flush the sinks, and stop the listener and display."""
+    if interrupted:
+        # Cancel feeder-thread joins NOW, before any teardown step that could
+        # block.  If a second CTRL-C breaks out of this function, the atexit
+        # handler sees _joincancelled=True and skips thread.join(), so the
+        # multiprocessing atexit hook raises no unhandled KeyboardInterrupt.
+        ctx.task_queue.cancel_join_thread()
+        ctx.result_queue.cancel_join_thread()
+        ctx.log_queue.cancel_join_thread()
+        pool.terminate_all()
+    else:
+        # One sentinel per process the pool knows about, stragglers included.
+        # Too many is harmless; too few leaves a worker blocked in get() forever.
+        broadcast_shutdown(ctx.task_queue, len(pool.processes))
+
+    try:
+        if interrupted:
+            progress.log_event("INFO", "Waiting for workers to stop…")
+        pool.join(_INTERRUPT_JOIN_TIMEOUT if interrupted else _JOIN_TIMEOUT)
+
+        if interrupted:
+            progress.log_event("INFO", "Saving results to output files…")
+        _flush_sinks(sinks, logger)
+        stop_listener(listener)
+
+    except KeyboardInterrupt:
+        # Second CTRL-C: force-quit without waiting for a clean teardown.
+        pool.terminate_all()
+        ctx.task_queue.cancel_join_thread()
+        ctx.result_queue.cancel_join_thread()
+        ctx.log_queue.cancel_join_thread()
+        progress.log_event("WARNING", "Force-quit — remaining output abandoned")
 
     finally:
-        if _interrupted:
-            # Cancel feeder-thread joins NOW, before any teardown step that could
-            # block.  If a second CTRL-C breaks out of this finally block, the
-            # atexit handler will see _joincancelled=True and skip thread.join(),
-            # so no unhandled KeyboardInterrupt from the multiprocessing atexit hook.
-            ctx.task_queue.cancel_join_thread()
-            ctx.result_queue.cancel_join_thread()
-            ctx.log_queue.cancel_join_thread()
-            for p in workers:
-                if p.is_alive():
-                    p.terminate()
-        else:
-            # Graceful completion: signal workers to exit cleanly.
-            broadcast_shutdown(ctx.task_queue, len(workers))
-
-        try:
-            if _interrupted:
-                progress.log_event("INFO", "Waiting for workers to stop…")
-            join_workers(workers, timeout=2.0 if _interrupted else 5.0, logger=logger)
-
-            if _interrupted:
-                progress.log_event("INFO", "Saving results to output files…")
-            _flush_sinks(sinks)
-            stop_listener(listener)
-
-        except KeyboardInterrupt:
-            # Second CTRL-C: force-quit without waiting for clean teardown.
-            for p in workers:
-                if p.is_alive():
-                    p.terminate()
-            ctx.task_queue.cancel_join_thread()
-            ctx.result_queue.cancel_join_thread()
-            ctx.log_queue.cancel_join_thread()
-            progress.log_event("WARNING", "Force-quit — remaining output abandoned")
-
-        finally:
-            progress.stop()
-
-    if pending > 0 and not _interrupted:
-        logger.error("coordinator exited with %d task(s) still outstanding", pending)
-    return CoordinatorResult(interrupted=_interrupted, unfinished=max(pending, 0))
+        progress.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -498,10 +574,9 @@ def _run_with_internal_workers(
     """
     from pathlib import Path
 
-    from piidigger.orchestration.worker import start_worker_pool  # local: avoids circular at module level
-
     listener = start_listener(ctx.log_queue, Path(log_file_str), "DEBUG")
-    workers = start_worker_pool(ctx, n_workers)
+    pool = WorkerPool(lambda: spawn_worker(ctx), logger=build_worker_logger(ctx.log_queue, "pool"))
+    pool.start(n_workers)
     progress = ProgressDisplay()
     progress._is_tty = False
-    run_coordinator(ctx, workers, listener, [], progress)
+    run_coordinator(ctx, pool, listener, [], progress)

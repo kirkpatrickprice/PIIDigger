@@ -13,19 +13,7 @@ import pytest
 
 from piidigger.models.tasks import Task, TaskType
 from piidigger.orchestration.registry import MAX_RETRIES, TaskRecord, TaskRegistry
-
-
-class FakeClock:
-    """Monotonic clock under test control, so deadlines need no real waiting."""
-
-    def __init__(self, start: float = 1000.0) -> None:
-        self.now = start
-
-    def __call__(self) -> float:
-        return self.now
-
-    def advance(self, seconds: float) -> None:
-        self.now += seconds
+from tests._fakes import FakeClock
 
 
 def _task(timeout: int = 30) -> Task:
@@ -227,12 +215,12 @@ def test_any_running_false_until_heartbeat() -> None:
 
 
 # ---------------------------------------------------------------------------
-# running_for_pid — the crash-recovery reverse index
+# running — the crash sweep's view of work in progress
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_running_for_pid_selects_only_that_worker() -> None:
+def test_running_lists_only_started_tasks() -> None:
     reg, _ = _registry()
     a, b, c = _task(), _task(), _task()
     for t in (a, b, c):
@@ -241,9 +229,7 @@ def test_running_for_pid_selects_only_that_worker() -> None:
     reg.record_start(b.task_id, worker_pid=20)
     # c stays QUEUED
 
-    assert [r.task_id for r in reg.running_for_pid(10)] == [a.task_id]
-    assert [r.task_id for r in reg.running_for_pid(20)] == [b.task_id]
-    assert reg.running_for_pid(30) == []
+    assert {r.task_id: r.worker_pid for r in reg.running()} == {a.task_id: 10, b.task_id: 20}
 
 
 @pytest.mark.unit
@@ -257,7 +243,86 @@ def test_retire_clears_the_running_index() -> None:
     reg.retire(task.task_id)
 
     assert not reg.any_running()
-    assert reg.running_for_pid(7) == []
+    assert reg.running() == []
+
+
+# ---------------------------------------------------------------------------
+# abandon / reclaim — keeping a late result for a task we gave up on
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_abandon_retires_the_task() -> None:
+    reg, _ = _registry()
+    task = _task()
+    reg.enqueue(task)
+    reg.record_start(task.task_id, worker_pid=3)
+
+    record = reg.abandon(task.task_id, reason="timed_out")
+
+    assert record is not None
+    assert len(reg) == 0
+    assert not reg.any_running()
+
+
+@pytest.mark.unit
+def test_reclaim_returns_an_abandoned_record_once() -> None:
+    """A late result for an abandoned task is accepted exactly once."""
+    reg, _ = _registry()
+    task = _task()
+    reg.enqueue(task)
+    reg.abandon(task.task_id, reason="crashed")
+
+    first = reg.reclaim(task.task_id)
+    assert first is not None
+    assert first.task_id == task.task_id
+    assert reg.reclaim(task.task_id) is None
+    assert len(reg) == 0, "reclaiming must not put the task back in the registry"
+
+
+@pytest.mark.unit
+def test_reclaim_refuses_a_task_that_was_merely_retired() -> None:
+    """A normally retired task's second result is a duplicate, not a lost report."""
+    reg, _ = _registry()
+    task = _task()
+    reg.enqueue(task)
+    reg.retire(task.task_id)
+
+    assert reg.reclaim(task.task_id) is None
+
+
+@pytest.mark.unit
+def test_abandon_unknown_id_returns_none() -> None:
+    reg, _ = _registry()
+    assert reg.abandon("ghost", reason="timed_out") is None
+    assert reg.reclaim("ghost") is None
+
+
+@pytest.mark.unit
+def test_count_abandoned_separates_reasons() -> None:
+    reg, _ = _registry()
+    hung, poison_a, poison_b = _task(), _task(), _task()
+    for t in (hung, poison_a, poison_b):
+        reg.enqueue(t)
+    reg.abandon(hung.task_id, reason="timed_out")
+    reg.abandon(poison_a.task_id, reason="crashed")
+    reg.abandon(poison_b.task_id, reason="crashed")
+
+    assert reg.count_abandoned("timed_out") == 1
+    assert reg.count_abandoned("crashed") == 2
+
+
+@pytest.mark.unit
+def test_reclaimed_task_no_longer_counts_as_abandoned() -> None:
+    """A late result means the work did complete, so it must leave the tally."""
+    reg, _ = _registry()
+    task = _task()
+    reg.enqueue(task)
+    reg.abandon(task.task_id, reason="timed_out")
+
+    reg.reclaim(task.task_id)
+
+    assert reg.count_abandoned("timed_out") == 0
 
 
 # ---------------------------------------------------------------------------

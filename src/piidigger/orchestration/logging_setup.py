@@ -11,15 +11,32 @@ def build_worker_logger(log_queue: mp.Queue[Any], name: str = "worker") -> loggi
     """Return a logger that sends all records to log_queue via QueueHandler.
 
     Call this inside each worker process — never pass a Logger across the
-    spawn boundary.  Idempotent: re-calling with the same name does not
-    add duplicate handlers.
+    spawn boundary.  Idempotent: re-calling with the same name and queue does
+    not add a duplicate handler, and re-calling with a different queue moves the
+    logger to it.
     """
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
-    if not any(isinstance(h, logging.handlers.QueueHandler) for h in logger.handlers):
-        logger.addHandler(logging.handlers.QueueHandler(log_queue))
+    _route_to_queue(logger, log_queue)
     logger.propagate = False
     return logger
+
+
+def _route_to_queue(logger: logging.Logger, log_queue: mp.Queue[Any]) -> None:
+    """Make log_queue the logger's only QueueHandler target.
+
+    Loggers are process-wide singletons keyed by name.  A check for "any
+    QueueHandler" would keep a logger bound to the first queue it ever saw.  A
+    later run in the same process — a second run_scan, or the next test — would
+    then send its records to a queue nobody is listening on, and they would be
+    lost without any error.
+    """
+    handlers = [h for h in logger.handlers if isinstance(h, logging.handlers.QueueHandler)]
+    if any(h.queue is log_queue for h in handlers):
+        return
+    for handler in handlers:
+        logger.removeHandler(handler)
+    logger.addHandler(logging.handlers.QueueHandler(log_queue))
 
 
 def start_listener(
@@ -117,6 +134,5 @@ def setup_warning_capture(log_queue: mp.Queue[Any]) -> None:
 
     warn_logger = logging.getLogger("py.warnings")
     warn_logger.setLevel(logging.WARNING)
-    if not any(isinstance(h, logging.handlers.QueueHandler) for h in warn_logger.handlers):
-        warn_logger.addHandler(logging.handlers.QueueHandler(log_queue))
+    _route_to_queue(warn_logger, log_queue)
     warn_logger.propagate = False

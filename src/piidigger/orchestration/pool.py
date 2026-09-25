@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+import time
 from collections.abc import Callable
 from typing import Protocol
 
@@ -122,7 +123,7 @@ class WorkerPool:
         proc = self._active.pop(pid, None)
         if proc is None:
             return None
-        self._stop(proc)
+        self._stop([proc])
         return self._spawn_replacement()
 
     def reap_dead(self) -> list[tuple[int, int | None]]:
@@ -138,6 +139,35 @@ class WorkerPool:
         for _ in dead:
             self._spawn_replacement()
         return [(pid, proc.exitcode) for pid, proc in dead]
+
+    # -- teardown -----------------------------------------------------------
+
+    def terminate_all(self) -> None:
+        """Send terminate() to every live process without waiting.
+
+        For the interrupt path, where the goal is to stop work immediately and
+        join() follows with a short budget.
+        """
+        for proc in self.processes:
+            if proc.is_alive():
+                proc.terminate()
+
+    def join(self, timeout: float) -> None:
+        """Wait for every process to exit, then stop whatever is still running.
+
+        timeout is one budget shared by all processes, not a per-process limit,
+        so N workers do not multiply the wait.  Active workers still alive when
+        it runs out go through the same terminate()/kill() escalation as
+        replace(), and any that survive become stragglers.  Existing stragglers
+        have already survived both signals, so they are waited on but not
+        signalled again.
+        """
+        self._wait(self.processes, timeout)
+        stuck = [(pid, proc) for pid, proc in self._active.items() if proc.is_alive()]
+        for pid, _ in stuck:
+            self._log.warning("worker pid=%d did not exit within %.1fs; stopping it", pid, timeout)
+            del self._active[pid]
+        self._stop([proc for _, proc in stuck])
 
     # -- internals ----------------------------------------------------------
 
@@ -162,22 +192,33 @@ class WorkerPool:
             return None
         return proc
 
-    def _stop(self, proc: ProcessLike) -> None:
-        """terminate(), then kill() if that is ignored.  Survivors become stragglers.
+    def _stop(self, procs: list[ProcessLike]) -> None:
+        """terminate(), then kill() whatever ignores it.  Survivors become stragglers.
 
-        On POSIX, SIGTERM can be ignored and neither signal interrupts
-        uninterruptible I/O, so both can fail.  A process still alive after both is
-        kept rather than dropped.  Dropping it is how it used to vanish from
-        shutdown accounting.
+        The whole batch is signalled before any waiting, so N stuck workers cost
+        two grace periods rather than 2N.  On POSIX, SIGTERM can be ignored and
+        neither signal interrupts uninterruptible I/O, so both can fail.  A
+        process still alive after both is kept rather than dropped.  Dropping it
+        is how a worker used to vanish from shutdown accounting.
         """
-        proc.terminate()
-        proc.join(self._grace)
-        if proc.is_alive():
+        for proc in procs:
+            proc.terminate()
+        self._wait(procs, self._grace)
+        stubborn = [proc for proc in procs if proc.is_alive()]
+        for proc in stubborn:
             proc.kill()
-            proc.join(self._grace)
-        if proc.is_alive():
-            self._log.warning("worker pid=%s survived terminate() and kill(); keeping it as a straggler", proc.pid)
-            self._stragglers.append(proc)
+        self._wait(stubborn, self._grace)
+        for proc in stubborn:
+            if proc.is_alive():
+                self._log.warning("worker pid=%s survived terminate() and kill(); keeping it as a straggler", proc.pid)
+                self._stragglers.append(proc)
+
+    @staticmethod
+    def _wait(procs: list[ProcessLike], timeout: float) -> None:
+        """Join each process, with one shared deadline for the whole list."""
+        deadline = time.monotonic() + timeout
+        for proc in procs:
+            proc.join(max(0.0, deadline - time.monotonic()))
 
 
 def spawn_worker(ctx: WorkerContext) -> mp.Process:

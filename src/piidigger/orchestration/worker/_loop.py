@@ -120,43 +120,7 @@ def worker_loop(ctx: WorkerContext) -> None:
     logger.debug("worker stopped (pid=%d)", os.getpid())
 
 
-def start_worker_pool(ctx: WorkerContext, n_workers: int) -> list[mp.Process]:
-    """Spawn n_workers processes running worker_loop and return them."""
-    workers: list[mp.Process] = []
-    for _ in range(n_workers):
-        p = mp.Process(target=worker_loop, args=(ctx,))
-        p.start()
-        workers.append(p)
-    return workers
-
-
 def broadcast_shutdown(task_queue: mp.Queue[Any], n_workers: int) -> None:
     """Put one ShutdownSentinel per worker onto task_queue."""
     for _ in range(n_workers):
         task_queue.put(SHUTDOWN)
-
-
-def join_workers(
-    workers: list[mp.Process],
-    timeout: float = 5.0,
-    logger: logging.Logger | None = None,
-) -> None:
-    """Join all workers; force-terminate any still alive after timeout.
-
-    timeout is a total wall-clock budget shared across all workers, not a
-    per-worker limit — so N workers don't multiply the wait.
-    """
-    log = logger or logging.getLogger(__name__)
-    deadline = time.monotonic() + timeout
-    for proc in workers:
-        proc.join(timeout=max(0.0, deadline - time.monotonic()))
-    stragglers = [p for p in workers if p.is_alive()]
-    for proc in stragglers:
-        log.warning(
-            "worker PID %d did not exit within %.1fs; terminating",
-            proc.pid,
-            timeout,
-        )
-        proc.terminate()
-    for proc in stragglers:
-        proc.join(timeout=2.0)

@@ -21,8 +21,18 @@ from piidigger.models.config import Config
 from piidigger.models.tasks import SHUTDOWN, Task, TaskResult, TaskStarted, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
-from piidigger.orchestration.worker import broadcast_shutdown, join_workers, start_worker_pool, worker_loop
+from piidigger.orchestration.pool import WorkerPool, spawn_worker
+from piidigger.orchestration.worker import broadcast_shutdown, worker_loop
 from piidigger.orchestration.worker._loop import DISPATCH, _dispatch, _handle_noop
+
+_POOL_LOG = logging.getLogger("tests.worker.pool")
+
+
+def _start_pool(ctx: WorkerContext, n_workers: int) -> WorkerPool:
+    pool = WorkerPool(lambda: spawn_worker(ctx), logger=_POOL_LOG)
+    pool.start(n_workers)
+    return pool
+
 
 # ---------------------------------------------------------------------------
 # Logging unit test
@@ -40,6 +50,38 @@ def test_build_worker_logger_sends_to_queue() -> None:
     record = log_queue.get(timeout=1)
     assert isinstance(record, logging.LogRecord)
     assert "hello from test" in record.getMessage()
+
+
+@pytest.mark.unit
+def test_build_worker_logger_follows_a_new_queue() -> None:
+    """A second call with a different queue moves the logger to that queue.
+
+    Loggers are process-wide singletons.  The old check for "any QueueHandler"
+    kept a logger bound to the first queue it saw, so a second run in the same
+    process logged into a queue nobody read.
+    """
+    first: mp.Queue[object] = mp.Queue()
+    second: mp.Queue[object] = mp.Queue()
+    build_worker_logger(first, name="test-logger-rebind")
+    logger = build_worker_logger(second, name="test-logger-rebind")
+
+    logger.warning("after rebind")
+
+    record = second.get(timeout=1)
+    assert record.getMessage() == "after rebind"
+    assert first.empty()
+    handlers = [h for h in logger.handlers if isinstance(h, logging.handlers.QueueHandler)]
+    assert len(handlers) == 1
+
+
+@pytest.mark.unit
+def test_build_worker_logger_same_queue_adds_no_duplicate_handler() -> None:
+    log_queue: mp.Queue[object] = mp.Queue()
+    build_worker_logger(log_queue, name="test-logger-same")
+    logger = build_worker_logger(log_queue, name="test-logger-same")
+
+    handlers = [h for h in logger.handlers if isinstance(h, logging.handlers.QueueHandler)]
+    assert len(handlers) == 1
 
 
 @pytest.mark.unit
@@ -100,7 +142,7 @@ def test_noop_pool_dispatches_and_collects() -> None:
     for t in tasks:
         task_queue.put(t)
 
-    workers = start_worker_pool(ctx, n_workers)
+    pool = _start_pool(ctx, n_workers)
     task_ids = {t.task_id for t in tasks}
 
     results: list[TaskResult] = []
@@ -115,7 +157,7 @@ def test_noop_pool_dispatches_and_collects() -> None:
         # TaskStarted heartbeats are silently consumed here
 
     broadcast_shutdown(task_queue, n_workers)
-    join_workers(workers, timeout=10)
+    pool.join(timeout=10)
 
     assert len(results) == n_tasks
     assert {r.task_id for r in results} == task_ids
@@ -150,7 +192,7 @@ def test_worker_logs_reach_file(tmp_path: Path) -> None:
     listener = start_listener(log_queue, log_file, "DEBUG")
 
     task_queue.put(Task(task_type=TaskType.NOOP))
-    workers = start_worker_pool(ctx, n_workers)
+    pool = _start_pool(ctx, n_workers)
 
     # Wait for the single result
     deadline = time.monotonic() + 15
@@ -165,7 +207,7 @@ def test_worker_logs_reach_file(tmp_path: Path) -> None:
             pass
 
     broadcast_shutdown(task_queue, n_workers)
-    join_workers(workers, timeout=10)
+    pool.join(timeout=10)
     stop_listener(listener)
 
     assert got_result, "never received TaskResult from worker"
@@ -283,7 +325,7 @@ def test_handle_noop_with_delay() -> None:
 
 
 # ---------------------------------------------------------------------------
-# join_workers straggler path
+# WorkerPool.join straggler path, against a real process
 # ---------------------------------------------------------------------------
 
 
@@ -294,14 +336,21 @@ def _sleepy_worker() -> None:
     time.sleep(60)
 
 
-@pytest.mark.unit
-def test_join_workers_terminates_straggler() -> None:
-    """join_workers force-terminates a process that does not exit within timeout."""
-    p = mp.Process(target=_sleepy_worker)
-    p.start()
-    assert p.is_alive()
+def _start_sleepy() -> mp.Process:
+    proc = mp.Process(target=_sleepy_worker, daemon=True)
+    proc.start()
+    return proc
 
-    join_workers([p], timeout=0.1)
 
-    assert not p.is_alive(), "straggler process was not terminated by join_workers"
-    p.join()
+@pytest.mark.integration
+def test_pool_join_stops_a_real_process_that_outlives_the_budget() -> None:
+    """join() stops a real process that ignores shutdown, not just a fake one."""
+    pool = WorkerPool(_start_sleepy, logger=_POOL_LOG)
+    pool.start(1)
+    (proc,) = pool.processes
+    assert proc.is_alive()
+
+    pool.join(timeout=0.1)
+
+    assert not proc.is_alive(), "join() did not stop a process that outlived its budget"
+    assert pool.stragglers == []

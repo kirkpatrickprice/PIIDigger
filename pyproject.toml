@@ -154,7 +154,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = "src/"
+pythonpath = ["src/", "."]
 addopts = ["--import-mode=importlib",]
 markers = [
     "datahandlers: mark a test as a data handler test",

@@ -18,6 +18,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
 from piidigger.models.tasks import Task
 
@@ -25,6 +26,10 @@ from piidigger.models.tasks import Task
 # stops a poison task — a malformed file that segfaults a C parser, killing its
 # worker outright — from looping forever, re-crashing each replacement.
 MAX_RETRIES: int = 3
+
+# Why the coordinator stopped waiting for a task.  "timed_out": it ran past its
+# deadline.  "crashed": its worker died on every attempt the retry budget allowed.
+type AbandonReason = Literal["timed_out", "crashed"]
 
 # A task's wall-clock deadline is this multiple of its declared timeout.  The
 # slack absorbs queue latency and scheduling jitter, so only a genuinely hung
@@ -126,6 +131,10 @@ class TaskRegistry:
         # O(workers) instead of O(outstanding), which matters when a large scan
         # leaves six figures of tasks queued.
         self._running: dict[str, TaskRecord] = {}
+        # Records the coordinator gave up on, kept so a late result can still be
+        # accepted.  See abandon().  Only timeouts and exhausted retry budgets land
+        # here, so it stays small.
+        self._abandoned: dict[str, tuple[TaskRecord, AbandonReason]] = {}
 
     # -- size / termination -------------------------------------------------
 
@@ -213,6 +222,40 @@ class TaskRegistry:
         self._put(record.task)
         return record
 
+    def abandon(self, task_id: str, *, reason: AbandonReason) -> TaskRecord | None:
+        """Retire a task the coordinator has stopped waiting for, keeping its record.
+
+        Used when a task times out and when its retry budget runs out.  Neither
+        leaves a replacement copy queued.  So if the abandoned attempt's result
+        does turn up later, it is the only report of that work, and dropping it
+        would silently lose real findings.  reclaim() lets the caller accept it.
+
+        Returns the record, or None when the id is not tracked.
+        """
+        record = self.retire(task_id)
+        if record is not None:
+            self._abandoned[task_id] = (record, reason)
+        return record
+
+    def reclaim(self, task_id: str) -> TaskRecord | None:
+        """Hand back an abandoned task's record, once, when its late result arrives.
+
+        Returns None for any id that was not abandoned.  A late result for a task
+        that was re-dispatched is a duplicate of the retry, not a lost report,
+        and must still be dropped.  Does not change len(): an abandoned task was
+        already retired.
+        """
+        entry = self._abandoned.pop(task_id, None)
+        return entry[0] if entry is not None else None
+
+    def count_abandoned(self, reason: AbandonReason) -> int:
+        """Tasks abandoned for this reason whose work never turned up.
+
+        A task reclaimed by a late result is no longer counted, so at the end of
+        a run this is exactly the work that did not complete.
+        """
+        return sum(1 for _, why in self._abandoned.values() if why == reason)
+
     # -- observation --------------------------------------------------------
 
     def get(self, task_id: str) -> TaskRecord | None:
@@ -226,9 +269,9 @@ class TaskRegistry:
         """True while at least one task has an unanswered heartbeat."""
         return bool(self._running)
 
-    def running_for_pid(self, pid: int) -> list[TaskRecord]:
-        """Tasks currently RUNNING on a given worker, for crash recovery."""
-        return [r for r in self._running.values() if r.worker_pid == pid]
+    def running(self) -> list[TaskRecord]:
+        """Every RUNNING record.  Bounded by the worker count, so cheap to scan."""
+        return list(self._running.values())
 
     def expired(self, now: float | None = None) -> list[TaskRecord]:
         """RUNNING tasks past their deadline.  QUEUED tasks can never appear."""

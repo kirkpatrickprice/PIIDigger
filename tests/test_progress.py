@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from piidigger.orchestration.progress import ProgressDisplay
+from piidigger.orchestration.progress import IncompleteWork, ProgressDisplay, _incomplete_summary
 
 
 @pytest.mark.unit
@@ -84,3 +84,96 @@ def test_log_event_appended_to_internal_buffer(monkeypatch: pytest.MonkeyPatch) 
     assert len(display._events) == 2
     assert display._events[0] == ("WARNING", "disk full")
     assert display._events[1] == ("ERROR", "permission denied")
+
+
+# ---------------------------------------------------------------------------
+# Incomplete work in the end-of-scan summary
+# ---------------------------------------------------------------------------
+
+
+def _non_tty(monkeypatch: pytest.MonkeyPatch) -> ProgressDisplay:
+    monkeypatch.setattr("rich.console.Console.is_terminal", property(lambda self: False))
+    return ProgressDisplay()
+
+
+@pytest.mark.unit
+def test_complete_scan_prints_no_incomplete_line(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    display = _non_tty(monkeypatch)
+    display.update({"files_scanned": 3})
+    display.report_incomplete(timed_out=0, abandoned=0, unfinished=0, interrupted=False)
+    display.stop()
+
+    out = capsys.readouterr().out
+    assert out.startswith("Scan complete.")
+    assert "Not fully scanned" not in out
+
+
+@pytest.mark.unit
+def test_incomplete_work_gets_its_own_line(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Partial coverage is stated in words, not buried among the key=value totals."""
+    display = _non_tty(monkeypatch)
+    display.update({"files_scanned": 10, "tasks_failed": 1})
+    display.update({"tasks_failed": 1})
+    display.report_incomplete(timed_out=1, abandoned=1, unfinished=0, interrupted=False)
+    display.stop()
+
+    first, second = capsys.readouterr().out.splitlines()
+    assert first.startswith("Scan complete.")
+    assert "tasks_failed" not in first, "failures belong on the second line, not in the totals"
+    assert second == (
+        "Not fully scanned: 4 files or folders were skipped — 2 failed with an error, "
+        "1 timed out, 1 abandoned after repeated worker crashes. See the log for details."
+    )
+
+
+@pytest.mark.unit
+def test_interrupted_scan_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An interrupted scan must not report itself as complete."""
+    display = _non_tty(monkeypatch)
+    display.report_incomplete(timed_out=0, abandoned=0, unfinished=12, interrupted=True)
+    display.stop()
+
+    first, second = capsys.readouterr().out.splitlines()
+    assert first.startswith("Scan interrupted.")
+    assert "12 unfinished when the scan stopped" in second
+
+
+@pytest.mark.unit
+def test_unfinished_work_without_interrupt_says_stopped_early(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    display = _non_tty(monkeypatch)
+    display.report_incomplete(timed_out=0, abandoned=0, unfinished=3, interrupted=False)
+    display.stop()
+
+    assert capsys.readouterr().out.startswith("Scan stopped early.")
+
+
+@pytest.mark.unit
+def test_incomplete_summary_uses_singular_for_one_item() -> None:
+    assert _incomplete_summary(IncompleteWork(timed_out=1)) == (
+        "Not fully scanned: 1 file or folder was skipped — 1 timed out. See the log for details."
+    )
+
+
+@pytest.mark.unit
+def test_incomplete_summary_is_none_when_everything_finished() -> None:
+    assert _incomplete_summary(IncompleteWork()) is None
+
+
+@pytest.mark.unit
+def test_failures_are_counted_without_report_incomplete() -> None:
+    """Failures arrive with results, so they are visible even if the run ends abnormally."""
+    display = ProgressDisplay()
+    display.update({"tasks_failed": 1})
+    assert display.incomplete == IncompleteWork(failed=1)

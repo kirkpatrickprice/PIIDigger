@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections
 import sys
 import time
+from dataclasses import dataclass
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -40,6 +41,48 @@ def _fmt_bytes(n: int) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024.0
     return f"{value:.1f} EB"
+
+
+@dataclass(frozen=True)
+class IncompleteWork:
+    """Work a scan did not finish, for the end-of-scan summary.
+
+    Each field counts files, folders or archive members:
+
+    * failed: the handler returned an error, for example access denied or an
+      unreadable file.
+    * timed_out: ran past its deadline and was stopped.
+    * abandoned: its worker crashed on every attempt the retry budget allowed.
+    * unfinished: still outstanding when the scan stopped, usually because it
+      was interrupted.
+
+    A dataclass rather than a Pydantic model: the coordinator computes every
+    count from its own bookkeeping.
+    """
+
+    failed: int = 0
+    timed_out: int = 0
+    abandoned: int = 0
+    unfinished: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.failed + self.timed_out + self.abandoned + self.unfinished
+
+
+def _incomplete_summary(work: IncompleteWork) -> str | None:
+    """One plain-language line naming what was not scanned, or None if nothing."""
+    if not work.total:
+        return None
+    reasons = [
+        (work.failed, "failed with an error"),
+        (work.timed_out, "timed out"),
+        (work.abandoned, "abandoned after repeated worker crashes"),
+        (work.unfinished, "unfinished when the scan stopped"),
+    ]
+    detail = ", ".join(f"{n:,} {why}" for n, why in reasons if n)
+    noun = "file or folder was" if work.total == 1 else "files or folders were"
+    return f"Not fully scanned: {work.total:,} {noun} skipped — {detail}. See the log for details."
 
 
 def _fmt_eta(seconds: float) -> str:
@@ -82,6 +125,13 @@ class ProgressDisplay:
         # display counter.
         self._tasks_completed: int = 0
         self._tasks_pending: int = 0
+        # Incomplete work.  Failures arrive through update(); the rest is only
+        # known once the run ends, via report_incomplete().
+        self._tasks_failed: int = 0
+        self._timed_out: int = 0
+        self._abandoned: int = 0
+        self._unfinished: int = 0
+        self._interrupted: bool = False
         self._scan_start: float = time.monotonic()
 
         self._bars: Progress | None = None
@@ -217,15 +267,18 @@ class ProgressDisplay:
 
     def update(self, counters: dict[str, int]) -> None:
         """Accumulate counters and refresh the display.  No-op when not a TTY."""
-        # tasks_completed is cumulative; tasks_pending is a snapshot — replace,
-        # not add.  Neither belongs in self._counters (not display values).
+        # tasks_completed and tasks_failed are cumulative; tasks_pending is a
+        # snapshot — replace, not add.  None of them belongs in self._counters:
+        # they are not display values.
         if "tasks_completed" in counters:
             self._tasks_completed += counters["tasks_completed"]
         if "tasks_pending" in counters:
             self._tasks_pending = counters["tasks_pending"]
+        if "tasks_failed" in counters:
+            self._tasks_failed += counters["tasks_failed"]
 
         for key, val in counters.items():
-            if key not in ("tasks_completed", "tasks_pending"):
+            if key not in ("tasks_completed", "tasks_pending", "tasks_failed"):
                 self._counters[key] = self._counters.get(key, 0) + val
 
         bars = self._bars
@@ -276,8 +329,34 @@ class ProgressDisplay:
         self._events.append((level, message))
         self._rebuild_live()
 
+    def report_incomplete(self, *, timed_out: int, abandoned: int, unfinished: int, interrupted: bool) -> None:
+        """Record the work the run could not finish, for the summary stop() prints.
+
+        Called once by the coordinator, after the drain loop and before stop().
+        Failures are not passed here: they are counted as their results arrive.
+        """
+        self._timed_out = timed_out
+        self._abandoned = abandoned
+        self._unfinished = unfinished
+        self._interrupted = interrupted
+
+    @property
+    def incomplete(self) -> IncompleteWork:
+        """Everything the scan did not finish, as currently known."""
+        return IncompleteWork(
+            failed=self._tasks_failed,
+            timed_out=self._timed_out,
+            abandoned=self._abandoned,
+            unfinished=self._unfinished,
+        )
+
     def stop(self) -> None:
-        """Close the rich.Live display and print a plain-text summary to stdout."""
+        """Close the rich.Live display and print a plain-text summary to stdout.
+
+        The first line gives the totals.  A second line appears only when some
+        work did not complete, so a partial scan cannot be mistaken for a full
+        one.
+        """
         live = self._live
         if self._is_tty and live is not None:
             live.stop()
@@ -288,8 +367,19 @@ class ProgressDisplay:
                 continue
             parts.append(f"{k}={_fmt_bytes(v)}" if "bytes" in k else f"{k}={v:,}")
 
-        summary = "Scan complete. " + ("  ".join(parts) if parts else "No results.")
-        if self._is_tty:
-            self._console.print(summary)
+        incomplete = self.incomplete
+        if self._interrupted:
+            heading = "Scan interrupted."
+        elif incomplete.unfinished:
+            heading = "Scan stopped early."
         else:
-            print(summary, file=sys.stdout)  # noqa: T201 — intentional user-facing output
+            heading = "Scan complete."
+        lines = [f"{heading} " + ("  ".join(parts) if parts else "No results.")]
+        if (detail := _incomplete_summary(incomplete)) is not None:
+            lines.append(detail)
+
+        for line in lines:
+            if self._is_tty:
+                self._console.print(line)
+            else:
+                print(line, file=sys.stdout)  # noqa: T201 — intentional user-facing output
