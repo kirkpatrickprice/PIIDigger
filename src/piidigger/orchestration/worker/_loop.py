@@ -19,10 +19,6 @@ from piidigger.orchestration.worker._scan_file import handle_scan_file
 
 type _HandlerFn = Callable[[Task, WorkerContext, logging.Logger], TaskResult]
 
-# Maximum number of times a crash-orphaned task is re-queued before the
-# coordinator synthesises a permanent error result for it.
-MAX_RETRIES: int = 3
-
 
 def _handle_noop(task: Task, _ctx: WorkerContext, logger: logging.Logger) -> TaskResult:  # noqa: ARG001
     """Return an ok result; used only for integration testing.

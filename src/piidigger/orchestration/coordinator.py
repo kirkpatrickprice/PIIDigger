@@ -15,7 +15,8 @@ from piidigger.models.tasks import Task, TaskResult, TaskStarted, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
 from piidigger.orchestration.progress import ProgressDisplay
-from piidigger.orchestration.worker import MAX_RETRIES, broadcast_shutdown, join_workers, worker_loop
+from piidigger.orchestration.registry import MAX_RETRIES
+from piidigger.orchestration.worker import broadcast_shutdown, join_workers, worker_loop
 
 # How often (seconds) the coordinator checks for worker deadline violations
 # when the result queue is empty.
@@ -35,6 +36,10 @@ class CoordinatorResult:
 
     The coordinator deliberately does not choose exit codes itself — that is a
     CLI concern, and run_scan owns the mapping.
+
+    A dataclass rather than a Pydantic model: both fields are computed by
+    run_coordinator from its own local state and read by run_scan in the same
+    process, so there is no external input to validate and nothing to serialise.
 
     unfinished > 0 means the loop exited with work still outstanding.  On a clean
     run that is impossible; it is reported rather than swallowed so a truncated

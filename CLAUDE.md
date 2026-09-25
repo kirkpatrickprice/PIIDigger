@@ -114,8 +114,11 @@ The legacy `src/piidigger/**` tree is exempted from ruff's `N` ruleset until the
 - `orchestration.*` is held to `mypy --strict`. All other packages are currently exempted (see `pyproject.toml [[tool.mypy.overrides]]`). Delete a module from the ignore list as you add full type coverage.
 
 ### Models
-- **Pydantic v2** for all data models (`Task`, `TaskResult`, `Config`, `ResultRecord`, payload types).
-- **`dataclass(frozen=True)`** for `WorkerContext` only — it holds `mp.Queue`/`mp.Event` which Pydantic cannot meaningfully validate. Document the reason at the class definition.
+- The deciding question is **whether any field's value originates outside our own code**.
+- **Pydantic v2** when it does: `Config` (TOML), `Task` / payload types (filesystem metadata), `TaskResult` and `ResultRecord` (file content).
+- **`dataclass`** when every field is a value we generated ourselves: `TaskStarted`, `ShutdownSentinel`, `CoordinatorResult`, `TaskRecord`, and `WorkerContext` (which also holds `mp.Queue`/`mp.Event`, which Pydantic cannot meaningfully validate). Crossing the process boundary is not the test — `TaskStarted` crosses it and is still a dataclass.
+- Use `frozen=True` unless the object is mutated in place (e.g. `TaskRecord`). Use `slots=True` for high-volume types.
+- Document the reason for the choice at the class definition.
 
 ### Multiprocessing / pickling (Windows `spawn`)
 - `WorkerContext` must contain only pickle-safe members. `mp.Queue`, `mp.Event`, and a plain Pydantic `Config` are safe. A live `logging.Logger` or `rich.Console` is **not** — build those inside each process.

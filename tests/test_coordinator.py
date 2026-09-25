@@ -26,7 +26,8 @@ from piidigger.orchestration.coordinator import (
 )
 from piidigger.orchestration.logging_setup import start_listener, stop_listener
 from piidigger.orchestration.progress import ProgressDisplay
-from piidigger.orchestration.worker import MAX_RETRIES, broadcast_shutdown, join_workers, start_worker_pool, worker_loop
+from piidigger.orchestration.registry import MAX_RETRIES
+from piidigger.orchestration.worker import broadcast_shutdown, join_workers, start_worker_pool, worker_loop
 
 # ---------------------------------------------------------------------------
 # Shared helpers
