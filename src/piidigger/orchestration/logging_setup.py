@@ -6,6 +6,9 @@ import multiprocessing as mp
 from pathlib import Path
 from typing import Any
 
+# How long stop_listener() waits for queued log records to be written out.
+_LISTENER_STOP_TIMEOUT: float = 5.0
+
 
 def build_worker_logger(log_queue: mp.Queue[Any], name: str = "worker") -> logging.Logger:
     """Return a logger that sends all records to log_queue via QueueHandler.
@@ -66,9 +69,26 @@ def start_listener(
     return listener
 
 
-def stop_listener(listener: logging.handlers.QueueListener) -> None:
-    """Stop the QueueListener; blocks until all queued records are written."""
-    listener.stop()
+def stop_listener(listener: logging.handlers.QueueListener, timeout: float = _LISTENER_STOP_TIMEOUT) -> bool:
+    """Stop the QueueListener, waiting at most timeout seconds.  True if it stopped.
+
+    QueueListener.stop() joins its thread with no timeout.  If a worker was
+    killed partway through writing a log record, the listener thread blocks
+    forever reading the half-written record, and so would stop().  Teardown
+    would then hang after the scan had finished.  Here we give up after timeout
+    instead.  The listener thread is a daemon, so it cannot keep the process
+    alive.
+
+    Safe to call more than once: after a stop, or after giving up, later calls
+    return at once.
+    """
+    thread = listener._thread
+    if thread is None:
+        return True
+    listener.enqueue_sentinel()
+    thread.join(timeout)
+    listener._thread = None  # stopped, or given up on: either way, done waiting
+    return not thread.is_alive()
 
 
 def _pkg_from_path(filename: str) -> str | None:

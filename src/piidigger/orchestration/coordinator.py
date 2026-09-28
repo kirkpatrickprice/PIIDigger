@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import queue
+import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -612,7 +613,14 @@ def _teardown(
     *,
     interrupted: bool,
 ) -> None:
-    """Stop the workers, flush the sinks, and stop the listener and display."""
+    """Stop the workers, flush the sinks, and stop the listener and display.
+
+    Normal completion and CTRL-C take the same path; only the join budget
+    differs.  Workers are asked to stop, not killed outright.  Killing a worker
+    can cut a queue message in half, and a half-written message can hang
+    whoever reads it next.  pool.join() still escalates to terminate() and
+    kill() for any worker that does not exit within the budget.
+    """
     if interrupted:
         # Cancel feeder-thread joins NOW, before any teardown step that could
         # block.  If a second CTRL-C breaks out of this function, the atexit
@@ -621,12 +629,17 @@ def _teardown(
         ctx.task_queue.cancel_join_thread()
         ctx.result_queue.cancel_join_thread()
         ctx.log_queue.cancel_join_thread()
-        pool.terminate_all()
-    else:
-        # One sentinel per process the pool knows about, stragglers included.
-        # Too many is harmless; too few leaves a worker blocked in get() forever.
-        broadcast_shutdown(ctx.task_queue, len(pool.processes))
 
+    # Set before the sentinels go out.  Sentinels queue up behind anything
+    # still in the task queue; with stop_event set, a worker that takes one of
+    # those leftovers exits instead of running it.
+    ctx.stop_event.set()
+    # One sentinel per process the pool knows about, stragglers included, so
+    # every worker blocked in get() wakes.  Too many is harmless; too few leaves
+    # a worker blocked forever.
+    broadcast_shutdown(ctx.task_queue, len(pool.processes))
+
+    listener_stopped = True
     try:
         if interrupted:
             progress.log_event("INFO", "Waiting for workers to stop…")
@@ -641,7 +654,7 @@ def _teardown(
         if interrupted:
             progress.log_event("INFO", "Saving results to output files…")
         _flush_sinks(sinks, logger)
-        stop_listener(listener)
+        listener_stopped = stop_listener(listener)
 
     except KeyboardInterrupt:
         # Second CTRL-C: force-quit without waiting for a clean teardown.
@@ -653,6 +666,9 @@ def _teardown(
 
     finally:
         progress.stop()
+        if not listener_stopped:
+            # Too late for the log itself, whose listener is what failed.
+            print("warning: the log listener did not stop in time; the log file may be incomplete", file=sys.stderr)  # noqa: T201
 
 
 # ---------------------------------------------------------------------------

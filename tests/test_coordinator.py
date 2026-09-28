@@ -7,6 +7,7 @@ Windows spawn can import them without re-running test code.
 from __future__ import annotations
 
 import logging
+import logging.handlers
 import multiprocessing as mp
 import os
 import signal
@@ -17,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+import piidigger.orchestration.coordinator as coord_mod
 from piidigger.models.config import Config
 from piidigger.models.tasks import ShutdownSentinel, Task, TaskResult, TaskStarted, TaskType, WorkerReady
 from piidigger.orchestration.context import WorkerContext
@@ -751,3 +753,60 @@ def test_breaker_trip_with_healthy_workers_left_is_not_a_failed_run(tmp_path: Pa
     assert not pool.replacing, "the breaker never tripped, so this test proved nothing"
     assert outcome == CoordinatorResult(interrupted=False, unfinished=0, workers_failed=False)
     assert progress._tasks_completed == 4
+
+
+# ---------------------------------------------------------------------------
+# Teardown
+# ---------------------------------------------------------------------------
+
+
+def _teardown_fixture(tmp_path: Path) -> tuple[WorkerContext, WorkerPool, logging.handlers.QueueListener]:
+    """A context, a pool of one real worker already waiting for work, and a listener."""
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    log_queue: mp.Queue[object] = mp.Queue()
+    ctx = _make_ctx(task_queue, result_queue, log_queue, mp.Event(), [])
+    listener = start_listener(log_queue, tmp_path / "teardown.log", "DEBUG")
+    pool = _start_pool(ctx, 1)
+    assert isinstance(result_queue.get(timeout=30), WorkerReady)
+    return ctx, pool, listener
+
+
+@pytest.mark.integration
+def test_leftover_queued_work_does_not_delay_shutdown(tmp_path: Path) -> None:
+    """A stale task ahead of the shutdown sentinel must not run first.
+
+    When a re-dispatched task's twin finishes first, its copy can still be in
+    the queue at teardown, ahead of the sentinels.  Running it would eat the
+    join budget and end with the worker being killed.  With stop_event set, the
+    worker drops it and exits.  The stale task here would take 30 s; the join
+    budget is 5 s.
+    """
+    ctx, pool, listener = _teardown_fixture(tmp_path)
+    (worker,) = pool.processes
+    ctx.stop_event.set()  # as teardown does, before the leftover is taken
+    ctx.task_queue.put(Task(task_type=TaskType.NOOP, payload={"delay_seconds": 30}))
+
+    started = time.monotonic()
+    coord_mod._teardown(ctx, pool, listener, [], _non_tty_progress(), _POOL_LOG, interrupted=False)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 4.0, f"teardown took {elapsed:.1f}s: the leftover task ran instead of being dropped"
+    assert worker.exitcode == 0, "the worker should have exited on its own, not been killed"
+
+
+@pytest.mark.integration
+def test_interrupt_asks_workers_to_stop_rather_than_killing_them(tmp_path: Path) -> None:
+    """CTRL-C takes the same path as normal completion, just with a shorter budget.
+
+    Killing every worker immediately, as the old interrupt path did, risks
+    cutting a queue message in half.  An idle worker must exit on its sentinel
+    with a clean exit code.
+    """
+    ctx, pool, listener = _teardown_fixture(tmp_path)
+    (worker,) = pool.processes
+
+    coord_mod._teardown(ctx, pool, listener, [], _non_tty_progress(), _POOL_LOG, interrupted=True)
+
+    assert ctx.stop_event.is_set()
+    assert worker.exitcode == 0, f"worker was killed (exit code {worker.exitcode}) instead of stopping cleanly"

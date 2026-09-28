@@ -406,3 +406,66 @@ def test_worker_checks_in_before_starting_a_waiting_task() -> None:
     assert isinstance(first, WorkerReady)
     assert isinstance(second, TaskStarted)
     assert second.task_id == task.task_id
+
+
+# ---------------------------------------------------------------------------
+# stop_event and the bounded listener stop
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_worker_drops_a_task_taken_after_stop_is_requested() -> None:
+    """Once teardown has begun, a queued task is leftover work: exit, do not run it."""
+    ctx = _thread_ctx()
+    worker = threading.Thread(target=worker_loop, args=(ctx,), daemon=True)
+    worker.start()
+    assert isinstance(ctx.result_queue.get(timeout=10), WorkerReady)  # now waiting in get()
+
+    ctx.stop_event.set()
+    ctx.task_queue.put(Task(task_type=TaskType.NOOP, payload={"delay_seconds": 30}))
+    worker.join(timeout=10)
+
+    assert not worker.is_alive()
+    with pytest.raises(queue.Empty):
+        ctx.result_queue.get(timeout=0.5)  # no TaskStarted: the task never ran
+
+
+class _BlockingHandler(logging.Handler):
+    """A handler that blocks until released, standing in for a listener stuck on a half-written record."""
+
+    def __init__(self, release: threading.Event) -> None:
+        super().__init__()
+        self.release = release
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.release.wait()
+
+
+@pytest.mark.unit
+def test_stop_listener_gives_up_instead_of_hanging() -> None:
+    release = threading.Event()
+    log_queue: queue.Queue[logging.LogRecord] = queue.Queue()
+    listener = logging.handlers.QueueListener(log_queue, _BlockingHandler(release))
+    listener.start()
+    log_queue.put(logging.makeLogRecord({"msg": "stuck"}))
+    try:
+        started = time.monotonic()
+        stopped = stop_listener(listener, timeout=0.2)
+        elapsed = time.monotonic() - started
+
+        assert stopped is False
+        assert elapsed < 2.0, "stop_listener waited far longer than its timeout"
+        assert stop_listener(listener, timeout=0.2) is True, "a second call must not wait again"
+    finally:
+        release.set()
+
+
+@pytest.mark.unit
+def test_stop_listener_writes_out_queued_records(tmp_path: Path) -> None:
+    log_file = tmp_path / "ok.log"
+    log_queue: mp.Queue[object] = mp.Queue()
+    listener = start_listener(log_queue, log_file, "DEBUG")
+    build_worker_logger(log_queue, name="test-stop-listener").warning("last words")
+
+    assert stop_listener(listener) is True
+    assert "last words" in log_file.read_text()

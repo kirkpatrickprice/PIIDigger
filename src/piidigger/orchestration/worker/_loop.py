@@ -95,7 +95,8 @@ def worker_loop(ctx: WorkerContext) -> None:
     """Main loop for each worker process.
 
     Pulls tasks from ctx.task_queue, dispatches them, and puts results on
-    ctx.result_queue.  Exits cleanly on ShutdownSentinel or KeyboardInterrupt.
+    ctx.result_queue.  Exits cleanly on ShutdownSentinel, on KeyboardInterrupt,
+    or on taking any item once ctx.stop_event is set.
     """
     logger = build_worker_logger(ctx.log_queue, f"worker-{os.getpid()}")
     setup_warning_capture(ctx.log_queue)
@@ -110,6 +111,12 @@ def worker_loop(ctx: WorkerContext) -> None:
             item: Any = ctx.task_queue.get()
             if isinstance(item, ShutdownSentinel):
                 logger.debug("received SHUTDOWN; exiting")
+                break
+            if ctx.stop_event.is_set():
+                # Teardown has begun, so nothing still in the queue is wanted:
+                # it is a leftover re-dispatched copy, or work the user
+                # interrupted.  Running it would only delay shutdown.
+                logger.debug("stop requested; dropping queued task and exiting")
                 break
             task: Task = item
             ctx.result_queue.put(TaskStarted(task_id=task.task_id, worker_pid=os.getpid()))
