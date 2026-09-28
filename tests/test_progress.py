@@ -177,3 +177,18 @@ def test_failures_are_counted_without_report_incomplete() -> None:
     display = ProgressDisplay()
     display.update({"tasks_failed": 1})
     assert display.incomplete == IncompleteWork(failed=1)
+
+
+@pytest.mark.unit
+def test_workers_failing_to_start_is_not_reported_as_complete(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Nothing was really scanned, even though no work was left outstanding."""
+    display = _non_tty(monkeypatch)
+    display.report_incomplete(timed_out=0, abandoned=2, unfinished=0, interrupted=False, workers_failed=True)
+    display.stop()
+
+    first, second = capsys.readouterr().out.splitlines()
+    assert first.startswith("Scan stopped early: workers could not start.")
+    assert "2 abandoned after repeated worker crashes" in second

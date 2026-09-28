@@ -84,7 +84,7 @@ class TaskRecord:
 
         A queued task has no deadline because no worker has claimed it yet.
         That is precisely why the deadline sweep alone cannot recover a task
-        lost before its heartbeat — quiescence detection covers that case.
+        lost before its heartbeat — the lost-task sweep covers that case.
         """
         if self.started_at is None:
             return None

@@ -11,6 +11,13 @@ something every call site has to remember:
 * A worker is never silently forgotten.  Stopping escalates from terminate() to
   kill(), and a process that survives both is kept as a straggler rather than
   dropped, so teardown can still see it.
+* Replacement stops when workers cannot start.  A worker that dies before
+  checking in never came up, and replacing it just repeats the failure every
+  sweep, forever.
+
+The pool also records which workers have checked in, meaning sent WorkerReady.
+That lives here, next to the process it describes, so a new worker always
+starts unchecked, even if the OS hands it a pid a dead worker once had.
 
 Processes are reached through the ProcessLike protocol and created by an
 injected factory, so the pool's bookkeeping is unit-testable with fakes.
@@ -29,6 +36,11 @@ from piidigger.orchestration.worker import worker_loop
 
 # How long to wait for a process to exit after each stop signal.
 _STOP_GRACE_SECONDS: float = 2.0
+
+# Consecutive workers that may die before checking in before the pool stops
+# replacing them.  A worker that never checks in did not come up at all — a
+# broken install, a quarantined DLL, an import error.
+_MAX_STARTUP_FAILURES: int = 3
 
 
 class ProcessLike(Protocol):
@@ -79,6 +91,9 @@ class WorkerPool:
         self._grace = grace
         self._active: dict[int, ProcessLike] = {}
         self._stragglers: list[ProcessLike] = []
+        self._not_checked_in: set[int] = set()  # active workers yet to send WorkerReady
+        self._startup_failures = 0  # consecutive deaths of workers that never checked in
+        self._replacing = True
 
     # -- inspection ---------------------------------------------------------
 
@@ -101,6 +116,29 @@ class WorkerPool:
         """Processes that survived both terminate() and kill()."""
         return list(self._stragglers)
 
+    @property
+    def replacing(self) -> bool:
+        """False once too many workers in a row died before checking in."""
+        return self._replacing
+
+    def all_checked_in(self) -> bool:
+        """True when every active worker has checked in.
+
+        Vacuously true with no active workers, which is correct for the
+        lost-task sweep: with no workers, nothing can be holding a task.
+        """
+        return not self._not_checked_in
+
+    def check_in(self, pid: int) -> None:
+        """Record that a worker is up.  Ignored for a pid not in the pool.
+
+        Called for WorkerReady, and also for TaskStarted: a worker that has
+        started a task has certainly come up.
+        """
+        if pid in self._not_checked_in:
+            self._not_checked_in.discard(pid)
+            self._startup_failures = 0
+
     # -- lifecycle ----------------------------------------------------------
 
     def start(self, n: int) -> None:
@@ -120,9 +158,10 @@ class WorkerPool:
         replaced, which is the double-replacement guard — or because starting
         the replacement failed.  Safe to call on a worker that has already died.
         """
-        proc = self._active.pop(pid, None)
+        proc = self._active.get(pid)
         if proc is None:
             return None
+        self._forget(pid)
         self._stop([proc])
         return self._spawn_replacement()
 
@@ -134,8 +173,11 @@ class WorkerPool:
         signature of a file that crashes a C parser.
         """
         dead = [(pid, proc) for pid, proc in self._active.items() if not proc.is_alive()]
+        # Count startup failures for the whole batch before replacing any of it,
+        # so the breaker applies to this batch rather than the next one.
         for pid, _ in dead:
-            del self._active[pid]
+            if self._forget(pid):
+                self._note_startup_failure()
         for _ in dead:
             self._spawn_replacement()
         return [(pid, proc.exitcode) for pid, proc in dead]
@@ -166,7 +208,7 @@ class WorkerPool:
         stuck = [(pid, proc) for pid, proc in self._active.items() if proc.is_alive()]
         for pid, _ in stuck:
             self._log.warning("worker pid=%d did not exit within %.1fs; stopping it", pid, timeout)
-            del self._active[pid]
+            self._forget(pid)
         self._stop([proc for _, proc in stuck])
 
     # -- internals ----------------------------------------------------------
@@ -175,6 +217,23 @@ class WorkerPool:
         if proc.pid is None:
             raise RuntimeError("worker process has no pid; it was not started")
         self._active[proc.pid] = proc
+        self._not_checked_in.add(proc.pid)
+
+    def _forget(self, pid: int) -> bool:
+        """Drop a worker from the active set.  True if it never checked in."""
+        del self._active[pid]
+        never_checked_in = pid in self._not_checked_in
+        self._not_checked_in.discard(pid)
+        return never_checked_in
+
+    def _note_startup_failure(self) -> None:
+        self._startup_failures += 1
+        if self._replacing and self._startup_failures >= _MAX_STARTUP_FAILURES:
+            self._replacing = False
+            self._log.error(
+                "%d workers in a row died before checking in; no longer replacing workers",
+                self._startup_failures,
+            )
 
     def _spawn_replacement(self) -> ProcessLike | None:
         """Start one replacement worker, logging rather than raising on failure.
@@ -183,7 +242,11 @@ class WorkerPool:
         process limit or Windows commit charge.  Letting that escape the
         coordinator loop would abort the whole scan over one lost worker.
         Running one worker short is the better outcome.
+
+        Returns None without trying once replacement has been switched off.
         """
+        if not self._replacing:
+            return None
         try:
             proc = self._spawn()
             self._add(proc)

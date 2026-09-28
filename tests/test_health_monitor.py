@@ -13,7 +13,7 @@ import logging
 
 import pytest
 
-from piidigger.models.tasks import Task, TaskType
+from piidigger.models.tasks import Task, TaskStarted, TaskType, WorkerReady
 from piidigger.orchestration.coordinator import HealthMonitor, SweepResult
 from piidigger.orchestration.pool import WorkerPool
 from piidigger.orchestration.registry import MAX_RETRIES, TaskRegistry
@@ -42,8 +42,19 @@ class Harness:
         task = Task(task_type=TaskType.NOOP, timeout_seconds=timeout)
         self.registry.enqueue(task)
         assert worker.pid is not None
-        self.registry.record_start(task.task_id, worker.pid)
+        self.heartbeat(task, worker.pid)
         return task
+
+    def heartbeat(self, task: Task, pid: int) -> None:
+        """Deliver a TaskStarted the way the drain loop does: observe, then record."""
+        message = TaskStarted(task_id=task.task_id, worker_pid=pid)
+        self.monitor.observe(message)
+        self.registry.record_start(message.task_id, message.worker_pid)
+
+    def all_checked_in(self) -> None:
+        """Every live worker sends WorkerReady, as a real worker does on startup."""
+        for pid in self.pool.pids():
+            self.monitor.observe(WorkerReady(worker_pid=pid))
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +227,7 @@ def test_late_heartbeat_from_an_already_reaped_worker_is_redispatched() -> None:
     assert first.redispatched == []
 
     assert doomed.pid is not None
-    h.registry.record_start(task.task_id, doomed.pid)
+    h.heartbeat(task, doomed.pid)
     second = h.monitor.tick()
 
     assert [r.task_id for r in second.redispatched] == [task.task_id]
@@ -236,7 +247,7 @@ def test_poison_task_is_abandoned_within_the_retry_budget() -> None:
     ticks = 0
     while task.task_id in h.registry and ticks < 50:
         worker_pid = next(iter(h.pool.pids()))
-        h.registry.record_start(task.task_id, worker_pid)
+        h.heartbeat(task, worker_pid)
         next(p for p in h.spawner.spawned if p.pid == worker_pid).crash()
         sweep = h.monitor.tick()
         ticks += 1
@@ -256,3 +267,167 @@ def test_poison_task_is_abandoned_within_the_retry_budget() -> None:
 def test_empty_sweep_result_is_falsy() -> None:
     assert not SweepResult(now=0.0)
     assert SweepResult(now=0.0, crashed=[(1, -11)])
+
+
+# ---------------------------------------------------------------------------
+# Lost-task sweep — finding tasks lost before their heartbeat
+# ---------------------------------------------------------------------------
+
+
+def _lost(h: Harness) -> Task:
+    """A task that is outstanding but that no worker will ever report starting."""
+    task = Task(task_type=TaskType.NOOP)
+    h.registry.enqueue(task)
+    return task
+
+
+@pytest.mark.unit
+def test_lost_task_is_redispatched_after_two_quiet_ticks() -> None:
+    """The defect 2 guard, as a unit test.
+
+    The old sweep that was meant to catch this case could never run.  Here the
+    task is QUEUED, every worker has checked in and none is running anything,
+    and nothing arrives for two ticks: the task must go back on the queue,
+    under the same id.
+    """
+    h = Harness()
+    task = _lost(h)
+    h.all_checked_in()
+    h.clock.advance(3.0)
+
+    first = h.monitor.tick()
+    second = h.monitor.tick()
+
+    assert first.lost == []
+    assert [r.task_id for r in second.lost] == [task.task_id]
+    record = h.registry.get(task.task_id)
+    assert record is not None
+    assert record.attempt == 1
+    assert h.dispatched == [task, task]
+
+
+@pytest.mark.unit
+def test_lost_task_sweep_waits_for_every_live_worker_to_check_in() -> None:
+    """A worker that has not checked in may still be starting up, about to take the task."""
+    h = Harness()
+    _lost(h)
+    silent = h.worker(2).pid
+    for pid in h.pool.pids() - {silent}:
+        h.monitor.observe(WorkerReady(worker_pid=pid))
+    h.clock.advance(3.0)
+
+    sweeps = [h.monitor.tick() for _ in range(4)]
+
+    assert all(s.lost == [] for s in sweeps)
+
+
+@pytest.mark.unit
+def test_lost_task_sweep_does_not_fire_while_a_task_is_running() -> None:
+    h = Harness()
+    h.run(h.worker(0))
+    _lost(h)
+    for pid in h.pool.pids() - {h.worker(0).pid}:
+        h.monitor.observe(WorkerReady(worker_pid=pid))
+    h.clock.advance(3.0)
+
+    sweeps = [h.monitor.tick() for _ in range(4)]
+
+    assert all(s.lost == [] for s in sweeps)
+
+
+@pytest.mark.unit
+def test_any_message_restarts_the_quiet_count() -> None:
+    h = Harness()
+    task = _lost(h)
+    h.all_checked_in()
+    h.clock.advance(3.0)
+
+    assert h.monitor.tick().lost == []  # quiet tick 1
+    h.monitor.observe(WorkerReady(worker_pid=h.worker(0).pid or 0))
+    assert h.monitor.tick().lost == []  # counting restarted: quiet tick 1 again
+    assert [r.task_id for r in h.monitor.tick().lost] == [task.task_id]
+
+
+@pytest.mark.unit
+def test_lost_task_sweep_waits_for_the_minimum_task_age() -> None:
+    """A task only just enqueued may simply not have been picked up yet."""
+    h = Harness()
+    task = _lost(h)
+    h.all_checked_in()
+    h.clock.advance(1.0)  # younger than LOST_TASK_MIN_AGE
+
+    assert h.monitor.tick().lost == []
+    assert h.monitor.tick().lost == []
+
+    h.clock.advance(2.0)
+    assert h.monitor.tick().lost == []
+    assert [r.task_id for r in h.monitor.tick().lost] == [task.task_id]
+
+
+@pytest.mark.unit
+def test_a_freshly_spawned_worker_blocks_the_lost_task_sweep_until_it_checks_in() -> None:
+    """The spawn-latency guard: a booting replacement might be about to take the task."""
+    h = Harness()
+    task = _lost(h)
+    h.all_checked_in()
+    h.clock.advance(3.0)
+    h.worker(0).crash()
+
+    assert h.monitor.tick().crashed  # replacement spawned; it has said nothing yet
+    assert h.monitor.tick().lost == []
+    assert h.monitor.tick().lost == []
+
+    h.all_checked_in()  # the replacement checks in
+    assert h.monitor.tick().lost == []
+    assert [r.task_id for r in h.monitor.tick().lost] == [task.task_id]
+
+
+@pytest.mark.unit
+def test_lost_task_is_abandoned_once_its_budget_is_spent() -> None:
+    h = Harness(max_retries=0)
+    task = _lost(h)
+    h.all_checked_in()
+    h.clock.advance(3.0)
+
+    h.monitor.tick()
+    sweep = h.monitor.tick()
+
+    assert [r.task_id for r in sweep.abandoned] == [task.task_id]
+    assert len(h.registry) == 0
+    assert h.registry.count_abandoned("crashed") == 1
+
+
+@pytest.mark.unit
+def test_registry_drains_with_no_workers_at_all() -> None:
+    """The anti-hang guarantee: with no worker left, the scan still ends.
+
+    No worker means nothing can hold a task, so every task is lost; each
+    firing spends one retry, and exhausted tasks are abandoned.
+    """
+    h = Harness(workers=0)
+    tasks = [_lost(h) for _ in range(3)]
+
+    ticks = 0
+    while h.registry and ticks < 100:
+        h.clock.advance(1.5)
+        h.monitor.tick()
+        ticks += 1
+
+    assert len(h.registry) == 0
+    assert h.registry.count_abandoned("crashed") == len(tasks)
+    assert ticks < 100
+
+
+@pytest.mark.unit
+def test_breaker_trip_is_reported_once() -> None:
+    """Workers that die before saying anything stop being replaced, and the sweep says so."""
+    h = Harness(workers=3)
+    for proc in list(h.spawner.spawned):
+        proc.crash(1)
+
+    sweep = h.monitor.tick()
+
+    assert sweep.stopped_replacing
+    assert not h.pool.replacing
+    assert h.pool.size == 0
+    assert not h.monitor.tick().stopped_replacing, "reported on the tick it happened, not again"

@@ -335,7 +335,7 @@ def test_queued_task_has_no_deadline_and_never_expires() -> None:
     """An unclaimed task cannot be judged hung — nothing has started it.
 
     This is exactly why the deadline sweep alone cannot recover a task lost
-    before its heartbeat, and why quiescence detection is a separate mechanism.
+    before its heartbeat, and why the lost-task sweep is a separate mechanism.
     """
     clock = FakeClock()
     reg, _ = _registry(clock)

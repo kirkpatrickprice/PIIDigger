@@ -132,6 +132,7 @@ class ProgressDisplay:
         self._abandoned: int = 0
         self._unfinished: int = 0
         self._interrupted: bool = False
+        self._workers_failed: bool = False
         self._scan_start: float = time.monotonic()
 
         self._bars: Progress | None = None
@@ -329,7 +330,15 @@ class ProgressDisplay:
         self._events.append((level, message))
         self._rebuild_live()
 
-    def report_incomplete(self, *, timed_out: int, abandoned: int, unfinished: int, interrupted: bool) -> None:
+    def report_incomplete(
+        self,
+        *,
+        timed_out: int,
+        abandoned: int,
+        unfinished: int,
+        interrupted: bool,
+        workers_failed: bool = False,
+    ) -> None:
         """Record the work the run could not finish, for the summary stop() prints.
 
         Called once by the coordinator, after the drain loop and before stop().
@@ -339,6 +348,7 @@ class ProgressDisplay:
         self._abandoned = abandoned
         self._unfinished = unfinished
         self._interrupted = interrupted
+        self._workers_failed = workers_failed
 
     @property
     def incomplete(self) -> IncompleteWork:
@@ -370,6 +380,8 @@ class ProgressDisplay:
         incomplete = self.incomplete
         if self._interrupted:
             heading = "Scan interrupted."
+        elif self._workers_failed:
+            heading = "Scan stopped early: workers could not start."
         elif incomplete.unfinished:
             heading = "Scan stopped early."
         else:

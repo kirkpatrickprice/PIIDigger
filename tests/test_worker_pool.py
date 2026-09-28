@@ -13,7 +13,7 @@ import pytest
 
 from piidigger.orchestration import pool as pool_module
 from piidigger.orchestration.pool import WorkerPool, spawn_worker
-from tests._fakes import Spawner
+from tests._fakes import FakeProcess, Spawner
 
 _LOG = logging.getLogger("tests.worker_pool")
 
@@ -412,3 +412,141 @@ def test_terminate_all_signals_live_processes_only() -> None:
     assert dead.terminate_calls == 0
     assert all(p.terminate_calls == 1 for p in spawner.spawned[1:])
     assert len(spawner.spawned) == 3, "terminate_all must not start replacements"
+
+
+# ---------------------------------------------------------------------------
+# Check-in tracking
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_all_checked_in_requires_every_active_worker() -> None:
+    pool, spawner = _pool(2)
+    a, b = (p.pid for p in spawner.spawned)
+    assert a is not None and b is not None
+
+    assert not pool.all_checked_in()
+    pool.check_in(a)
+    assert not pool.all_checked_in()
+    pool.check_in(b)
+    assert pool.all_checked_in()
+
+
+@pytest.mark.unit
+def test_all_checked_in_is_true_with_no_workers() -> None:
+    """With no workers nothing can hold a task, which is what the lost-task sweep asks."""
+    pool = WorkerPool(Spawner(), logger=_LOG, grace=0.0)
+    assert pool.all_checked_in()
+
+
+@pytest.mark.unit
+def test_check_in_from_an_unknown_pid_is_ignored() -> None:
+    pool, _ = _pool(1)
+    pool.check_in(999_999)
+    assert not pool.all_checked_in()
+
+
+@pytest.mark.unit
+def test_replacement_must_check_in_even_when_the_os_reuses_a_pid() -> None:
+    """A new worker must not inherit a dead worker's check-in through its pid."""
+    spawner = Spawner()
+    pool = WorkerPool(spawner, logger=_LOG, grace=0.0)
+    pool.start(1)
+    old = spawner.spawned[0]
+    assert old.pid is not None
+    pool.check_in(old.pid)
+    reused_pid = old.pid
+
+    def spawn_with_reused_pid() -> FakeProcess:
+        proc = FakeProcess()
+        proc.pid = reused_pid
+        spawner.spawned.append(proc)
+        return proc
+
+    pool._spawn = spawn_with_reused_pid
+    old.crash()
+    pool.reap_dead()
+
+    assert pool.pids() == {reused_pid}
+    assert not pool.all_checked_in(), "the replacement has not checked in yet"
+
+
+# ---------------------------------------------------------------------------
+# Startup breaker
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_workers_dying_before_check_in_stop_being_replaced() -> None:
+    """Workers that die before checking in stop being replaced.
+
+    Without this, a broken install respawns workers every sweep, forever.
+    """
+    pool, spawner = _pool(3)
+    for proc in spawner.spawned:
+        proc.crash(1)
+
+    pool.reap_dead()
+
+    assert not pool.replacing
+    assert pool.size == 0
+    assert len(spawner.spawned) == 3, "no replacements once the breaker trips"
+
+
+@pytest.mark.unit
+def test_breaker_also_stops_deliberate_replacements() -> None:
+    pool, spawner = _pool(4)
+    for proc in spawner.spawned[:3]:
+        proc.crash(1)
+    pool.reap_dead()
+    survivor = spawner.spawned[3]
+    assert survivor.pid is not None
+
+    assert pool.replace(survivor.pid) is None
+    assert pool.size == 0
+
+
+@pytest.mark.unit
+def test_crashes_of_workers_that_had_started_do_not_count() -> None:
+    """A worker that checked in and then died is a crash, not a failed startup."""
+    pool, spawner = _pool(1)
+    for _ in range(10):
+        (pid,) = pool.pids()
+        pool.check_in(pid)
+        next(p for p in spawner.spawned if p.pid == pid).crash(-11)
+        pool.reap_dead()
+
+    assert pool.replacing
+    assert pool.size == 1
+
+
+@pytest.mark.unit
+def test_a_successful_startup_resets_the_count() -> None:
+    pool, spawner = _pool(1)
+
+    def crash_newest_unconfirmed() -> None:
+        (pid,) = pool.pids()
+        next(p for p in spawner.spawned if p.pid == pid).crash(1)
+        pool.reap_dead()
+
+    crash_newest_unconfirmed()
+    crash_newest_unconfirmed()
+    (pid,) = pool.pids()
+    pool.check_in(pid)  # this one came up fine
+    crash_newest_unconfirmed()  # it counts as started, so the count stays reset
+    crash_newest_unconfirmed()
+    crash_newest_unconfirmed()
+
+    assert pool.replacing
+
+
+@pytest.mark.unit
+def test_breaker_trip_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    pool, spawner = _pool(3)
+    for proc in spawner.spawned:
+        proc.crash(1)
+
+    with caplog.at_level(logging.ERROR, logger=_LOG.name):
+        pool.reap_dead()
+
+    assert "died before checking in" in caplog.text

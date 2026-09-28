@@ -52,6 +52,19 @@ class TaskStarted:
 
 
 @dataclass(frozen=True)
+class WorkerReady:
+    """Placed on result_queue once by each worker, when it has started up.
+
+    Not a TaskResult and not a heartbeat: it changes no task's state.  It lets
+    the coordinator tell a worker that is still starting from one that is
+    waiting for work.  Both are silent otherwise, and the lost-task sweep needs
+    to tell them apart.
+    """
+
+    worker_pid: int
+
+
+@dataclass(frozen=True)
 class ShutdownSentinel:
     """Placed on task_queue once per worker to signal graceful exit.
 

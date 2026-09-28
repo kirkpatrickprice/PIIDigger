@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import multiprocessing as mp
+import os
 import pickle
 import queue
 import threading
@@ -18,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from piidigger.models.config import Config
-from piidigger.models.tasks import SHUTDOWN, Task, TaskResult, TaskStarted, TaskType
+from piidigger.models.tasks import SHUTDOWN, Task, TaskResult, TaskStarted, TaskType, WorkerReady
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
 from piidigger.orchestration.pool import WorkerPool, spawn_worker
@@ -354,3 +355,54 @@ def test_pool_join_stops_a_real_process_that_outlives_the_budget() -> None:
 
     assert not proc.is_alive(), "join() did not stop a process that outlived its budget"
     assert pool.stragglers == []
+
+
+# ---------------------------------------------------------------------------
+# WorkerReady check-in
+# ---------------------------------------------------------------------------
+
+
+def _thread_ctx() -> WorkerContext:
+    return WorkerContext(
+        config=Config(),
+        task_queue=mp.Queue(),
+        result_queue=mp.Queue(),
+        log_queue=mp.Queue(),
+        stop_event=mp.Event(),
+    )
+
+
+@pytest.mark.unit
+def test_worker_checks_in_on_startup() -> None:
+    """A worker's first message says it is up, which is what the lost-task sweep relies on."""
+    ctx = _thread_ctx()
+    worker = threading.Thread(target=worker_loop, args=(ctx,), daemon=True)
+    worker.start()
+    try:
+        message = ctx.result_queue.get(timeout=10)
+    finally:
+        ctx.task_queue.put(SHUTDOWN)
+        worker.join(timeout=10)
+
+    assert isinstance(message, WorkerReady)
+    assert message.worker_pid == os.getpid()
+
+
+@pytest.mark.unit
+def test_worker_checks_in_before_starting_a_waiting_task() -> None:
+    """Even with work already queued, WorkerReady comes first, then TaskStarted."""
+    ctx = _thread_ctx()
+    task = Task(task_type=TaskType.NOOP)
+    ctx.task_queue.put(task)
+    worker = threading.Thread(target=worker_loop, args=(ctx,), daemon=True)
+    worker.start()
+    try:
+        first = ctx.result_queue.get(timeout=10)
+        second = ctx.result_queue.get(timeout=10)
+    finally:
+        ctx.task_queue.put(SHUTDOWN)
+        worker.join(timeout=10)
+
+    assert isinstance(first, WorkerReady)
+    assert isinstance(second, TaskStarted)
+    assert second.task_id == task.task_id

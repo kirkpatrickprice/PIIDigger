@@ -38,7 +38,7 @@ _ADMIN_PROMPT_TIMEOUT: int = 10
 # automation gating on the exit code would treat a truncated scan as clean.
 EXIT_OK: int = 0
 EXIT_ABORTED: int = 1  # refused to start (e.g. admin check declined)
-EXIT_INCOMPLETE: int = 2  # ran, but exited with work still outstanding
+EXIT_INCOMPLETE: int = 2  # ran, but work was left outstanding or workers could not start
 EXIT_INTERRUPTED: int = 130  # CTRL-C; 128 + SIGINT, the shell convention
 
 
@@ -256,6 +256,6 @@ def run_scan(config: Config) -> int:
     # dropped.  run_coordinator has already logged both of these outcomes.
     if outcome.interrupted:
         return EXIT_INTERRUPTED
-    if outcome.unfinished:
+    if outcome.unfinished or outcome.workers_failed:
         return EXIT_INCOMPLETE
     return EXIT_OK

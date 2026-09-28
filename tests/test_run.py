@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 
 from piidigger.models.config import Config, ResultsConfig
-from piidigger.run import EXIT_OK, _build_sinks, _resolve_workers, run_scan
+from piidigger.orchestration.coordinator import CoordinatorResult
+from piidigger.run import EXIT_INCOMPLETE, EXIT_INTERRUPTED, EXIT_OK, _build_sinks, _resolve_workers, run_scan
 
 
 @pytest.mark.unit
@@ -177,3 +178,32 @@ def test_run_scan_temp_workspace_removed_when_coordinator_raises(
         )
     leaked = set(Path(tempfile.gettempdir()).glob("piidigger_*")) - before
     assert not leaked, f"temp workspace(s) left behind after a raise: {leaked}"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (CoordinatorResult(), EXIT_OK),
+        (CoordinatorResult(unfinished=4), EXIT_INCOMPLETE),
+        (CoordinatorResult(workers_failed=True), EXIT_INCOMPLETE),
+        (CoordinatorResult(interrupted=True, unfinished=4), EXIT_INTERRUPTED),
+    ],
+)
+def test_run_scan_maps_the_coordinator_outcome_to_an_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: CoordinatorResult, expected: int
+) -> None:
+    """A run whose workers could not start must not exit 0."""
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    monkeypatch.setattr("piidigger.run.run_coordinator", lambda *_args, **_kwargs: outcome)
+
+    rc = run_scan(
+        Config(
+            start_dirs=[scan_root],
+            log_file=tmp_path / "test.log",
+            results=ResultsConfig(path=tmp_path / "results", formats=["text"]),
+        )
+    )
+
+    assert rc == expected

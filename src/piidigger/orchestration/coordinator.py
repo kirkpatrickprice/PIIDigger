@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from piidigger.models.config import Config
-from piidigger.models.tasks import Task, TaskResult, TaskStarted, TaskType
+from piidigger.models.tasks import Task, TaskResult, TaskStarted, TaskType, WorkerReady
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
 from piidigger.orchestration.pool import WorkerPool, spawn_worker
@@ -23,6 +23,15 @@ from piidigger.orchestration.worker import broadcast_shutdown
 # scheduled by elapsed time, not by the result queue going quiet, so a busy scan
 # is checked on the same cadence as an idle one.
 HEARTBEAT_CHECK_INTERVAL: float = 1.0
+
+# Lost-task sweep: the conditions under which outstanding work is judged lost
+# rather than slow must hold for this many consecutive sweeps, with no message
+# arriving in between...
+LOST_TASK_CONFIRM_SWEEPS: int = 2
+# ...and every outstanding task must have been waiting at least this long.
+# Together these cover the moment between a worker taking a task and its
+# heartbeat reaching the coordinator.
+LOST_TASK_MIN_AGE: float = 2.0
 
 # How long teardown waits for workers to exit before stopping them.
 _JOIN_TIMEOUT: float = 5.0
@@ -38,17 +47,23 @@ class CoordinatorResult:
     The coordinator deliberately does not choose exit codes itself — that is a
     CLI concern, and run_scan owns the mapping.
 
-    A dataclass rather than a Pydantic model: both fields are computed by
+    A dataclass rather than a Pydantic model: every field is computed by
     run_coordinator from its own local state and read by run_scan in the same
     process, so there is no external input to validate and nothing to serialise.
 
     unfinished > 0 means the loop exited with work still outstanding.  On a clean
     run that is impossible; it is reported rather than swallowed so a truncated
     scan cannot masquerade as a successful one.
+
+    workers_failed means the pool stopped replacing workers because they kept
+    dying before checking in, and no worker was left.  The run still ends cleanly, because the lost-task
+    sweep abandons the stranded work, but it did not really scan anything.  Unlike
+    a failure on one file, this is a failure of the whole run.
     """
 
     interrupted: bool = False
     unfinished: int = 0
+    workers_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -67,18 +82,22 @@ class SweepResult:
     timed_out: list[TaskRecord] = field(default_factory=list)
     crashed: list[tuple[int, int | None]] = field(default_factory=list)
     redispatched: list[TaskRecord] = field(default_factory=list)
+    lost: list[TaskRecord] = field(default_factory=list)
     abandoned: list[TaskRecord] = field(default_factory=list)
+    stopped_replacing: bool = False
 
     def __bool__(self) -> bool:
         """True when the sweep has anything to report."""
-        return bool(self.timed_out or self.crashed or self.redispatched or self.abandoned)
+        return bool(
+            self.timed_out or self.crashed or self.redispatched or self.lost or self.abandoned or self.stopped_replacing
+        )
 
 
 class HealthMonitor:
     """The coordinator's periodic health sweep.
 
     Kept apart from the drain loop, with its collaborators injected, so it can be
-    unit-tested without spawning a process.  tick() runs two checks, and the
+    unit-tested without spawning a process.  tick() runs three checks, and the
     order matters:
 
     1. Deadline sweep.  A RUNNING task past its deadline is abandoned and its
@@ -90,11 +109,24 @@ class HealthMonitor:
        rather than "died this tick" also catches a heartbeat that arrived after
        its worker had already been reaped.
 
+    3. Lost-task sweep.  A task lost before its heartbeat is invisible to the
+       first two checks, because no worker is recorded as holding it.  It is
+       found instead by elimination.  A worker that has checked in and is not
+       running a task can only be waiting in task_queue.get(), and it would
+       take a queued task at once.  So if nothing is running, every live worker
+       has checked in, and that stays true across LOST_TASK_CONFIRM_SWEEPS
+       sweeps with no message in between, whatever is still outstanding is not
+       in the queue and not held by anyone: it is lost, not slow.  It is
+       re-dispatched, or abandoned once its retry budget is spent.  No queue
+       introspection is involved: qsize() is unimplemented on macOS and
+       empty() is only approximate.
+
     Because the deadline sweep runs first, a worker replaced for a timeout has
     already left the pool, so the crash sweep cannot replace it a second time.
 
-    A task lost before its heartbeat is invisible to both checks, because no
-    worker is recorded as holding it.
+    A false positive in step 3 is harmless.  A task re-dispatched while its
+    original was still pending keeps its task_id, so whichever copy finishes
+    second is dropped as a duplicate.
     """
 
     def __init__(
@@ -103,10 +135,26 @@ class HealthMonitor:
         pool: WorkerPool,
         *,
         clock: Callable[[], float] = time.monotonic,
+        lost_task_confirm_sweeps: int = LOST_TASK_CONFIRM_SWEEPS,
+        lost_task_min_age: float = LOST_TASK_MIN_AGE,
     ) -> None:
         self._registry = registry
         self._pool = pool
         self._clock = clock
+        self._lost_task_confirm_sweeps = lost_task_confirm_sweeps
+        self._lost_task_min_age = lost_task_min_age
+        self._quiet_sweeps = 0
+
+    def observe(self, message: object) -> None:
+        """Note one result-queue message.  Call for every message received.
+
+        Any message at all means the system is not quiet, so the lost-task
+        sweep's quiet count restarts.  WorkerReady and TaskStarted also check
+        the sending worker in with the pool.
+        """
+        self._quiet_sweeps = 0
+        if isinstance(message, WorkerReady | TaskStarted):
+            self._pool.check_in(message.worker_pid)
 
     def tick(self) -> SweepResult:
         """Run one sweep and report what it did."""
@@ -119,7 +167,9 @@ class HealthMonitor:
                 self._pool.replace(record.worker_pid)
             timed_out.append(record)
 
+        was_replacing = self._pool.replacing
         crashed = self._pool.reap_dead()
+        stopped_replacing = was_replacing and not self._pool.replacing
         live = self._pool.pids()
         redispatched: list[TaskRecord] = []
         abandoned: list[TaskRecord] = []
@@ -132,13 +182,38 @@ class HealthMonitor:
                 self._registry.abandon(record.task_id, reason="crashed")
                 abandoned.append(record)
 
+        lost: list[TaskRecord] = []
+        if timed_out or crashed or redispatched or abandoned:
+            # Something just changed, so quiet has to be observed afresh.
+            self._quiet_sweeps = 0
+        elif self._work_looks_lost(now):
+            self._quiet_sweeps += 1
+            if self._quiet_sweeps >= self._lost_task_confirm_sweeps:
+                self._quiet_sweeps = 0
+                for record in self._registry.records():
+                    if self._registry.redispatch(record.task_id) is not None:
+                        lost.append(record)
+                    else:
+                        self._registry.abandon(record.task_id, reason="crashed")
+                        abandoned.append(record)
+        else:
+            self._quiet_sweeps = 0
+
         return SweepResult(
             now=now,
             timed_out=timed_out,
             crashed=crashed,
             redispatched=redispatched,
+            lost=lost,
             abandoned=abandoned,
+            stopped_replacing=stopped_replacing,
         )
+
+    def _work_looks_lost(self, now: float) -> bool:
+        """True when no process could be holding any outstanding task."""
+        if not self._registry or self._registry.any_running() or not self._pool.all_checked_in():
+            return False
+        return all(now - r.enqueued_at >= self._lost_task_min_age for r in self._registry.records())
 
 
 def _truncate_path(path: str, max_len: int = 60) -> str:
@@ -282,19 +357,25 @@ def run_coordinator(
             "Scan interrupted — shutting down gracefully  (CTRL-C again to force-quit)",
         )
     finally:
+        # Checked before teardown, whose join() can drop stuck workers.  The run
+        # failed as a whole only if the pool stopped replacing workers AND none
+        # were left.  A breaker trip that left healthy workers still finishes
+        # the scan, just with less capacity.
+        workers_failed = not pool.replacing and pool.size == 0
         # Before teardown, which is where the display prints its summary.
         progress.report_incomplete(
             timed_out=registry.count_abandoned("timed_out"),
             abandoned=registry.count_abandoned("crashed"),
             unfinished=len(registry),
             interrupted=interrupted,
+            workers_failed=workers_failed,
         )
         _teardown(ctx, pool, listener, sinks, progress, logger, interrupted=interrupted)
 
     unfinished = len(registry)
     if unfinished and not interrupted:
         logger.error("coordinator exited with %d task(s) still outstanding", unfinished)
-    return CoordinatorResult(interrupted=interrupted, unfinished=unfinished)
+    return CoordinatorResult(interrupted=interrupted, unfinished=unfinished, workers_failed=workers_failed)
 
 
 def _drain(
@@ -319,6 +400,7 @@ def _drain(
         except queue.Empty:
             pass
         else:
+            monitor.observe(message)
             _handle_message(message, registry, sinks, progress, logger)
         if time.monotonic() >= next_sweep:
             _report_sweep(monitor.tick(), registry, progress, logger)
@@ -333,6 +415,8 @@ def _handle_message(
     logger: logging.Logger,
 ) -> None:
     """Dispatch one result-queue message by type."""
+    if isinstance(message, WorkerReady):
+        return  # pool bookkeeping only; HealthMonitor.observe() has recorded it
     if isinstance(message, TaskStarted):
         if not registry.record_start(message.task_id, message.worker_pid):
             # Expected, not an error: with task ids reused across retries, a
@@ -456,15 +540,27 @@ def _report_sweep(
             registry.max_retries,
         )
 
+    for record in sweep.lost:
+        logger.warning(
+            "[%s] re-dispatching %r: no worker holds it, so it was lost before starting (retry %d of %d)",
+            record.task.task_type.value,
+            _task_path(record.task),
+            record.attempt,
+            registry.max_retries,
+        )
+
+    if sweep.stopped_replacing:
+        progress.log_event("ERROR", "Workers are failing to start — continuing without replacements. See the log.")
+
     for record in sweep.abandoned:
         attempts = record.attempt + 1
         logger.error(
-            "[%s] abandoning %r: its worker died on all %d attempts",
+            "[%s] abandoning %r: lost or crashed on all %d attempts",
             record.task.task_type.value,
             _task_path(record.task),
             attempts,
         )
-        progress.log_event("ERROR", f"Gave up on {_label(record)} after its worker crashed {attempts} times")
+        progress.log_event("ERROR", f"Gave up on {_label(record)} after {attempts} failed attempts")
 
     # Timeout and abandonment totals are not accumulated here.  A late result can
     # still reclaim an abandoned task, so the final counts come from the
@@ -535,6 +631,12 @@ def _teardown(
         if interrupted:
             progress.log_event("INFO", "Waiting for workers to stop…")
         pool.join(_INTERRUPT_JOIN_TIMEOUT if interrupted else _JOIN_TIMEOUT)
+
+        # Every worker has exited or been stopped, so nothing will read the task
+        # queue again.  Anything still buffered in it (re-dispatched copies, or
+        # every task if no worker was left) would otherwise make interpreter
+        # exit wait on a pipe that no one drains.
+        ctx.task_queue.cancel_join_thread()
 
         if interrupted:
             progress.log_event("INFO", "Saving results to output files…")
