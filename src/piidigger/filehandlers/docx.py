@@ -34,36 +34,40 @@ class DocxHandler:
     Fallback path (on-disk files): source.open_bytes() returns None, so
     source.materialize() is called to obtain a filesystem path.  For
     FilesystemItem materialize() is a no-op (returns the path itself).
+
+    docx2python opens the underlying ZipFile lazily and holds it open until
+    DocxContent.close() is called, so close() runs in a finally block.
     """
 
     def read(self, source, config: Config) -> Iterator[str]:  # source: ScannableItem
         data = source.open_bytes()
         docx_arg: BytesIO | str = BytesIO(data) if data is not None else str(source.materialize())
-        content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
-
+        docx_content = docx2python(docx_arg)
         try:
-            docx_content = docx2python(docx_arg)
+            content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
+
             # .document is a lazy property that opens the ZIP — catch corruption here
-            document_lines = list(iter_paragraphs(docx_content.document))
-        except BadZipFile:
-            return
-
-        for line in document_lines:
-            content_buffer.append_content(line)
-            if content_buffer.content_buffer_full():
-                yield content_buffer.get_content()
-
-        for comment in docx_content.comments:
-            if comment is not None:
-                content_buffer.append_content(comment[3])
+            for line in iter_paragraphs(docx_content.document):
+                content_buffer.append_content(line)
                 if content_buffer.content_buffer_full():
                     yield content_buffer.get_content()
 
-        content_buffer.append_content(str(docx_content.core_properties))
+            for comment in docx_content.comments:
+                if comment is not None:
+                    content_buffer.append_content(comment[3])
+                    if content_buffer.content_buffer_full():
+                        yield content_buffer.get_content()
 
-        final = content_buffer.finalize_content()
-        if final:
-            yield final
+            content_buffer.append_content(str(docx_content.core_properties))
+
+            final = content_buffer.finalize_content()
+            if final:
+                yield final
+
+        except BadZipFile:
+            return
+        finally:
+            docx_content.close()
 
 
 handler = DocxHandler()

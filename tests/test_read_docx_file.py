@@ -77,3 +77,49 @@ def test_docx_2paragraph() -> None:
     assert "Lorem ipsum dolor sit amet" in content
     assert "Iaculis at erat pellentesque adipiscing" in content
     assert "Randy Bartels" in content
+
+
+def _capture_docx_content(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Wrap docx2python so the test can inspect the DocxContent the handler opened."""
+    import piidigger.filehandlers.docx as docx_module
+
+    captured: list = []
+    original = docx_module.docx2python
+
+    def _wrapper(*args, **kwargs):
+        content = original(*args, **kwargs)
+        captured.append(content)
+        return content
+
+    monkeypatch.setattr(docx_module, "docx2python", _wrapper)
+    return captured
+
+
+def _assert_closed(content) -> None:
+    # DocxReader.zipf raises ValueError once close() has been called
+    with pytest.raises(ValueError, match="closed"):
+        _ = content.docx_reader.zipf
+
+
+@pytest.mark.filehandlers
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "testdata/docx/lorem-ipsum-1line-comments.docx",
+        "testdata/docx/empty-file.docx",
+    ],
+)
+def test_docx_closes_zipfile_after_read(monkeypatch: pytest.MonkeyPatch, filename: str) -> None:
+    captured = _capture_docx_content(monkeypatch)
+    _read(Path(filename))
+    assert len(captured) == 1
+    _assert_closed(captured[0])
+
+
+@pytest.mark.filehandlers
+def test_docx_closes_zipfile_when_abandoned(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _capture_docx_content(monkeypatch)
+    gen = DocxHandler().read(FilesystemItem(Path("testdata/docx/lorem-ipsum-1line.docx")), Config())
+    next(gen)
+    gen.close()
+    _assert_closed(captured[0])
