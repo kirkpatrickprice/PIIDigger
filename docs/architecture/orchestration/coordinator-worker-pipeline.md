@@ -1,0 +1,203 @@
+# Coordinator/Worker Task Pipeline
+
+## Overview
+
+### Purpose
+One coordinator process feeds N worker processes through a single task queue. Workers report back on a result queue. The coordinator tracks how much work remains and stops the run once every task is accounted for.
+
+### Context
+This is the core of PIIDigger's 2.0 orchestration layer, replacing the 1.x `ProcessManager`/SENTINEL-chain design. Every scan — filesystem enumeration, file scanning, archive enumeration, archive member scanning — flows through this same pipeline.
+
+### Status
+Active now. Phases 0-5 of the rewrite are complete, followed by a reliability hardening pass covering task-loss recovery, worker crash and startup handling, and shutdown correctness. The coordinator, `TaskRegistry`, `WorkerPool`, and the task types and handlers described here are all load-bearing production code.
+
+### Scope
+This document covers the coordinator/worker mechanics: task dispatch, heartbeats, health sweeps, and shutdown. It does not repeat the contributor how-to for adding a new file/data/output handler — see [Extending PIIDigger](../../reference/extending.md) for that. Archive-specific enumeration and extraction are covered in [Archive Handling](../archives/archive-handling.md).
+
+## Architectural Principles
+
+### Design Goals
+- **Termination is a property of the work set**: the run ends when the task registry is empty — every enqueued task has been accounted for (completed, timed out, redispatched to completion, or abandoned). No SENTINEL chains, no explicit "last task" signaling.
+- **Uniform task/result shape**: every task type carries a `dict` payload and every handler returns a `TaskResult`; the coordinator never branches on task type except to look up a display path for logging.
+- **Fan-out without foresight**: a handler doesn't know how many more tasks its work will produce — it just returns `new_tasks`, and the registry absorbs however many come back.
+- **Failure detection on a fixed cadence, not by watching each worker**: the coordinator runs one health sweep every `HEARTBEAT_CHECK_INTERVAL` regardless of how busy the result queue is, not only when it goes quiet. A sweep gated on queue idleness missed hung or crashed workers for as long as the scan stayed busy.
+
+### Key Benefits
+- **Adding a task type costs one `DISPATCH` entry and one handler function** — the coordinator and worker loop are unchanged. Proven twice already: `ENUM_ARCHIVE_MEMBERS` and `SCAN_ARCHIVE_MEMBER` were added in Phase 5 with zero changes to `coordinator.py` or `worker/_loop.py`.
+- **A hung or crashed worker doesn't stall the run**: three independent checks — deadline, crash, and lost-task — replace and redispatch around it, keeping the registry an accurate picture of outstanding work.
+- **A task is never silently lost**: even a task whose worker died before it could send a single heartbeat is found and redispatched, under the same `task_id`, so a late duplicate result is dropped rather than double-counted.
+- **Business logic is testable without a process tree**: handlers are plain functions of `(Task, WorkerContext, logging.Logger) -> TaskResult`. The coordinator's own bookkeeping — `TaskRegistry`, `WorkerPool`, `HealthMonitor` — is equally testable with injected fakes; none of it requires spawning a process.
+
+## Architecture Diagram
+
+```mermaid
+flowchart TB
+    subgraph cli_group["🖥️ CLI Layer"]
+        CLI["piidigger scan"]:::cli
+    end
+
+    subgraph run_group["🔧 run_scan()"]
+        RUN["Build sinks, logging,\nWorkerContext, WorkerPool"]:::coreService
+    end
+
+    subgraph coord_group["🎛️ Coordinator"]
+        SEED["Seed one ENUM_DIR\nper start_dir"]:::component
+        LOOP["Fan-out loop:\ndrain result_queue,\nenqueue new_tasks"]:::coreService
+        SWEEP["HealthMonitor.tick()\n(every 1.0s, regardless\nof queue traffic)"]:::component
+        REGISTRY(("registry\nempty?")):::component
+    end
+
+    subgraph worker_group["⚙️ Worker Pool (N processes)"]
+        WLOOP["worker_loop():\nWorkerReady check-in,\nget task, TaskStarted heartbeat,\ndispatch, cleanup temp"]:::coreService
+        DISPATCH["DISPATCH table\nENUM_DIR · SCAN_FILE\nENUM_ARCHIVE_MEMBERS\nSCAN_ARCHIVE_MEMBER"]:::component
+    end
+
+    subgraph protocol_group["📐 Protocol Contracts"]
+        FH["FileHandler"]:::protocol
+        DH["DataHandler"]:::protocol
+        SI["ScannableItem"]:::protocol
+    end
+
+    subgraph sink_group["💾 Output"]
+        SINKS["OutputSink instances\n(CSV / JSON / text)"]:::storage
+    end
+
+    CLI --> RUN --> SEED --> LOOP
+    LOOP -->|task_queue| WLOOP --> DISPATCH
+    DISPATCH --> FH --> SI
+    DISPATCH --> DH
+    WLOOP -->|result_queue: WorkerReady,\nTaskStarted, TaskResult| LOOP
+    LOOP --> REGISTRY
+    REGISTRY -->|no| SWEEP --> LOOP
+    REGISTRY -->|yes| SINKS
+    LOOP -->|findings| SINKS
+
+    classDef coreService fill:#d9f5ff,stroke:#176b87,stroke-width:1px,color:#062635
+    classDef protocol fill:#f0e6ff,stroke:#5b3a9e,stroke-width:1px,color:#24143f
+    classDef component fill:#e7f7e7,stroke:#2f7d32,stroke-width:1px,color:#163917
+    classDef cli fill:#ffe3e3,stroke:#9b2c2c,stroke-width:1px,color:#3b1212
+    classDef storage fill:#e9ecef,stroke:#495057,stroke-width:1px,color:#1f2328
+```
+
+## Core Implementation
+
+### `run_scan()` — wiring order
+[run.py](../../../src/piidigger/run.py) builds everything the coordinator needs, in this order:
+
+1. Open output sinks
+2. Start the logging listener
+3. Run the admin-privilege check
+4. Build `WorkerContext`, build a `WorkerPool` bound to `spawn_worker(ctx)`, and start it
+5. Start the progress display
+6. Call `run_coordinator()`, then remove the per-run temp workspace (`secure_rmtree`) and stop the logging listener as a backstop, whether or not the coordinator raised
+
+Teardown under normal operation — stopping the workers, flushing sinks, stopping the listener and the progress display — lives entirely inside `run_coordinator()`'s `finally` block, so it runs on both normal completion and `KeyboardInterrupt`. `run.py`'s own `finally` exists only to catch exceptions that escape the coordinator before that block runs; without it, a raised exception would leave the temp workspace — extracted archive members, i.e. plaintext PII — on disk.
+
+### `WorkerContext` — the one thing every process shares
+[context.py](../../../src/piidigger/orchestration/context.py) is a frozen `dataclass`, not a Pydantic model, because it carries `mp.Queue` and `mp.synchronize.Event` — opaque OS objects Pydantic cannot validate. It holds `config`, `task_queue`, `result_queue`, `log_queue`, `stop_event`, and `temp_base` (the per-run temp root used for archive member extraction). A live `logging.Logger` or `rich.Console` is never placed on it — each process builds its own logger via `build_worker_logger(ctx.log_queue, name)`.
+
+`stop_event` is set by the coordinator's teardown, before it broadcasts shutdown sentinels. A worker that takes any item — sentinel or leftover task — after `stop_event` is set exits without running it. This is what lets a duplicate task, still sitting in the queue behind the sentinels, be dropped instead of running to completion and eating the shutdown budget.
+
+### `worker_loop()` — dispatch
+[orchestration/worker/_loop.py](../../../src/piidigger/orchestration/worker/_loop.py) starts by posting `WorkerReady(worker_pid)` on `result_queue` — a one-time check-in. After that message, a worker that is not running a task can only be blocked in `task_queue.get()`; the coordinator's lost-task sweep depends on that guarantee. The worker then pulls one item from `task_queue` at a time. A `ShutdownSentinel` (the module-level `SHUTDOWN` singleton, matched by `isinstance` since pickling breaks identity across the spawn boundary) ends the loop, as does any item taken once `ctx.stop_event` is set. For a real `Task`, the worker posts a `TaskStarted` heartbeat, calls `_dispatch()`, and always runs `_cleanup_temp_workspace()` in a `finally` — this securely deletes (via `secure_delete()`) any files the task wrote under `temp_base/<task_id>` and removes the directory tree, whether or not the task produced an archive member.
+
+`DISPATCH` currently has 5 entries:
+
+| `TaskType` | Handler |
+|---|---|
+| `ENUM_DIR` | `handle_enum_dir` |
+| `SCAN_FILE` | `handle_scan_file` |
+| `ENUM_ARCHIVE_MEMBERS` | `handle_enum_archive_members` |
+| `SCAN_ARCHIVE_MEMBER` | `handle_scan_archive_member` |
+| `NOOP` | `_handle_noop` (test-only; supports `{"delay_seconds": N}` for deadline-detection tests) |
+
+`_dispatch()` wraps the handler call: any uncaught exception becomes a `status="error"` `TaskResult` rather than crashing the worker process. A worker that dies outright — a segfault in a native parser, for example — is a separate failure mode, handled by the coordinator's crash sweep below, not by `_dispatch()`.
+
+### `TaskRegistry` — the outstanding-work record
+[orchestration/registry.py](../../../src/piidigger/orchestration/registry.py) replaces the old `pending` integer and the several dicts that used to track it in lockstep. A task is *registered* (`enqueue()`) when it reaches the task queue and *retired* (`retire()`) when its outcome is accounted for; `len(registry)` — the loop's termination check — is the count of tasks neither state has removed. 
+
+Each `TaskRecord` tracks:
+
+* Whether a heartbeat has arrived (`started_at`)
+* How many redispatch attempts it has had (`attempt`, capped by `MAX_RETRIES = 3`)
+* The Task's deadline 
+    * `2 × timeout_seconds` once `started_at` is set; 
+    * `None` while unstarted, since an unclaimed task cannot be judged hung).
+
+A task abandoned by the deadline or crash sweep is retired but kept in a small side table (`abandon()`/`reclaim()`), so that if its original attempt's result turns up after all, `reclaim()` recognizes it and its findings are still routed to sinks rather than silently dropped — it is the only report of that work.
+
+### `WorkerPool` — process lifecycle
+[orchestration/pool.py](../../../src/piidigger/orchestration/pool.py) is the single place worker processes are created (`spawn_worker`, `daemon=True` so a straggler cannot block interpreter exit), replaced, and stopped. `replace(pid)` removes a pid from the active set *before* starting its replacement, so a pid can be replaced at most once even if both the deadline sweep and the crash sweep notice the same death. `reap_dead()` replaces any worker that died without being asked to. Stopping a worker escalates `terminate()` then `kill()`; a process that survives both is kept as a straggler rather than dropped, so teardown still accounts for it.
+
+The pool also tracks, per worker, whether it has checked in (`WorkerReady` or `TaskStarted` received). If `_MAX_STARTUP_FAILURES` (3) consecutive workers before checking in — a broken install, a quarantined DLL — the pool stops replacing them (`replacing` becomes `False`) rather than respawning forever.
+
+### `run_coordinator()` — fan-out and failure handling
+[coordinator.py](../../../src/piidigger/orchestration/coordinator.py) seeds one `ENUM_DIR` task per `config.start_dirs` into a fresh `TaskRegistry`, then drains `result_queue` until the registry is empty:
+
+- Pull one message with a timeout bounded by the next scheduled sweep (at most `HEARTBEAT_CHECK_INTERVAL`, 1 second).
+- A `WorkerReady` message only checks the worker in with the pool.
+- A `TaskStarted` message marks the task RUNNING (`registry.record_start`) and checks the worker in.
+- A `TaskResult` retires the task. An id no longer in the registry is usually a duplicate — another copy of a redispatched task already finished — and is dropped, *unless* it was retired by abandonment (`reclaim()` succeeds), in which case its findings are still routed to sinks. `new_tasks` from the result are validated and enqueued; a malformed one (`Task`'s `extra="forbid"` rejecting it) is logged and dropped rather than aborting the whole run.
+- Whether or not a message arrived, once `HEARTBEAT_CHECK_INTERVAL` has elapsed since the last sweep, `HealthMonitor.tick()` runs — on the same cadence whether the result queue is idle or saturated.
+
+`HealthMonitor.tick()` runs three checks, in order:
+
+1. **Deadline sweep**: a RUNNING task past its deadline (`2 × timeout_seconds`) is abandoned and its worker replaced. Timeouts are not retried — a task that hung once will most likely hang again.
+2. **Crash sweep**: `pool.reap_dead()` replaces any worker that died unprompted. Every RUNNING task whose worker pid is no longer in the pool — whether it died this tick or was already reaped when its heartbeat arrived late — is redispatched under the *same* `task_id`, or abandoned once `MAX_RETRIES` is spent. Because the deadline sweep runs first, a worker already replaced for a timeout cannot be replaced again here.
+3. **Lost-task sweep**: catches a task whose worker died *before* sending its `TaskStarted` heartbeat, which is invisible to the first two checks since no worker is recorded as holding it. If nothing is RUNNING, every live worker has checked in, and that holds for `LOST_TASK_CONFIRM_SWEEPS` (2) consecutive sweeps with no message arriving in between — and every outstanding task is at least `LOST_TASK_MIN_AGE` (2s) old — then whatever is still in the registry cannot be held by any process: it is redispatched or abandoned. No queue introspection is involved (`qsize()` is unimplemented on macOS; `empty()` is only approximate). Reusing the `task_id` on redispatch means a false-positive firing is harmless: whichever copy of the task finishes first retires it, and the other is dropped as a duplicate.
+
+If the pool stops replacing workers (see `WorkerPool` above) and ends up with none left, the lost-task sweep's "every live worker has checked in" is vacuously true, so it redispatches and then abandons every outstanding task — the run ends instead of hanging.
+
+On `KeyboardInterrupt`, `_drain()` exits and teardown (below) runs with a shorter join budget; a second `Ctrl-C` during teardown force-terminates everything without waiting.
+
+### Teardown — one path, two budgets
+`_teardown()` is the same sequence for normal completion and for `KeyboardInterrupt`; only the join budget differs (5s normally, 2s if interrupted). It sets `ctx.stop_event`, then broadcasts one shutdown sentinel per process the pool knows about (including stragglers), then calls `pool.join()`. Workers are asked to stop, not killed outright: killing a worker can cut a queue message in half, and a half-written message can hang whoever tries to read it next. `pool.join()` still escalates to `terminate()` then `kill()` for anything that does not exit within the budget. After the join, `ctx.task_queue.cancel_join_thread()` is called unconditionally — with every worker gone, nothing will ever read it again, and any task still buffered there (a redispatched copy, or every task if no worker survived) would otherwise block interpreter exit on an undrained pipe.
+
+Stopping the log listener is itself bounded: `stop_listener(listener, timeout=5.0)` gives up rather than hanging forever if the listener thread is stuck (for example, reading a log record a killed worker wrote only half of). If it gives up, a warning goes to stderr after the progress display has stopped — too late for the log file itself, since that is what failed to stop.
+
+### Outcome and exit codes
+`run_coordinator()` returns a `CoordinatorResult` (`interrupted`, `unfinished`, `workers_failed`) that `run_scan()` maps to a process exit code: 
+
+* `EXIT_INTERRUPTED` (EXITCODE 130) if the user pressed Ctrl-C, 
+* `EXIT_INCOMPLETE` (EXITCODE 2) if any task was left outstanding or the pool ran out of workers
+* `EXIT_ABORTED` (EXITCODE 1) if the scan failed to start; e.g. Admin check was declined
+* `EXIT_OK` (EXITCODE 0). 
+
+A per-file failure (an access-denied error, a single timeout) does not by itself change the exit code — only a run that could not really scan anything, or one interrupted mid-scan, does. The progress display's end-of-run summary reports per-file failures, timeouts, and abandonments in a "Not fully scanned" line whenever any occurred, and its heading reads `Scan interrupted.` or `Scan stopped early` instead of `Scan complete.` when appropriate — so a truncated run is never described the same way as a full one.
+
+## Protocols
+
+Five `Protocol` classes in [protocols.py](../../../src/piidigger/protocols.py) define every extension surface:
+
+- **`ScannableItem`** — a scannable unit of content (`display_path`, `ext`, `mime`, `size`, `depth`, `open_stream()`, `open_bytes()`, `materialize()`). `FilesystemItem` is the only implementation — it represents both on-disk files and extracted archive members via optional `archive_path`/`member_path` kwargs.
+- **`FileHandler`** — reads a `ScannableItem` into text chunks (`plaintext`, `docx`, `pdf`, `xlsx`, `xls`).
+- **`DataHandler`** — finds PII matches in a text chunk (`pan`, `email`; `phonenum`/`trackdata` are stub/not yet implemented).
+- **`OutputSink`** — writes a `ResultRecord` to a destination (`csv`, `json`, `text`).
+- **`ArchiveHandler`** — lists and extracts archive members. Covered in depth in [Archive Handling](../archives/archive-handling.md).
+
+For how to implement one of these to add a new handler, see [Extending PIIDigger](../../reference/extending.md) — this document only names the contracts the pipeline dispatches through.
+
+## Extension Points
+
+Adding a task type means: add one `TaskType` enum value, one payload model in `models/payloads.py`, one handler function of type `(Task, WorkerContext, logging.Logger) -> TaskResult`, and one `DISPATCH` entry. Nothing in `coordinator.py` or the rest of `worker/_loop.py` needs to change — this is a proven exit criterion from Phase 5 (verified by diff: zero changes to either file when the two archive task types were added).
+
+## Performance Considerations
+
+- **Health sweep interval**: 1.0 second (`HEARTBEAT_CHECK_INTERVAL`). This sweep runs on a fixed cadence regardless of result-queue traffic — a busy scan is checked exactly as often as an idle one.
+- **Timeout multiplier**: a task is only declared timed-out at `2 × timeout_seconds`, not at `timeout_seconds` itself (`registry._DEADLINE_FACTOR`) — this absorbs normal scheduling jitter without doubling real wait time for the common case (results usually arrive well under the limit).
+- **Redispatch retry cap**: `MAX_RETRIES = 3` (`registry.py`) per task before it is abandoned with a synthetic error — applies uniformly to a crash-after-heartbeat redispatch and a lost-task-before-heartbeat redispatch, preventing an unrecoverable task (e.g. one that reliably crashes its worker) from retrying forever.
+- **Lost-task confirmation window**: `LOST_TASK_CONFIRM_SWEEPS = 2` sweeps and `LOST_TASK_MIN_AGE = 2.0` seconds (`coordinator.py`) — both must hold before a task is judged lost, so a task that simply has not been picked up yet, or a worker still booting, is not mistaken for lost work.
+- **Startup-failure breaker**: `_MAX_STARTUP_FAILURES = 3` (`pool.py`) consecutive workers dying before checking in stops the pool from replacing them — bounding how long a broken worker environment is retried before the run gives up instead of respawning forever.
+- **Join budget**: `WorkerPool.join()` uses one shared wall-clock deadline across all workers (default 5s, 2s during a `KeyboardInterrupt`), not a per-worker timeout — so worker count does not multiply shutdown latency.
+- **Listener stop budget**: `stop_listener()` waits at most 5 seconds (`_LISTENER_STOP_TIMEOUT`) for the log queue's background thread to drain, rather than blocking teardown forever on a stuck listener.
+
+## Testing Notes
+
+See [Testing Requirements](../quality/testing-requirements.md) for the project-wide testing standard. `TaskRegistry`, `WorkerPool`, and `HealthMonitor` are each unit-tested in isolation with fakes (`tests/test_task_registry.py`, `tests/test_worker_pool.py`, `tests/test_health_monitor.py`) — none of it requires spawning a process. Orchestration-level coverage that does drive the real `run_coordinator()` (deadline timeout, crash-after-heartbeat and lost-task-before-heartbeat redispatch, the startup-failure breaker, `Ctrl-C` teardown) lives in `tests/test_coordinator.py` and `tests/test_worker.py`.
+
+## Cross-References
+
+- [docs/refactor/ARCHITECTURE_REDESIGN.md](../../refactor/ARCHITECTURE_REDESIGN.md) — the original design proposal for this system. Historical: written before `worker.py` became a package, before `archivehandlers/` existed, and before the reliability hardening pass described above; treat this document as the current source of truth where the two differ.
+- [docs/refactor/IMPLEMENTATION_CHECKLIST.md](../../refactor/IMPLEMENTATION_CHECKLIST.md) — phase-by-phase build status.
+- [docs/reference/extending.md](../../reference/extending.md) — contributor guide for adding handlers.
+- [Archive Handling](../archives/archive-handling.md) — the `ENUM_ARCHIVE_MEMBERS`/`SCAN_ARCHIVE_MEMBER` handlers in depth.

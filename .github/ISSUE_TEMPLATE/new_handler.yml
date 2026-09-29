@@ -1,0 +1,56 @@
+name: 🧩 New Handler / Extension Proposal
+description: Propose a new file handler, data handler (PII detector), output sink, archive format, or config setting
+title: "[Handler]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        PIIDigger's extension points are documented in [docs/reference/extending.md](https://github.com/kirkpatrickprice/PIIDigger/blob/refactor/docs/reference/extending.md). Take a look before filing — it names the protocol to implement and an existing handler to copy.
+
+  - type: dropdown
+    id: extension-point
+    attributes:
+      label: Extension point
+      options:
+        - File handler (reads a new file type)
+        - Data handler (new PII detector)
+        - Output sink (new output format)
+        - Archive format (new container type)
+        - Config setting
+    validations:
+      required: true
+
+  - type: input
+    id: target
+    attributes:
+      label: Target format/type
+      description: 'e.g. ".rtf files", "SSN detector", "XML output"'
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use case / why it's needed
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: Relevant spec/reference links or example patterns
+      description: Format specs, example regexes, sample files (redacted/synthetic only — no real PII)
+    validations:
+      required: false
+
+  - type: dropdown
+    id: pr-willingness
+    attributes:
+      label: Willing to submit a PR?
+      options:
+        - "Yes"
+        - "No"
+        - Would need guidance
+    validations:
+      required: true
