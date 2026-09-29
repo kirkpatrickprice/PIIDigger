@@ -36,7 +36,7 @@ flowchart TB
     end
 
     subgraph core_group["🔧 Core Orchestration"]
-        COORD["Coordinator\n(fan-out, pending count)"]:::coreService
+        COORD["Coordinator\n(fan-out, health sweeps)"]:::coreService
         WORKER["Worker loop\n(DISPATCH table)"]:::component
     end
 

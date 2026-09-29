@@ -40,7 +40,7 @@ If a worker hangs (e.g. email regex on `base64-xml-test.xml`), it never reaches 
 
 The counter serves dual purpose (tracking + termination signal). If a worker crashes without decrementing, the counter goes out of sync. Last-worker detection fails; pipeline deadlocks.
 
-**2.0 Resolution**: No manual counter. The coordinator's `pending` variable tracks outstanding tasks with no locks — single writer, single reader, no races.
+**2.0 Resolution**: No manual counter. The coordinator's `TaskRegistry` tracks outstanding tasks with no locks — single writer, single reader, no races. See [coordinator-worker-pipeline.md](../architecture/orchestration/coordinator-worker-pipeline.md#taskregistry-the-outstanding-work-record) for the current mechanism.
 
 ---
 
@@ -178,7 +178,7 @@ The email regex catastrophically backtracked on 1.5 MB of embedded base64 data, 
 
 Worker crash → task lost → `pending` never decrements → coordinator never terminates. No recovery mechanism.
 
-**2.0 Resolution**: Crash-before-heartbeat detection in Phase 4. Coordinator counts live workers; orphaned tasks are re-queued up to `MAX_RETRIES`, then synthesized as errors.
+**2.0 Resolution**: A crash after a task's heartbeat is caught by the coordinator's crash sweep; a crash *before* any heartbeat (a worker dying before it can even report it took a task) is caught separately by a lost-task sweep, since no worker is on record as holding that task. Both redispatch the task (the same `task_id`, so a late duplicate result is dropped) up to `MAX_RETRIES` times, then abandon it with a synthesized error. See [coordinator-worker-pipeline.md](../architecture/orchestration/coordinator-worker-pipeline.md#run_coordinator-fan-out-and-failure-handling) for the current mechanism.
 
 ---
 

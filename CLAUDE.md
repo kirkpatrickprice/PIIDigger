@@ -4,14 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
-## Active Refactor: Read This First
+## Refactor Status
 
-This repository is mid-way through a **clean-slate 2.0 architectural rewrite** on the `refactor` branch. The entire orchestration layer is being replaced. Before touching any code, read:
+The 2.0 architectural rewrite (Phases 0-5) is complete on the `refactor` branch, plus a
+post-completion reliability hardening pass on the coordinator/worker pipeline (task registry,
+worker pool, health-sweep monitor, shutdown correctness). It has not yet merged to `main`,
+which remains the 1.x release baseline.
 
-- **[docs/refactor/ARCHITECTURE_REDESIGN.md](docs/refactor/ARCHITECTURE_REDESIGN.md)** — what we're building and why (design is locked)
-- **[docs/refactor/IMPLEMENTATION_CHECKLIST.md](docs/refactor/IMPLEMENTATION_CHECKLIST.md)** — what phase we're in and what's left to do
+Before touching orchestration code, read:
 
-The `refactor` branch is the working branch. `main` is the 1.x release baseline.
+- **[docs/architecture/orchestration/coordinator-worker-pipeline.md](docs/architecture/orchestration/coordinator-worker-pipeline.md)** — the coordinator/worker pipeline as it exists today
+- **[docs/architecture/archives/archive-handling.md](docs/architecture/archives/archive-handling.md)** — archive (zip/7z/tar) design as it exists today
+
+`docs/refactor/` holds the original design rationale and phase-by-phase build record — useful
+historical context (its own [README](docs/refactor/README.md) explains why), but not the place
+to look for current behavior; the two docs above are the current source of truth where they
+differ.
 
 ---
 
@@ -80,7 +88,9 @@ src/piidigger/
 │   │   ├── _enum_archive.py # handle_enum_archive_members
 │   │   ├── _scan_file.py    # handle_scan_file
 │   │   └── _scan_archive_member.py  # handle_scan_archive_member
-│   ├── coordinator.py      # fan-out loop, pending counter, deadline monitor
+│   ├── coordinator.py      # fan-out loop, HealthMonitor (deadline/crash/lost-task sweeps)
+│   ├── registry.py         # TaskRegistry, TaskRecord — the outstanding-work record
+│   ├── pool.py              # WorkerPool, spawn_worker — process lifecycle
 │   ├── logging_setup.py    # QueueHandler / QueueListener helpers
 │   ├── progress.py         # rich.Live two-panel display
 │   ├── secure_delete.py    # 2-pass overwrite + fsync + unlink for extracted archive members
@@ -116,7 +126,7 @@ The legacy `src/piidigger/**` tree is exempted from ruff's `N` ruleset until the
 ### Models
 - The deciding question is **whether any field's value originates outside our own code**.
 - **Pydantic v2** when it does: `Config` (TOML), `Task` / payload types (filesystem metadata), `TaskResult` and `ResultRecord` (file content).
-- **`dataclass`** when every field is a value we generated ourselves: `TaskStarted`, `ShutdownSentinel`, `CoordinatorResult`, `TaskRecord`, and `WorkerContext` (which also holds `mp.Queue`/`mp.Event`, which Pydantic cannot meaningfully validate). Crossing the process boundary is not the test — `TaskStarted` crosses it and is still a dataclass.
+- **`dataclass`** when every field is a value we generated ourselves: `TaskStarted`, `WorkerReady`, `ShutdownSentinel`, `CoordinatorResult`, `TaskRecord`, `SweepResult`, and `WorkerContext` (which also holds `mp.Queue`/`mp.Event`, which Pydantic cannot meaningfully validate). Crossing the process boundary is not the test — `TaskStarted` crosses it and is still a dataclass.
 - Use `frozen=True` unless the object is mutated in place (e.g. `TaskRecord`). Use `slots=True` for high-volume types.
 - Document the reason for the choice at the class definition.
 
@@ -131,11 +141,11 @@ All business-logic contracts live in `protocols.py`. Handlers must not import `m
 
 ## Architecture: How It Works (2.0)
 
-One coordinator (main process) feeds N identical workers through a single task queue. Workers return `TaskResult` objects containing `new_tasks` (fan-out), `findings` (PII matches), and `counters` (progress). The coordinator enqueues the new tasks, routes findings to output sinks, and tracks `pending` (outstanding task count). When `pending == 0`, the run is done.
+One coordinator (main process) feeds N identical workers through a single task queue. Workers return `TaskResult` objects containing `new_tasks` (fan-out), `findings` (PII matches), and `counters` (progress). The coordinator enqueues new tasks, routes findings to output sinks, and tracks outstanding work in a `TaskRegistry` (`orchestration/registry.py`) — a task is *registered* when enqueued and *retired* when its outcome is accounted for. The run ends when the registry is empty.
 
 Termination is a property of the work set — no SENTINEL chains. Adding a task type adds one entry to the `DISPATCH` dict and one handler function; the coordinator and worker are unchanged.
 
-The coordinator also owns the `rich.Live` progress display and monitors worker heartbeats. A worker that exceeds its deadline is terminated and replaced; the coordinator synthesizes a `status="timeout"` result so `pending` decrements correctly.
+The coordinator also owns the `rich.Live` progress display and a `HealthMonitor` that runs three sweeps every second regardless of queue traffic: a deadline sweep (terminates and replaces a worker that has exceeded its task's deadline), a crash sweep (replaces a worker that died unprompted and redispatches its task), and a lost-task sweep (recovers a task whose worker died before it could send a heartbeat at all — see [coordinator-worker-pipeline.md](docs/architecture/orchestration/coordinator-worker-pipeline.md) for the full mechanics). Worker processes and their lifecycle are owned by `WorkerPool` (`orchestration/pool.py`).
 
 ---
 
