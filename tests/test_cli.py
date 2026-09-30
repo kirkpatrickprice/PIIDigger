@@ -91,13 +91,24 @@ def test_inspect_mime_exits_0(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -
 def test_inspect_encoding_exits_0(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fixture = tmp_path / "sample.txt"
     fixture.write_text("hello", encoding="utf-8")
-    monkeypatch.setattr("piidigger.cli.commands.inspect.detect_encoding", lambda _: "utf-8")
+    monkeypatch.setattr("piidigger.cli.commands.inspect.detect_file_encoding", lambda _: "utf-8")
 
     result = CliRunner().invoke(cli, ["inspect", "encoding", str(fixture)])
 
     assert result.exit_code == 0
     assert "utf-8" in result.output
 
+
+@pytest.mark.unit
+def test_inspect_encoding_matches_scanner_for_ascii(tmp_path: Path) -> None:
+    # Unpatched: inspect reports utf_8 for pure ASCII, the encoding the plaintext handler reads it with.
+    fixture = tmp_path / "sample.txt"
+    fixture.write_text("hello world, plain ascii text\n", encoding="ascii")
+
+    result = CliRunner().invoke(cli, ["inspect", "encoding", str(fixture)])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == "utf_8"
 
 
 @pytest.mark.unit

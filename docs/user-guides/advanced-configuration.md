@@ -173,7 +173,7 @@ These limits also implicitly protect against path-traversal members (`../`) and 
 | Setting | Default | Description |
 |---|---|---|
 | `buffer_unit_bytes` | `650` | Size, in bytes, of one word-aligned block of text handed to the PII-matching regexes at a time (words are never split mid-word). `650` was found to be the "happy place" for the built-in data handlers: regex matching has real per-call setup cost, so much smaller values waste CPU re-paying that overhead over and over, while much larger values make each individual regex pass slower. Also multiplied by `buffer_unit_count` to size the overall RAM buffer read from a file at a time (see `buffer_unit_count`) — most users will only ever need to adjust `buffer_unit_count`, not this value. |
-| `buffer_unit_count` | `100000` | Multiplied by `buffer_unit_bytes` to get the RAM buffer size (default 650 × 100,000 ≈ 65 MB) held per file before being handed to data handlers. This bounds memory use — it does not limit how much of a file gets scanned; the entire file is always read and scanned, just streamed through this buffer in bounded batches. Raising it buffers more per pass (more memory, longer per-pass regex matching — watch `default_timeout_seconds` if raised a lot); lowering it uses less memory at the cost of more, smaller passes. Applies to plain-text, PDF, DOCX, and spreadsheet files. |
+| `buffer_unit_count` | `100000` | Multiplied by `buffer_unit_bytes` to get the RAM buffer size (default 650 × 100,000 ≈ 65 MB) held per file before being handed to data handlers. This bounds memory use — it does not limit how much of a file gets scanned; the file is streamed through this buffer in bounded batches. (Plain-text files do stop early, at `[plaintext] max_scan_mb`; that is a separate setting.) Raising it buffers more per pass (more memory, longer per-pass regex matching — watch `default_timeout_seconds` if raised a lot); lowering it uses less memory at the cost of more, smaller passes. Applies to plain-text, PDF, DOCX, and spreadsheet files. |
 
 These two settings control how much RAM is used to hold file content in memory.  Each worker (see `performance` setting above) will use up to `buffer_unit_bytes X buffer_unit_count` bytes of RAM to hold files in memory.  If the file size is larger than this, then the file will be read in batches of this size.
 
@@ -188,6 +188,12 @@ These two settings control how much RAM is used to hold file content in memory. 
 |---|---|---|
 | `blank_row_limit` | `250` | Stop reading a worksheet after this many consecutive blank rows — avoids scanning huge sparse trailing ranges some spreadsheet software leaves behind. |
 | `blank_col_limit` | `500` | Same idea, applied within a single row: stop scanning across a row after this many consecutive blank cells. |
+
+### `[plaintext]`
+
+| Setting | Default | Description |
+|---|---|---|
+| `max_scan_mb` | `64` | Stop reading a plain-text file (`.txt`, `.log`, `.csv`, source code, etc.) after this many MB of text. The rest of the file is skipped. Scanning runs at a few MB per second, so without a cutoff a multi-GB log would run past the task deadline and be abandoned with nothing scanned. The default finishes in about 20 seconds on a typical machine, inside the default `default_timeout_seconds`. If you raise this, raise `default_timeout_seconds` to match. Counted in characters of decoded text, which equals bytes for plain ASCII. |
 
 ### Discovering valid values
 

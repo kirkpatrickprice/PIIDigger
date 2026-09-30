@@ -264,9 +264,11 @@ def test_scan_file_permission_denied_returns_error(tmp_path: Path) -> None:
     f.write_text("content that cannot be read")
 
     ctx = _make_ctx(tmp_path)
+    # The plaintext handler's first open() is the encoding sample in getencoding.
     with unittest.mock.patch(
-        "piidigger.orchestration.sources.FilesystemItem.open_stream",
+        "piidigger.getencoding.open",
         side_effect=PermissionError("access denied"),
+        create=True,
     ):
         result = handle_scan_file(_scan_file_task(f), ctx, _logger())
 

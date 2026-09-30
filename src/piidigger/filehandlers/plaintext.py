@@ -1,7 +1,7 @@
 from collections.abc import Iterator
 
 from piidigger.filehandlers._sharedfuncs import ContentBuffer
-from piidigger.getencoding import detect_encoding
+from piidigger.getencoding import detect_file_encoding
 from piidigger.models.config import Config
 
 HANDLES = {
@@ -68,31 +68,44 @@ HANDLES = {
 handles = HANDLES
 
 
+# Upper bound on the characters readline() returns in one call.  A longer line
+# arrives in pieces over several calls (nothing is skipped), so a file with no
+# newlines, e.g. minified JSON, never lands in memory whole.
+#
+# There is a risk that if a PII record spans the boundary, it will
+# be split across multiple reads.  This would lead a false negative in PII detection.
+_MAX_LINE_CHARS = 1024 * 1024
+
+
 class PlaintextHandler:
     """FileHandler for text-based files.
 
-    Reads via source.open_stream() — works for both on-disk files and
-    archive members without requiring a real filesystem path.
-    Encoding is detected from the raw bytes via charset-normalizer.
+    Reads the file line by line from source.materialize(), so memory stays
+    bounded whatever the file size.  Archive members are extracted to disk
+    before scanning, so a real path is always available.
+
+    The encoding comes from detect_file_encoding(), which samples the start of
+    the file — the same answer `piidigger inspect encoding` reports.  Reading
+    stops once config.plaintext.max_scan_bytes of text has been read.
     """
 
     def read(self, source, config: Config) -> Iterator[str]:  # source: ScannableItem
-        stream = source.open_stream()
-        try:
-            raw = stream.read()
-        finally:
-            stream.close()
-
-        enc = detect_encoding(raw)
+        path = source.materialize()
+        enc = detect_file_encoding(path)
         if not enc:
             return
 
-        text = raw.decode(enc, errors="replace")
         content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
-        for line in text.splitlines():
-            content_buffer.append_content(line)
-            if content_buffer.content_buffer_full():
-                yield content_buffer.get_content()
+        max_scan_chars = config.plaintext.max_scan_bytes
+        chars_read = 0
+        with open(path, encoding=enc, errors="replace") as f:
+            while line := f.readline(_MAX_LINE_CHARS):
+                content_buffer.append_content(line)
+                if content_buffer.content_buffer_full():
+                    yield content_buffer.get_content()
+                chars_read += len(line)
+                if chars_read >= max_scan_chars:
+                    break
 
         final = content_buffer.finalize_content()
         if final:

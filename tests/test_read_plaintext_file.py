@@ -1,9 +1,11 @@
+import tracemalloc
 from pathlib import Path
 
 import pytest
 
-from piidigger.filehandlers.plaintext import PlaintextHandler
-from piidigger.models.config import BufferConfig, Config
+from piidigger.filehandlers.plaintext import _MAX_LINE_CHARS, PlaintextHandler
+from piidigger.getencoding import _ENCODING_SAMPLE_BYTES
+from piidigger.models.config import BufferConfig, Config, PlaintextConfig
 from piidigger.orchestration.sources import FilesystemItem
 
 
@@ -104,3 +106,86 @@ def test_plaintext_buffer_config_controls_chunking() -> None:
     assert len(small_chunks) > len(default_chunks)
     # Same words in the same order regardless of how they were chunked.
     assert " ".join(small_chunks).split() == " ".join(default_chunks).split()
+
+
+# ---------------------------------------------------------------------------
+# Large-file behavior: fixtures are generated in tmp_path rather than committed.
+# ---------------------------------------------------------------------------
+
+
+def _write(tmp_path: Path, data: bytes) -> Path:
+    path = tmp_path / "generated.txt"
+    path.write_bytes(data)
+    return path
+
+
+@pytest.mark.filehandlers
+def test_plaintext_non_ascii_after_ascii_sample(tmp_path: Path) -> None:
+    # The encoding sample is pure ASCII; UTF-8 text past it must still decode intact.
+    filler = b"plain ascii log line user=jdoe status=200\n" * (_ENCODING_SAMPLE_BYTES // 40 + 100)
+    path = _write(tmp_path, filler + "José Müller josé@exämple.com\n".encode())
+
+    content = " ".join(_read(path))
+
+    assert "josé@exämple.com" in content
+    assert "�" not in content
+
+
+@pytest.mark.filehandlers
+def test_plaintext_sample_cut_mid_character(tmp_path: Path) -> None:
+    # One leading byte shifts every 2-byte Cyrillic character so the sample boundary splits one.
+    data = b"x" + ("Привет" * (_ENCODING_SAMPLE_BYTES // 12 + 1000)).encode()
+    assert (data[_ENCODING_SAMPLE_BYTES] & 0xC0) == 0x80, "fixture must split a character at the sample boundary"
+
+    content = " ".join(_read(_write(tmp_path, data)))
+
+    assert "Привет" in content
+    assert "�" not in content
+
+
+@pytest.mark.filehandlers
+def test_plaintext_stops_at_max_scan_mb(tmp_path: Path) -> None:
+    filler = b"filler line with nothing interesting in it at all\n"
+    body = filler * (2 * 1024 * 1024 // len(filler))
+    path = _write(tmp_path, b"EARLYMARKER\n" + body + b"LATEMARKER\n")
+    config = Config(plaintext=PlaintextConfig(max_scan_mb=1))
+
+    content = " ".join(_read(path, config))
+
+    assert "EARLYMARKER" in content
+    assert "LATEMARKER" not in content
+
+
+@pytest.mark.filehandlers
+def test_plaintext_line_longer_than_readline_cap(tmp_path: Path) -> None:
+    # One newline-free line spanning several readline() pieces.  Each token plus its
+    # space is 8 characters and _MAX_LINE_CHARS is a multiple of 8, so piece
+    # boundaries fall between tokens and every token must come through intact.
+    tokens = [f"w{i:06d}" for i in range(_MAX_LINE_CHARS * 3 // 16)]
+    line = " ".join(tokens) + " "
+    assert len(line) > _MAX_LINE_CHARS
+    path = _write(tmp_path, line.encode("ascii"))
+
+    assert " ".join(_read(path)).split() == tokens
+
+
+@pytest.mark.filehandlers
+def test_plaintext_memory_does_not_scale_with_file_size(tmp_path: Path) -> None:
+    line = b"2026-09-29 12:00:00 INFO worker processed request user=jdoe@example.com status=200\n"
+    path = _write(tmp_path, line * (16 * 1024 * 1024 // len(line)))
+    size = path.stat().st_size
+    small_buffer = Config(buffer=BufferConfig(buffer_unit_bytes=650, buffer_unit_count=100))
+
+    tracemalloc.start()
+    try:
+        for _ in PlaintextHandler().read(FilesystemItem(path), small_buffer):
+            pass
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    # Encoding detection is a fixed cost: the sample plus charset-normalizer's
+    # copy of it (~2x the sample).  Everything else must stay small.  Reading the
+    # whole file at once peaked at >= 3.49x the file size (~58 MiB here).
+    detection_allowance = 3 * _ENCODING_SAMPLE_BYTES
+    assert peak < detection_allowance + size / 4

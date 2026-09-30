@@ -77,6 +77,7 @@ _DEFAULT_BUFFER_UNIT_BYTES: int = 650
 _DEFAULT_BUFFER_UNIT_COUNT: int = 100_000
 _DEFAULT_BLANK_ROW_LIMIT: int = 250
 _DEFAULT_BLANK_COL_LIMIT: int = 500
+_DEFAULT_PLAINTEXT_MAX_SCAN_MB: int = 64
 
 _KNOWN_CONFIG_KEYS: tuple[str, ...] = (
     "start_dirs",
@@ -102,6 +103,7 @@ _KNOWN_CONFIG_KEYS: tuple[str, ...] = (
     "buffer.buffer_unit_count",
     "spreadsheet.blank_row_limit",
     "spreadsheet.blank_col_limit",
+    "plaintext.max_scan_mb",
 )
 
 
@@ -219,6 +221,9 @@ def generate_toml_template() -> str:
         "[spreadsheet]",
         f"blank_row_limit = {_DEFAULT_BLANK_ROW_LIMIT}",
         f"blank_col_limit = {_DEFAULT_BLANK_COL_LIMIT}",
+        "",
+        "[plaintext]",
+        f"max_scan_mb = {_DEFAULT_PLAINTEXT_MAX_SCAN_MB}",
     ]
     return "\n".join(lines) + "\n"
 
@@ -290,6 +295,22 @@ class SpreadsheetConfig(PiiDiggerModel):
     blank_col_limit: int = Field(default=_DEFAULT_BLANK_COL_LIMIT, ge=0)
 
 
+class PlaintextConfig(PiiDiggerModel):
+    """Scan-size cutoff for the plaintext handler.
+
+    Like SpreadsheetConfig, this setting genuinely skips remaining content:
+    a text file stops being read once max_scan_mb of text has been read.  It
+    keeps a very large file (a multi-GB log) inside the task deadline instead
+    of timing out.  Counted in decoded characters, which equal bytes for ASCII.
+    """
+
+    max_scan_mb: int = Field(default=_DEFAULT_PLAINTEXT_MAX_SCAN_MB, ge=1)
+
+    @property
+    def max_scan_bytes(self) -> int:
+        return self.max_scan_mb * 1024 * 1024
+
+
 class ResultsConfig(PiiDiggerModel):
     """Output destination and format selection.
 
@@ -347,6 +368,7 @@ class Config(PiiDiggerModel):
     archives: ArchiveConfig = Field(default_factory=ArchiveConfig)
     buffer: BufferConfig = Field(default_factory=BufferConfig)
     spreadsheet: SpreadsheetConfig = Field(default_factory=SpreadsheetConfig)
+    plaintext: PlaintextConfig = Field(default_factory=PlaintextConfig)
 
     @field_validator("include_exts")
     @classmethod

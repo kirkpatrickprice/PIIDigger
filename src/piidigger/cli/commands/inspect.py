@@ -9,7 +9,7 @@ import psutil
 from piidigger.archivehandlers import HANDLER_REGISTRY as ARCHIVE_HANDLER_REGISTRY
 from piidigger.datahandlers import HANDLER_REGISTRY
 from piidigger.filehandlers import get_supported_exts, get_supported_mimes
-from piidigger.getencoding import detect_encoding
+from piidigger.getencoding import detect_file_encoding
 from piidigger.getmime import get_mime
 
 
@@ -30,7 +30,7 @@ def inspect_mime(file_path: Path) -> None:
 def inspect_encoding(file_path: Path) -> None:
     """Print the encoding PIIDigger would use to read FILE_PATH."""
     try:
-        click.echo(detect_encoding(file_path.read_bytes()))
+        click.echo(detect_file_encoding(file_path))
     except OSError as exc:
         raise click.ClickException(str(exc)) from exc
 

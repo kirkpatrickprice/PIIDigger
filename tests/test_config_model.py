@@ -9,6 +9,7 @@ import pytest
 from piidigger.models.config import (
     BufferConfig,
     Config,
+    PlaintextConfig,
     ResultsConfig,
     SpreadsheetConfig,
     generate_toml_template,
@@ -111,6 +112,21 @@ def test_spreadsheet_config_rejects_out_of_bounds() -> None:
         SpreadsheetConfig(blank_col_limit=-1)
 
 
+@pytest.mark.unit
+def test_plaintext_config_defaults() -> None:
+    p = PlaintextConfig()
+    assert p.max_scan_mb == 64
+    assert p.max_scan_bytes == 64 * 1024 * 1024
+
+
+@pytest.mark.unit
+def test_plaintext_config_rejects_out_of_bounds() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        PlaintextConfig(max_scan_mb=0)
+
+
 # ---------------------------------------------------------------------------
 # Config defaults
 # ---------------------------------------------------------------------------
@@ -126,6 +142,7 @@ def test_config_default_returns_config() -> None:
     assert c.local_files_only is True
     assert c.buffer.buffer_unit_bytes == 650
     assert c.spreadsheet.blank_row_limit == 250
+    assert c.plaintext.max_scan_mb == 64
 
 
 @pytest.mark.unit
@@ -262,8 +279,8 @@ def test_generate_toml_template_is_valid_toml() -> None:
 
 
 @pytest.mark.unit
-def test_generate_toml_template_round_trips_buffer_and_spreadsheet(tmp_path: Path) -> None:
-    """[buffer] and [spreadsheet] survive a generate -> from_toml round trip."""
+def test_generate_toml_template_round_trips_buffer_spreadsheet_and_plaintext(tmp_path: Path) -> None:
+    """[buffer], [spreadsheet] and [plaintext] survive a generate -> from_toml round trip."""
     toml = tmp_path / "cfg.toml"
     toml.write_text(generate_toml_template(), encoding="utf-8")
 
@@ -272,6 +289,7 @@ def test_generate_toml_template_round_trips_buffer_and_spreadsheet(tmp_path: Pat
     assert config.buffer.buffer_unit_count == 100_000
     assert config.spreadsheet.blank_row_limit == 250
     assert config.spreadsheet.blank_col_limit == 500
+    assert config.plaintext.max_scan_mb == 64
 
 
 @pytest.mark.unit

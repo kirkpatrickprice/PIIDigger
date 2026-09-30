@@ -61,7 +61,7 @@ piidigger scan -f piidigger.toml
 
 1. **Is the file type supported?** Run `piidigger inspect mime <path>` and `piidigger inspect filetypes` (see [Inspect Command Guide](inspect-command.md)) to confirm the file's detected MIME type/extension has a registered handler, and isn't excluded by `include_exts`/`include_mime` in your config.
 2. **Is the encoding supported?** For plain-text files, run `piidigger inspect encoding <path>`. PIIDigger only scans encodings it can reliably map onto regex-friendly text; non-Latin encodings aren't currently supported.
-3. **Was the file inside an excluded directory, or too large?** Check `exclude_dirs`, and for spreadsheets, the `[spreadsheet]` blank-row/column cutoffs — see [Advanced Configuration](advanced-configuration.md).
+3. **Was the file inside an excluded directory, or too large?** Check `exclude_dirs`; for spreadsheets, the `[spreadsheet]` blank-row/column cutoffs; and for plain-text files, the `[plaintext] max_scan_mb` cutoff (only the first 64 MB is scanned by default) — see [Advanced Configuration](advanced-configuration.md).
 
 ### A scan appears hung
 
