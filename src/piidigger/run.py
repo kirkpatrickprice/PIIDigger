@@ -216,7 +216,13 @@ def run_scan(config: Config) -> int:
 
     # Create a PIIDigger-owned temp root and exclude it from directory scanning
     # so ENUM_DIR workers never attempt to scan extracted archive members.
-    temp_base: Path = Path(tempfile.mkdtemp(prefix="piidigger_"))
+    # Resolved so the stored exclude pattern matches what _is_excluded() computes
+    # for each walked entry (entry.resolve()) — mkdtemp() can return a path that
+    # reaches the OS temp root through a symlink alias (e.g. macOS /var ->
+    # /private/var, or a Windows short 8.3 path component), which would
+    # otherwise never match and let workers scan each other's extracted
+    # archive members.
+    temp_base: Path = Path(tempfile.mkdtemp(prefix="piidigger_")).resolve()
     run_logger.info("temp workspace: %s", temp_base)
     runtime_config = config.model_copy(update={"exclude_dirs": [*config.exclude_dirs, str(temp_base)]})
 

@@ -150,6 +150,50 @@ def test_run_scan_removes_temp_workspace(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
+def test_run_scan_excludes_temp_workspace_reached_via_symlink_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The temp workspace must be excluded even when reached by a route that
+    never crosses the symlink alias tempfile.mkdtemp() happened to return it
+    through (e.g. macOS's /var -> /private/var).
+
+    Regression test: temp_base must be resolved before being added to
+    exclude_dirs.  _is_excluded() always compares against entry.resolve(), so
+    an unresolved alias path never matches an entry reached directly through
+    the real (already-resolved) route, and a worker ends up scanning its own
+    extracted archive members.
+    """
+    physical = tmp_path / "physical"
+    physical.mkdir()
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(physical, target_is_directory=True)
+    except OSError, NotImplementedError:
+        pytest.skip("symlinks not supported on this platform")
+
+    temp_dir_name = "piidigger_test"
+    (physical / temp_dir_name).mkdir()
+    (physical / temp_dir_name / "leftover.txt").write_text("hello world 4111111111111111")
+
+    aliased_mkdtemp_path = str(alias / temp_dir_name)
+    monkeypatch.setattr("piidigger.run.tempfile.mkdtemp", lambda prefix="": aliased_mkdtemp_path)
+
+    results_dir = tmp_path / "results"
+    config = Config(
+        start_dirs=[physical],  # reached directly, never crossing the alias symlink
+        log_file=tmp_path / "test.log",
+        results=ResultsConfig(path=results_dir, formats=["text"]),
+    )
+    rc = run_scan(config)
+
+    assert rc == EXIT_OK
+    txt_files = list(results_dir.glob("*.txt"))
+    assert txt_files, "expected an output file"
+    findings = txt_files[0].read_text()
+    assert "leftover.txt" not in findings, "worker scanned its own extracted-archive temp workspace"
+
+
+@pytest.mark.integration
 def test_run_scan_temp_workspace_removed_when_coordinator_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
