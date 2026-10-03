@@ -57,7 +57,13 @@ def start_listener(
     type: ignore suppresses a false-positive rather than a real mismatch.
     """
     level = getattr(logging, log_level.upper(), logging.INFO)
-    handler = logging.FileHandler(log_file)
+    # mode="w": each run starts a fresh log file.
+    # encoding="utf-8": FileHandler's default encoding is the platform's
+    # preferred locale encoding.  On Windows that is not UTF-8, so the first
+    # non-ASCII character logged (e.g. a path) raised UnicodeEncodeError in
+    # the listener thread, dropping the record and corrupting the rich.Live
+    # display.
+    handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
     handler.setLevel(level)
     handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
     listener = logging.handlers.QueueListener(

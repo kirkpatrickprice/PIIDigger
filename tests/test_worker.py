@@ -469,3 +469,47 @@ def test_stop_listener_writes_out_queued_records(tmp_path: Path) -> None:
 
     assert stop_listener(listener) is True
     assert "last words" in log_file.read_text()
+
+
+@pytest.mark.unit
+def test_start_listener_writes_non_ascii_records(tmp_path: Path) -> None:
+    """A record containing non-ASCII text must not raise UnicodeEncodeError.
+
+    Regression test: FileHandler's default encoding is the platform's
+    preferred locale encoding, not UTF-8.  On Windows that raised
+    UnicodeEncodeError in the listener thread for the first non-ASCII
+    character logged (e.g. a scanned path), silently dropping the record.
+    """
+    # U+2603 SNOWMAN and U+65E5 (日) are outside cp1252/latin-1 and every other
+    # common single-byte Windows code page, so this reliably reproduces the
+    # crash under the platform's default locale encoding, unlike characters
+    # such as é/ü that cp1252 happens to cover.
+    message = "café ☃ 日本語"
+    log_file = tmp_path / "unicode.log"
+    log_queue: mp.Queue[object] = mp.Queue()
+    listener = start_listener(log_queue, log_file, "DEBUG")
+    build_worker_logger(log_queue, name="test-non-ascii").warning(message)
+
+    assert stop_listener(listener) is True
+    assert message in log_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_start_listener_truncates_log_file_on_each_call(tmp_path: Path) -> None:
+    """Each run starts with a fresh log file — mode="w", not the default "a"."""
+    log_file = tmp_path / "truncate.log"
+
+    log_queue: mp.Queue[object] = mp.Queue()
+    listener = start_listener(log_queue, log_file, "DEBUG")
+    build_worker_logger(log_queue, name="test-truncate-1").warning("first run")
+    assert stop_listener(listener) is True
+    assert "first run" in log_file.read_text()
+
+    log_queue = mp.Queue()
+    listener = start_listener(log_queue, log_file, "DEBUG")
+    build_worker_logger(log_queue, name="test-truncate-2").warning("second run")
+    assert stop_listener(listener) is True
+
+    content = log_file.read_text()
+    assert "second run" in content
+    assert "first run" not in content, "log file was appended to instead of truncated"
