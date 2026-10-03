@@ -6,6 +6,7 @@ Windows spawn can import them without re-running test code.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import logging.handlers
 import multiprocessing as mp
@@ -13,6 +14,7 @@ import os
 import signal
 import threading
 import time
+import zipfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -20,6 +22,7 @@ import pytest
 
 import piidigger.orchestration.coordinator as coord_mod
 from piidigger.models.config import Config
+from piidigger.models.results import ResultRecord
 from piidigger.models.tasks import ShutdownSentinel, Task, TaskResult, TaskStarted, TaskType, WorkerReady
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.coordinator import (
@@ -385,6 +388,62 @@ def test_deadline_detection_replaces_hung_worker(tmp_path: Path) -> None:
     assert progress._tasks_completed == 1
     assert pool.size == 2
     assert pool.pids() != original_pids, "the hung worker should have been replaced"
+
+
+class _ListSink:
+    def __init__(self) -> None:
+        self.records: list[ResultRecord] = []
+
+    def write(self, record: ResultRecord) -> None:
+        self.records.append(record)
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.slow
+def test_slow_archive_member_is_skipped_and_the_rest_of_its_batch_scanned(tmp_path: Path) -> None:
+    """A member that outlasts the deadline costs only itself, not the rest of its batch.
+
+    One batch of three zip members against a 2 s timeout (a 4 s deadline).  The
+    middle member is tens of MB of card-like numbers, which takes the data
+    handlers far longer than that to scan, and scanning sends no progress.  So
+    the deadline fires while the worker is on that member.  The sweep drops it,
+    re-queues the last member to a replacement worker, and the first member's
+    findings, already streamed, are kept.
+    """
+    archive = tmp_path / "batch.zip"
+    slow_text = "".join(f"{4000_0000_0000_0000 + i}\n" for i in range(2_000_000))
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("first.txt", "card 4111111111111111\n")
+        zf.writestr("slow.txt", slow_text)
+        zf.writestr("last.txt", "card 5555555555554444\n")
+
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    log_queue: mp.Queue[object] = mp.Queue()
+    stop_event = mp.Event()
+    ctx = dataclasses.replace(_make_ctx(task_queue, result_queue, log_queue, stop_event, []), temp_base=tmp_path)
+    log_file = tmp_path / "batch.log"
+    listener = start_listener(log_queue, log_file, "DEBUG")
+    pool = _start_pool(ctx, 2)
+    progress = _non_tty_progress()
+    sink = _ListSink()
+
+    batch = Task(
+        task_type=TaskType.SCAN_ARCHIVE_MEMBERS,
+        payload={"archive_path": str(archive), "archive_type": "zip", "depth": 1},
+        items=("first.txt", "slow.txt", "last.txt"),
+        timeout_seconds=2,
+    )
+    started = time.monotonic()
+    outcome = run_coordinator(ctx, pool, listener, [sink], progress, seed_tasks=[batch])
+
+    assert time.monotonic() - started < 30.0
+    assert outcome == CoordinatorResult(interrupted=False, unfinished=0)
+    assert sorted({r.source_member_path for r in sink.records}) == ["first.txt", "last.txt"]
+    assert progress.incomplete.timed_out == 1, "only the slow member is reported as not scanned"
+    assert "skipping" in log_file.read_text()
 
 
 @pytest.mark.slow

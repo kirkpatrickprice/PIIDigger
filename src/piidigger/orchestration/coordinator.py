@@ -12,12 +12,12 @@ from typing import Any
 from pydantic import ValidationError
 
 from piidigger.models.config import Config
-from piidigger.models.tasks import Task, TaskResult, TaskStarted, TaskType, WorkerReady
+from piidigger.models.tasks import Task, TaskProgress, TaskResult, TaskStarted, TaskType, WorkerReady
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
 from piidigger.orchestration.pool import WorkerPool, spawn_worker
 from piidigger.orchestration.progress import ProgressDisplay
-from piidigger.orchestration.registry import TaskRecord, TaskRegistry
+from piidigger.orchestration.registry import AbandonReason, TaskRecord, TaskRegistry
 from piidigger.orchestration.worker import broadcast_shutdown
 
 # How often (seconds) the coordinator runs its health sweep.  The sweep is
@@ -67,6 +67,21 @@ class CoordinatorResult:
     workers_failed: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class SkippedItem:
+    """One member dropped from a batch because it hung or crashed its worker.
+
+    A dataclass rather than a Pydantic model: every field comes from our own
+    registry and pool.  worker_pid is captured separately because re-queuing
+    the batch clears it on the record.
+    """
+
+    record: TaskRecord
+    item: str
+    reason: AbandonReason
+    worker_pid: int | None
+
+
 @dataclass(frozen=True)
 class SweepResult:
     """What one health sweep found and did, for the coordinator to report.
@@ -85,12 +100,19 @@ class SweepResult:
     redispatched: list[TaskRecord] = field(default_factory=list)
     lost: list[TaskRecord] = field(default_factory=list)
     abandoned: list[TaskRecord] = field(default_factory=list)
+    skipped: list[SkippedItem] = field(default_factory=list)
     stopped_replacing: bool = False
 
     def __bool__(self) -> bool:
         """True when the sweep has anything to report."""
         return bool(
-            self.timed_out or self.crashed or self.redispatched or self.lost or self.abandoned or self.stopped_replacing
+            self.timed_out
+            or self.crashed
+            or self.redispatched
+            or self.lost
+            or self.abandoned
+            or self.skipped
+            or self.stopped_replacing
         )
 
 
@@ -124,6 +146,12 @@ class HealthMonitor:
 
     Because the deadline sweep runs first, a worker replaced for a timeout has
     already left the pool, so the crash sweep cannot replace it a second time.
+
+    Archive batches (tasks with items) get one refinement in steps 1 and 2.
+    When the batch's worker had said which member it was working on, only that
+    member is dropped, and the rest of the batch is re-queued.  That uses no
+    retry budget, because every such re-queue removes a member.  Without a
+    member in progress, a batch follows the same rules as any other task.
 
     A false positive in step 3 is harmless.  A task re-dispatched while its
     original was still pending keeps its task_id, so whichever copy finishes
@@ -162,11 +190,17 @@ class HealthMonitor:
         now = self._clock()
 
         timed_out: list[TaskRecord] = []
+        skipped: list[SkippedItem] = []
         for record in self._registry.expired(now):
-            self._registry.abandon(record.task_id, reason="timed_out")
-            if record.worker_pid is not None:
-                self._pool.replace(record.worker_pid)
-            timed_out.append(record)
+            pid = record.worker_pid
+            culprit = self._registry.requeue_remaining(record.task_id, reason="timed_out")
+            if culprit is not None:
+                skipped.append(SkippedItem(record, culprit, "timed_out", pid))
+            else:
+                self._registry.abandon(record.task_id, reason="timed_out")
+                timed_out.append(record)
+            if pid is not None:
+                self._pool.replace(pid)
 
         was_replacing = self._pool.replacing
         crashed = self._pool.reap_dead()
@@ -177,14 +211,18 @@ class HealthMonitor:
         for record in self._registry.running():
             if record.worker_pid in live:
                 continue
-            if self._registry.redispatch(record.task_id) is not None:
+            pid = record.worker_pid
+            culprit = self._registry.requeue_remaining(record.task_id, reason="crashed")
+            if culprit is not None:
+                skipped.append(SkippedItem(record, culprit, "crashed", pid))
+            elif self._registry.redispatch(record.task_id) is not None:
                 redispatched.append(record)
             else:
                 self._registry.abandon(record.task_id, reason="crashed")
                 abandoned.append(record)
 
         lost: list[TaskRecord] = []
-        if timed_out or crashed or redispatched or abandoned:
+        if timed_out or crashed or redispatched or abandoned or skipped:
             # Something just changed, so quiet has to be observed afresh.
             self._quiet_sweeps = 0
         elif self._work_looks_lost(now):
@@ -207,6 +245,7 @@ class HealthMonitor:
             redispatched=redispatched,
             lost=lost,
             abandoned=abandoned,
+            skipped=skipped,
             stopped_replacing=stopped_replacing,
         )
 
@@ -274,12 +313,8 @@ def _task_path(task: Task | None) -> str:
         return str(p.get("display_path", p.get("file_path", "")))
     if task.task_type == TaskType.ENUM_DIR:
         return str(p.get("path", ""))
-    if task.task_type == TaskType.ENUM_ARCHIVE_MEMBERS:
+    if task.task_type in (TaskType.ENUM_ARCHIVE_MEMBERS, TaskType.SCAN_ARCHIVE_MEMBERS):
         return str(p.get("archive_path", ""))
-    if task.task_type == TaskType.SCAN_ARCHIVE_MEMBER:
-        archive = p.get("archive_path", "")
-        member = p.get("member_path", "")
-        return f"{archive}::{member}" if member else str(archive)
     return ""
 
 
@@ -367,7 +402,7 @@ def run_coordinator(
         progress.report_incomplete(
             timed_out=registry.count_abandoned("timed_out"),
             abandoned=registry.count_abandoned("crashed"),
-            unfinished=len(registry),
+            unfinished=registry.count_unfinished(),
             interrupted=interrupted,
             workers_failed=workers_failed,
         )
@@ -423,10 +458,81 @@ def _handle_message(
             # Expected, not an error: with task ids reused across retries, a
             # redundant copy can start after the task has already retired.
             logger.debug("heartbeat for untracked task %s from pid %d; ignoring", message.task_id, message.worker_pid)
+    elif isinstance(message, TaskProgress):
+        _handle_progress(message, registry, sinks, progress, logger)
     elif isinstance(message, TaskResult):
         _handle_result(message, registry, sinks, progress, logger)
     else:
         logger.warning("coordinator received unexpected message type %s", type(message).__name__)
+
+
+def _handle_progress(
+    message: TaskProgress,
+    registry: TaskRegistry,
+    sinks: list[Any],
+    progress: ProgressDisplay,
+    logger: logging.Logger,
+) -> None:
+    """Apply a TaskProgress: push the deadline back, and write a finished item's findings.
+
+    An item_done the registry does not accept is a duplicate — another copy of
+    the batch already reported that item — so its findings and counters are
+    dropped, exactly as a duplicate TaskResult is.
+    """
+    accepted = registry.record_progress(message.task_id, message.worker_pid, message.event, message.item)
+    if message.event != "item_done":
+        return
+    if not accepted:
+        logger.debug("dropping duplicate progress for %r in task %s", message.item, message.task_id)
+        return
+    _route_to_sinks(message.findings, sinks, logger)
+    if message.findings:
+        progress.log_event("INFO", _findings_summary(message.findings))
+    if message.counters:
+        progress.update(message.counters)
+
+
+def _requeue_failed_batch(
+    result: TaskResult,
+    registry: TaskRegistry,
+    progress: ProgressDisplay,
+    logger: logging.Logger,
+) -> bool:
+    """Keep a batch going when it failed on one member.
+
+    A batch reports an error result when its archive could not be read, which
+    happens while it is working on some member.  If the worker had said which
+    member that was, only that member is counted as failed, and the rest of the
+    batch is re-queued, as after a crash.  Each re-queue removes a member, so a
+    damaged archive cannot loop.  If the archive is unreadable from that point
+    on, the re-queued batch fails again before starting any member, and its
+    members are then counted as failed by the usual result handling.
+
+    Returns True when the batch was re-queued (or finished) here; False when the
+    result needs the usual handling.
+    """
+    record = registry.get(result.task_id)
+    if record is None or not record.task.items or record.worker_pid != result.worker_pid:
+        return False
+    path = _task_path(record.task)
+    culprit = registry.requeue_remaining(result.task_id, reason=None)
+    if culprit is None:
+        return False
+    member = f"{path}::{culprit}"
+    msg = result.error_message or "(no message)"
+    logger.error(
+        "[%s] %r failed: %s; re-queuing the %d member(s) left in the batch",
+        result.task_type.value,
+        member,
+        msg,
+        len(record.remaining),
+    )
+    progress.log_event("ERROR", f"Error: {_truncate_path(member)} — {_short_error(msg)}")
+    update = {"files_scanned": 1, "tasks_failed": 1, "tasks_pending": len(registry)}
+    if result.task_id not in registry:
+        update["tasks_completed"] = 1  # the failed member was the batch's last
+    progress.update(update)
+    return True
 
 
 def _handle_result(
@@ -444,6 +550,8 @@ def _handle_result(
     abandoned.  No other copy of it exists, so a late result is the only report
     of that work, and dropping it would lose real findings.
     """
+    if result.status == "error" and _requeue_failed_batch(result, registry, progress, logger):
+        return
     record = registry.retire(result.task_id)
     if record is None:
         record = registry.reclaim(result.task_id)
@@ -492,12 +600,23 @@ def _handle_result(
     _route_to_sinks(result.findings, sinks, logger)
     if result.findings:
         progress.log_event("INFO", _findings_summary(result.findings))
+    # A batch reports each member through TaskProgress, so by now its remaining
+    # set is normally empty.  Whatever is left was never reported.  On an error
+    # that is expected (the archive broke partway); on success it is a bug, and
+    # either way those members were not scanned.
+    unreported = len(record.remaining) if task.items else 0
+    if unreported and result.status != "error":
+        logger.warning(
+            "[%s] %r finished without reporting %d member(s)", result.task_type.value, _task_path(task), unreported
+        )
     # One update per result, so the display refreshes once.  tasks_pending is
     # read after the children above were enqueued.  A failed task counts as
     # completed for the ETA, and separately as not scanned for the summary.
     update = {**result.counters, "tasks_completed": 1, "tasks_pending": len(registry)}
-    if result.status == "error":
+    if result.status == "error" and not task.items:
         update["tasks_failed"] = 1
+    elif unreported:
+        update["tasks_failed"] = unreported
     progress.update(update)
 
 
@@ -527,6 +646,19 @@ def _report_sweep(
             "WARNING",
             f"Timeout [{task_type}] {_label(record)} — pid={record.worker_pid}, {elapsed:.0f}s/{timeout}s",
         )
+
+    for skip in sweep.skipped:
+        what = "hung" if skip.reason == "timed_out" else "crashed"
+        member = f"{_task_path(skip.record.task)}::{skip.item}"
+        logger.warning(
+            "[%s] skipping %r: its worker (pid=%s) %s on it; re-queuing the %d member(s) left in the batch",
+            skip.record.task.task_type.value,
+            member,
+            skip.worker_pid,
+            what,
+            len(skip.record.remaining),
+        )
+        progress.log_event("WARNING", f"Skipped {_truncate_path(member)} — worker {what}")
 
     for pid, exitcode in sweep.crashed:
         logger.warning("worker pid=%d died unexpectedly (exit code %s); replacing it", pid, exitcode)

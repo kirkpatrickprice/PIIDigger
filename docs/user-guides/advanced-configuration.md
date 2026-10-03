@@ -99,8 +99,8 @@ All settings live in one TOML file. Root-level settings must appear *above* any 
 
 | Setting | Default | Description |
 |---|---|---|
-| `include_exts` | `["all"]` | File extensions to scan (e.g. `[".pdf", ".docx"]`). `["all"]` means every extension with a registered file handler. |
-| `include_mime` | `["all"]` | MIME types to scan, checked in addition to `include_exts` (see note below). `["all"]` means every MIME type with a registered handler. |
+| `include_exts` | `["all"]` | File extensions to scan (e.g. `[".pdf", ".docx"]`), matched regardless of case. `["all"]` means every extension with a registered file handler. Applies to archive members too. |
+| `include_mime` | `["all"]` | MIME types to scan, for files whose extension PIIDigger doesn't recognize (see note below). `["all"]` means every MIME type with a registered handler. |
 | `data_handlers` | `["all"]` | Which PII types to look for (e.g. `["pan"]`, `["email"]`). `["all"]` runs every registered data handler. |
 | `performance` | `"balanced"` | Worker process count preset. `"fast"` = one worker per logical core (e.g. a Hyper-Threaded 8-core Intel CPU has 16 logical cores), `"balanced"` = ~75% of physical cores, `"slow"` = a single worker. |
 | `default_timeout_seconds` | `30` | Per-task deadline (1–600s). A worker that doesn't finish a single directory/file/archive-member task within this window is terminated and replaced; the task is recorded as timed out. This is not an overall scan time limit. |
@@ -109,10 +109,23 @@ All settings live in one TOML file. Root-level settings must appear *above* any 
 | `log_file` | `"logs/piidigger.log"` | Path to the run's log file. The parent folder is created if missing. |
 | `log_level` | `"INFO"` | Standard Python logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 
-**`include_exts` and `include_mime` are OR'd together, not AND'd.** A file is scanned if it matches *either* list. That means restricting only `include_exts` while leaving `include_mime = ["all"]` has no effect — the untouched MIME list still matches everything. If you want extension-based filtering to actually restrict the scan, either leave MIME detection aside entirely (it's best-effort and depends on `puremagic` being installed) and just know both lists need to be narrowed together, or restrict `include_mime` too. In practice, the simplest approach is to only ever edit one of the two and set the other to an empty list `[]` so it can't silently widen the match back to "all":
+**How the two lists work together: the extension decides, MIME is the fallback.**
+
+- If a file's extension is one PIIDigger recognizes (see `piidigger inspect filetypes`), `include_exts` alone decides whether it is scanned. Case doesn't matter: `REPORT.PDF` counts as `.pdf`.
+- If the extension isn't recognized — no extension, or one like `.bak` — PIIDigger detects the file's MIME type, and `include_mime` decides.
+- Archive members are never MIME-detected, so a member is scanned only when its extension is recognized and allowed by `include_exts`.
+
+So to scan only PDFs and Word documents, set just `include_exts`:
 
 ```toml
-include_exts = [".pdf", ".docx", ".xlsx"]
+include_exts = [".pdf", ".docx"]
+include_mime = ["all"]   # still lets an extensionless file in if it is detected as a supported type
+```
+
+Set `include_mime = []` as well if files without a recognized extension should never be scanned:
+
+```toml
+include_exts = [".pdf", ".docx"]
 include_mime = []
 ```
 
@@ -164,7 +177,8 @@ See [Archive Handling](archive-handling.md) for additional details on how PIIDig
 | `max_depth` | `1` | Reserved for future nested-archive support (an archive inside an archive). **Currently has no effect** — a `.zip`/`.7z`/`.tar` found inside another archive is always skipped, regardless of this value. |
 | `max_members` | `10000` | Stop enumerating an archive after this many members. Helps prevent against some archive-based denial of service attacks |
 | `max_member_uncompressed_size_mb` | `512` | Skip any single archive member larger than this uncompressed. Also used as part of a 1000:1 compression-ratio check that rejects likely zip bombs. |
-| `max_total_uncompressed_size_mb` | `8192` | Stop pulling more members from one archive once their combined uncompressed size passes this limit. |
+| `max_total_uncompressed_size_mb` | `8192` | Stop pulling more members from one archive once their combined uncompressed size passes this limit. For compressed `.tar` and `.7z` archives, also skip any member that sits behind more than this much data in the archive. |
+| `max_batch_mb` | `1024` | Each archive is split into at least one scan batch per worker. This adds more batches only for archives larger than workers × this value. Each extra batch re-reads the part of the archive before it, so a higher value saves CPU on very large compressed `.tar` and `.7z` archives. Most users never need to change it. |
 
 These limits also implicitly protect against path-traversal members (`../`) and encrypted members, both of which are always skipped and logged, independent of any setting.
 

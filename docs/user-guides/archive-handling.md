@@ -11,9 +11,13 @@ This is written for a moderately technical reader — someone deciding whether a
 PIIDigger never extracts a whole archive at once. For each archive it finds:
 
 1. It first lists the archive's members (filenames and sizes) without extracting any content — this is how size limits and encryption/path-traversal checks are applied before anything touches disk.
-2. Each member that passes those checks **and** is a file type supported by PIIDigger becomes its own scan task. A worker process picks up that task, extracts **just that one member** to a temporary file, scans it, and then deletes that temporary file — before moving on to the next member.
+2. The members that pass those checks **and** are a file type supported by PIIDigger — judged by extension, regardless of case, and filtered by `include_exts` just like files on disk — are split into a few batches — at least one per worker process — each a run of members stored next to each other in the archive. A worker picks up a batch and reads through the archive once. It extracts **one member** to a temporary file, scans it, and deletes that temporary file before it extracts the next member.
 
-Because each member is its own task, and PIIDigger typically runs several worker processes at once (see the `performance` setting in [Advanced Configuration](advanced-configuration.md)), a handful of members can be on disk in their extracted form simultaneously — one per active worker — but never the full contents of the archive at once.
+Reading a batch in one pass matters for compressed `.tar` files and `.7z` files. Those formats store their members in one compressed stream, so reaching any member means decompressing everything stored before it. Reading members in runs keeps the total work in line with the archive's size.
+
+PIIDigger typically runs several worker processes at once (see the `performance` setting in [Advanced Configuration](advanced-configuration.md)), so a handful of members can be on disk in their extracted form simultaneously — one per active worker — but never the full contents of the archive at once.
+
+Findings are recorded as soon as each member is scanned. If one member takes too long or crashes its worker, PIIDigger skips that member, logs it, and carries on with the rest of the batch.
 
 ### Symlinks and other non-regular members
 
@@ -32,7 +36,7 @@ A malicious or corrupt archive can claim to contain far more data than is reason
 - **Member count cap** — `max_members` (default `10000`). Once this many members have been accepted from one archive, enumeration of that archive stops entirely; every remaining member is counted as skipped without being evaluated individually.
 - **Per-member size cap** — `max_member_uncompressed_size_mb` (default `512`). Any single member whose declared uncompressed size exceeds this is skipped, regardless of how small it is compressed.
 - **Compression-ratio heuristic** — a fixed check, not a separate config setting: any member whose declared uncompressed size is more than **1,000 times** its compressed size is rejected outright as a probable bomb, even if it would otherwise fit under the per-member size cap. Highly repetitive data (the classic zip-bomb technique) compresses to a tiny fraction of its expanded size, so this catches bombs that a size cap alone could miss if the cap were set generously.
-- **Running total cap** — `max_total_uncompressed_size_mb` (default `8192`). PIIDigger tracks the combined declared uncompressed size of every member accepted so far from one archive. Once accepting the next member would push that running total over the cap, that member is skipped — but enumeration continues, so a smaller member later in the archive can still be accepted if it fits.
+- **Running total cap** — `max_total_uncompressed_size_mb` (default `8192`). PIIDigger tracks the combined declared uncompressed size of every member accepted so far from one archive. Once accepting the next member would push that running total over the cap, that member is skipped — but enumeration continues, so a smaller member later in the archive can still be accepted if it fits. For compressed `.tar` and `.7z` archives, the same cap also limits how deep in the archive a member may sit: a member is skipped if reaching it means decompressing more than this much data, including members that were skipped earlier. `.zip` members can be read directly, so this part of the check never applies to them.
 
 Because all four checks run against the archive's own header metadata during the up-front listing pass, a member that fails any of them is never extracted, and its data never touches disk. This is the same listing pass described in [How Archive Scanning Works](#how-archive-scanning-works) — size and ratio safety is one of the things that pass exists to establish before any extraction is allowed to happen.
 

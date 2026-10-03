@@ -431,3 +431,85 @@ def test_breaker_trip_is_reported_once() -> None:
     assert not h.pool.replacing
     assert h.pool.size == 0
     assert not h.monitor.tick().stopped_replacing, "reported on the tick it happened, not again"
+
+
+# ---------------------------------------------------------------------------
+# Archive batches: skip the member in progress, re-queue the rest
+# ---------------------------------------------------------------------------
+
+
+def _run_batch(h: Harness, worker: FakeProcess, *items: str, timeout: int = 30) -> Task:
+    task = Task(task_type=TaskType.SCAN_ARCHIVE_MEMBERS, timeout_seconds=timeout, items=items)
+    h.registry.enqueue(task)
+    assert worker.pid is not None
+    h.heartbeat(task, worker.pid)
+    return task
+
+
+@pytest.mark.unit
+def test_hung_batch_member_is_skipped_and_the_rest_requeued() -> None:
+    h = Harness()
+    worker = h.worker(0)
+    assert worker.pid is not None
+    task = _run_batch(h, worker, "a", "b", "c")
+    h.registry.record_progress(task.task_id, worker.pid, "item_done", "a")
+    h.registry.record_progress(task.task_id, worker.pid, "item_started", "b")
+    h.clock.advance(61.0)
+
+    sweep = h.monitor.tick()
+
+    assert sweep.timed_out == [], "the batch itself was not given up on"
+    assert [(s.item, s.reason, s.worker_pid) for s in sweep.skipped] == [("b", "timed_out", worker.pid)]
+    assert worker.terminate_calls == 1, "the hung worker is still replaced"
+    assert h.dispatched[-1].items == ("c",)
+    assert task.task_id in h.registry
+    assert h.registry.count_abandoned("timed_out") == 1
+
+
+@pytest.mark.unit
+def test_batch_progress_keeps_a_long_batch_alive() -> None:
+    h = Harness()
+    worker = h.worker(0)
+    assert worker.pid is not None
+    task = _run_batch(h, worker, "a", "b", "c")
+    for item in ("a", "b"):
+        h.clock.advance(50.0)
+        h.registry.record_progress(task.task_id, worker.pid, "item_done", item)
+
+    h.clock.advance(50.0)  # 150 s in, but only 50 s since the last progress
+    sweep = h.monitor.tick()
+
+    assert not sweep
+    assert worker.terminate_calls == 0
+
+
+@pytest.mark.unit
+def test_hung_batch_with_no_member_in_progress_is_abandoned_as_before() -> None:
+    h = Harness()
+    task = _run_batch(h, h.worker(0), "a", "b")
+    h.clock.advance(61.0)
+
+    sweep = h.monitor.tick()
+
+    assert [r.task_id for r in sweep.timed_out] == [task.task_id]
+    assert sweep.skipped == []
+    assert h.registry.count_abandoned("timed_out") == 2, "both unfinished members are counted"
+
+
+@pytest.mark.unit
+def test_crash_on_a_batch_member_skips_it_without_spending_the_retry_budget() -> None:
+    h = Harness()
+    worker = h.worker(0)
+    assert worker.pid is not None
+    task = _run_batch(h, worker, "a", "b")
+    h.registry.record_progress(task.task_id, worker.pid, "item_started", "a")
+    worker.crash()
+
+    sweep = h.monitor.tick()
+
+    assert [(s.item, s.reason) for s in sweep.skipped] == [("a", "crashed")]
+    assert sweep.redispatched == []
+    assert h.dispatched[-1].items == ("b",)
+    record = h.registry.get(task.task_id)
+    assert record is not None
+    assert record.attempt == 0

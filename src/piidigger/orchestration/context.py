@@ -30,10 +30,13 @@ class WorkerContext:
     All members must be pickle-safe for Windows multiprocessing spawn.
 
     temp_base is the root directory for per-task temp workspaces used by
-    archive member extraction (handle_scan_archive_member() -> extract_member()).
+    archive member extraction (handle_scan_archive_members() -> extract_members()).
     run_scan() creates a piidigger-prefixed directory and adds it to
     exclude_dirs so ENUM_DIR never scans it.
     The default (system temp dir) is safe for tests that do not scan archives.
+
+    n_workers is the size of the worker pool.  Archive enumeration splits each
+    archive into at least this many batches so every worker gets a share.
     """
 
     config: Config
@@ -42,3 +45,4 @@ class WorkerContext:
     log_queue: mp.Queue[Any]
     stop_event: mp.synchronize.Event
     temp_base: Path = field(default_factory=lambda: Path(tempfile.gettempdir()))
+    n_workers: int = 1

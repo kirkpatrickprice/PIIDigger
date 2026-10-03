@@ -128,7 +128,7 @@ def test_incomplete_work_gets_its_own_line(
     assert "tasks_failed" not in first, "failures belong on the second line, not in the totals"
     assert second == (
         "Not fully scanned: 4 files or folders were skipped — 2 failed with an error, "
-        "1 timed out, 1 abandoned after repeated worker crashes. See the log for details."
+        "1 timed out, 1 abandoned after crashing a worker. See the log for details."
     )
 
 
@@ -191,4 +191,4 @@ def test_workers_failing_to_start_is_not_reported_as_complete(
 
     first, second = capsys.readouterr().out.splitlines()
     assert first.startswith("Scan stopped early: workers could not start.")
-    assert "2 abandoned after repeated worker crashes" in second
+    assert "2 abandoned after crashing a worker" in second

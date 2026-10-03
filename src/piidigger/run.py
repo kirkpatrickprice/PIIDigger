@@ -226,6 +226,9 @@ def run_scan(config: Config) -> int:
     run_logger.info("temp workspace: %s", temp_base)
     runtime_config = config.model_copy(update={"exclude_dirs": [*config.exclude_dirs, str(temp_base)]})
 
+    logical_cores = os.cpu_count() or 1
+    physical_cores = psutil.cpu_count(logical=False) or logical_cores
+    worker_count = _resolve_workers(config.performance, physical_cores, logical_cores)
     ctx = WorkerContext(
         config=runtime_config,
         task_queue=task_queue,
@@ -233,10 +236,8 @@ def run_scan(config: Config) -> int:
         log_queue=log_queue,
         stop_event=stop_event,
         temp_base=temp_base,
+        n_workers=worker_count,
     )
-    logical_cores = os.cpu_count() or 1
-    physical_cores = psutil.cpu_count(logical=False) or logical_cores
-    worker_count = _resolve_workers(config.performance, physical_cores, logical_cores)
     pool = WorkerPool(lambda: spawn_worker(ctx), logger=build_worker_logger(log_queue, "pool"))
     pool.start(worker_count)
 

@@ -97,7 +97,7 @@ def _symlink_member() -> None:
     """Archive with a regular file plus a symlink member.
 
     The symlink should be excluded by list_members() (Decision 5) and
-    never produce a SCAN_ARCHIVE_MEMBER task.
+    never be scanned.
     """
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:") as tf:

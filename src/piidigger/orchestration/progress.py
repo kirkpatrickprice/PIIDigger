@@ -52,7 +52,9 @@ class IncompleteWork:
     * failed: the handler returned an error, for example access denied or an
       unreadable file.
     * timed_out: ran past its deadline and was stopped.
-    * abandoned: its worker crashed on every attempt the retry budget allowed.
+    * abandoned: crashed its worker.  A file or folder is abandoned after
+      crashing on every attempt the retry budget allowed.  An archive member is
+      dropped after crashing once, so the rest of its batch can carry on.
     * unfinished: still outstanding when the scan stopped, usually because it
       was interrupted.
 
@@ -77,7 +79,7 @@ def _incomplete_summary(work: IncompleteWork) -> str | None:
     reasons = [
         (work.failed, "failed with an error"),
         (work.timed_out, "timed out"),
-        (work.abandoned, "abandoned after repeated worker crashes"),
+        (work.abandoned, "abandoned after crashing a worker"),
         (work.unfinished, "unfinished when the scan stopped"),
     ]
     detail = ", ".join(f"{n:,} {why}" for n, why in reasons if n)

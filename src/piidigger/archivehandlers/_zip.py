@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import shutil
 import stat
+import zlib
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile, ZipInfo
 
+from piidigger.archivehandlers._progress_io import open_with_progress
 from piidigger.exceptions import ArchiveReadError
 from piidigger.models.archive import MemberInfo
 
@@ -15,6 +19,12 @@ HANDLES = {
 # ZipInfo.create_system value meaning "this entry's metadata was written by a
 # Unix zip tool" — only then are external_attr's upper 16 bits a unix st_mode.
 _UNIX_CREATE_SYSTEM = 3
+
+# Errors that spoil one member but leave the rest of the archive readable: a
+# CRC mismatch or corrupt deflate stream, an unsupported compression method,
+# an encrypted entry, or an OS refusal to write this member's file (a reserved
+# name such as aux.txt on Windows, a path too long, a full disk).
+_MEMBER_ERRORS = (BadZipFile, zlib.error, NotImplementedError, RuntimeError, EOFError, OSError)
 
 
 def _is_symlink(info: ZipInfo) -> bool:
@@ -29,9 +39,9 @@ def _is_symlink(info: ZipInfo) -> bool:
 
 
 class ZipArchiveHandler:
-    def list_members(self, archive_path: Path) -> list[MemberInfo]:
+    def list_members(self, archive_path: Path, on_progress: Callable[[], None] | None = None) -> list[MemberInfo]:
         try:
-            with ZipFile(archive_path, "r") as zf:
+            with open_with_progress(archive_path, on_progress) as raw, ZipFile(raw, "r") as zf:
                 return [
                     MemberInfo(
                         name=info.filename,
@@ -46,14 +56,50 @@ class ZipArchiveHandler:
         except (BadZipFile, OSError) as exc:
             raise ArchiveReadError(str(exc)) from exc
 
-    def extract_member(self, archive_path: Path, member_path: str, dest_dir: Path) -> Path:
+    def extract_members(
+        self,
+        archive_path: Path,
+        member_paths: Sequence[str],
+        dest_dir: Path,
+        *,
+        on_extracted: Callable[[str, Path], None],
+        on_started: Callable[[str], None] | None = None,
+        on_failed: Callable[[str, str], None] | None = None,
+        on_progress: Callable[[], None] | None = None,
+    ) -> None:
+        """Open the archive once and stream each requested member to its own file.
+
+        Zip reads any member directly, so the order costs nothing; members are
+        taken in the order given.  Each one is extracted flat, to
+        dest_dir / basename, which is safe because the caller deletes it before
+        the next one is written.
+
+        When a name occurs more than once, the first entry is extracted.  That
+        is the entry enumeration ran its size, ratio and encryption checks on;
+        taking any other would let an unchecked entry through.
+        """
         try:
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / Path(member_path).name
-            with ZipFile(archive_path, "r") as zf:
-                dest.write_bytes(zf.read(member_path))
-            return dest
-        except (BadZipFile, OSError, KeyError) as exc:
+            with open_with_progress(archive_path, on_progress) as raw, ZipFile(raw, "r") as zf:
+                first_entry: dict[str, ZipInfo] = {}
+                for info in zf.infolist():
+                    first_entry.setdefault(info.filename, info)
+                for member in member_paths:
+                    entry = first_entry.get(member)
+                    if entry is None:
+                        continue
+                    if on_started is not None:
+                        on_started(member)
+                    dest = dest_dir / Path(member).name
+                    try:
+                        with zf.open(entry) as src, dest.open("wb") as out:
+                            shutil.copyfileobj(src, out)
+                    except _MEMBER_ERRORS as exc:
+                        if on_failed is not None:
+                            on_failed(member, str(exc))
+                        continue
+                    on_extracted(member, dest)
+        except (BadZipFile, OSError) as exc:
             raise ArchiveReadError(str(exc)) from exc
 
 

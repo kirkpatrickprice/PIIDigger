@@ -14,7 +14,7 @@ from piidigger.orchestration.logging_setup import build_worker_logger, setup_war
 from piidigger.orchestration.secure_delete import secure_rmtree
 from piidigger.orchestration.worker._enum_archive import handle_enum_archive_members
 from piidigger.orchestration.worker._enum_dir import handle_enum_dir
-from piidigger.orchestration.worker._scan_archive_member import handle_scan_archive_member
+from piidigger.orchestration.worker._scan_archive_members import handle_scan_archive_members
 from piidigger.orchestration.worker._scan_file import handle_scan_file
 
 type _HandlerFn = Callable[[Task, WorkerContext, logging.Logger], TaskResult]
@@ -45,7 +45,7 @@ DISPATCH: dict[TaskType, _HandlerFn] = {
     TaskType.ENUM_DIR: handle_enum_dir,
     TaskType.SCAN_FILE: handle_scan_file,
     TaskType.ENUM_ARCHIVE_MEMBERS: handle_enum_archive_members,
-    TaskType.SCAN_ARCHIVE_MEMBER: handle_scan_archive_member,
+    TaskType.SCAN_ARCHIVE_MEMBERS: handle_scan_archive_members,
 }
 
 

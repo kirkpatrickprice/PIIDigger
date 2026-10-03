@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import IO, Protocol, runtime_checkable
 
@@ -50,25 +50,54 @@ class ArchiveHandler(Protocol):
     """Implemented by each format module in piidigger/archivehandlers/.
 
     list_members() inspects the archive without extracting any content to disk.
-    extract_member() extracts one member to a caller-provided directory and
-    returns the path to the extracted file.  The caller owns the file's
-    lifecycle; cleanup is handled by _cleanup_temp_workspace() in the worker loop.
+    extract_members() extracts a run of members one at a time, handing each to
+    a callback before it touches the next.  Opening the archive once per run,
+    rather than once per member, is what keeps compressed tar and solid 7z
+    linear: reaching a member in those formats means decompressing everything
+    stored before it.
+
+    Callbacks are plain callables, so handlers never see a queue or a logger.
     """
 
-    def list_members(self, archive_path: Path) -> list[MemberInfo]:
-        """Return all entries (dirs and files) from the archive.
+    def list_members(self, archive_path: Path, on_progress: Callable[[], None] | None = None) -> list[MemberInfo]:
+        """Return all entries (dirs and files) from the archive, in the order they are stored.
+
+        on_progress is called as the archive is read, so a long listing (a
+        compressed tar is decompressed end to end) keeps its task alive.
 
         Raises ArchiveReadError on any open or parse failure.
         No content is extracted to disk during this call.
         """
         ...
 
-    def extract_member(self, archive_path: Path, member_path: str, dest_dir: Path) -> Path:
-        """Extract one member to dest_dir and return the file path.
+    def extract_members(
+        self,
+        archive_path: Path,
+        member_paths: Sequence[str],
+        dest_dir: Path,
+        *,
+        on_extracted: Callable[[str, Path], None],
+        on_started: Callable[[str], None] | None = None,
+        on_failed: Callable[[str, str], None] | None = None,
+        on_progress: Callable[[], None] | None = None,
+    ) -> None:
+        """Extract the requested members to dest_dir in archive order, one at a time.
 
-        The returned path may be nested under dest_dir (implementations are not
-        required to flatten subdirectory structure) — _cleanup_temp_workspace()
-        removes the whole dest_dir tree regardless of shape.  Creates dest_dir
-        if it does not exist.  Raises ArchiveReadError on failure.
+        For each member: on_started(member) just before it is extracted, then
+        on_extracted(member, path) once it is on disk.  The handler does not
+        move on until on_extracted returns, so the caller can scan and delete
+        the file and only one member is ever on disk.  The path may be nested
+        under dest_dir.  Creates dest_dir if it does not exist.
+
+        A member that cannot be extracted on its own (say, a filter rejects it)
+        is passed to on_failed(member, reason) and the run continues.  A
+        requested member never reported to either callback was not found.
+
+        on_progress is called as compressed bytes are read, including while
+        skipping the part of the archive before the first requested member.
+
+        Raises ArchiveReadError when the archive itself cannot be read (cannot
+        open, corrupt stream, CRC failure).  Members already handed to
+        on_extracted stay reported; the rest are not.
         """
         ...

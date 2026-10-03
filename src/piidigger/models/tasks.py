@@ -15,16 +15,27 @@ class TaskType(StrEnum):
     SCAN_FILE = "scan_file"
     NOOP = "noop"  # kept for integration tests; pass {"delay_seconds": N} in payload to simulate slow tasks
     ENUM_ARCHIVE_MEMBERS = "enum_archive_members"
-    SCAN_ARCHIVE_MEMBER = "scan_archive_member"
+    SCAN_ARCHIVE_MEMBERS = "scan_archive_members"
 
 
 class Task(PiiDiggerModel):
+    """One unit of dispatched work.
+
+    items is the task's work list when it covers several things — for a
+    SCAN_ARCHIVE_MEMBERS batch, the member paths still to scan, in archive
+    order.  The registry shrinks it as TaskProgress reports each item done, so a
+    re-queued copy starts where the last attempt stopped.  The registry never
+    reads the payload; items is the only part of a task it changes.  Empty for
+    task types that do one thing.
+    """
+
     model_config = ConfigDict(frozen=True)
 
     task_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     task_type: TaskType
     payload: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = Field(default=30, ge=1, le=600)
+    items: tuple[str, ...] = ()
 
 
 class TaskResult(PiiDiggerModel):
@@ -37,6 +48,35 @@ class TaskResult(PiiDiggerModel):
     error_message: str | None = None
     duration_seconds: float = Field(default=0.0, ge=0.0)
     worker_pid: int | None = None
+
+
+type ProgressEvent = Literal["item_started", "item_done", "alive"]
+
+
+class TaskProgress(PiiDiggerModel):
+    """Placed on result_queue while a long task runs, between TaskStarted and TaskResult.
+
+    * item_started: the worker is about to work on `item`.  If the worker then
+      hangs or dies, the coordinator knows which item to blame.
+    * item_done: `item` is finished.  Carries that item's findings and
+      counters, so they reach the output even if a later item hangs.
+    * alive: the worker is reading data but has not finished an item.  Sent at
+      most once a second, and only when bytes actually move — never from a
+      timer — so a stuck worker goes quiet and its deadline still fires.
+
+    Every event from the worker that holds the task pushes its deadline back.
+
+    A Pydantic model rather than a dataclass, because findings come from file
+    content.  TaskStarted, which carries only values we generate, stays a
+    dataclass.
+    """
+
+    task_id: str
+    worker_pid: int
+    event: ProgressEvent
+    item: str | None = None
+    findings: list[dict[str, Any]] = Field(default_factory=list)
+    counters: dict[str, int] = Field(default_factory=dict)
 
 
 @dataclass(frozen=True)

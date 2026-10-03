@@ -78,7 +78,7 @@ def _is_cloud_placeholder(path: Path) -> bool:
 
 def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
     """Enumerate one directory: produce ENUM_DIR tasks for subdirs and SCAN_FILE tasks for files."""
-    from piidigger.filehandlers import get_handler_for  # lazy: xlrd import triggers SyntaxWarning
+    from piidigger.filehandlers import select_handler  # lazy: xlrd import triggers SyntaxWarning
 
     payload = EnumDirPayload(**task.payload)
     path = payload.path
@@ -154,15 +154,9 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
                     # using uncompressed member sizes — not the compressed on-disk size here.
                     continue
 
-                # Filter by include_exts / include_mime
-                include_all_exts = "all" in config.include_exts
-                include_all_mime = "all" in config.include_mime
-                ext_ok = include_all_exts or ext in config.include_exts
-                mime_ok = include_all_mime or (mime is not None and mime in config.include_mime)
-
-                if not (ext_ok or mime_ok):
-                    continue
-                if get_handler_for(ext, mime) is None:
+                # include_exts / include_mime, and a handler to read it with.
+                # The same rule is applied to archive members.
+                if select_handler(ext, mime, config.include_exts, config.include_mime) is None:
                     continue
 
                 try:

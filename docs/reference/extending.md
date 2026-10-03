@@ -34,10 +34,11 @@ Writes findings to a new output format.
 
 Lists and extracts members from a new archive container type.
 
-- **Protocol:** `ArchiveHandler` — `list_members(archive_path) -> list[MemberInfo]`, `extract_member(archive_path, member_path, dest_dir) -> Path`
+- **Protocol:** `ArchiveHandler` — `list_members(archive_path, on_progress) -> list[MemberInfo]`, `extract_members(archive_path, member_paths, dest_dir, *, on_extracted, on_started, on_failed, on_progress) -> None`
 - **Existing examples:** `piidigger/archivehandlers/_zip.py`, `_7z.py`, `_tar.py`
 - **Register:** give the module an `ARCHIVE_TYPE` string and a `HANDLES = {"ext": [...]}` dict, then add the module to `_MODULES` in `piidigger/archivehandlers/__init__.py`.
-- `list_members()` must never extract content to disk — size/ratio/path-traversal safety checks run against this listing before anything is extracted. See [Archive Handling](../user-guides/archive-handling.md) for the safety model new archive handlers need to preserve.
+- `list_members()` must never extract content to disk — size/ratio/path-traversal safety checks run against this listing before anything is extracted. It returns members in the order they are stored, each with a `decompress_offset`. See [Archive Handling](../user-guides/archive-handling.md) for the safety model new archive handlers need to preserve.
+- `extract_members()` opens the archive once and hands members over one at a time: it must not extract the next member until `on_extracted` returns. Read the archive through `open_with_progress()` so long reads keep the task alive. See [Archive Handling (architecture)](../architecture/archives/archive-handling.md#extension-points) for why.
 
 ## Adding a new config setting
 

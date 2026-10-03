@@ -538,3 +538,175 @@ def test_contains_reflects_membership() -> None:
     assert task.task_id in reg
     reg.retire(task.task_id)
     assert task.task_id not in reg
+
+
+# ---------------------------------------------------------------------------
+# Batches — tasks with items, and TaskProgress
+# ---------------------------------------------------------------------------
+
+_PID = 4242
+
+
+def _batch(*items: str, timeout: int = 30) -> Task:
+    return Task(task_type=TaskType.SCAN_ARCHIVE_MEMBERS, timeout_seconds=timeout, items=items)
+
+
+def _running_batch(*items: str) -> tuple[TaskRegistry, list[Task], FakeClock, Task]:
+    clock = FakeClock()
+    reg, dispatched = _registry(clock)
+    task = _batch(*items)
+    reg.enqueue(task)
+    reg.record_start(task.task_id, _PID)
+    return reg, dispatched, clock, task
+
+
+@pytest.mark.unit
+def test_progress_from_the_holder_pushes_the_deadline_back() -> None:
+    reg, _, clock, task = _running_batch("a", "b")
+    clock.advance(50.0)
+    reg.record_progress(task.task_id, _PID, "alive", None)
+    clock.advance(50.0)  # 100 s since start, 50 s since progress
+
+    assert reg.expired() == []
+    clock.advance(11.0)  # 61 s of silence
+    assert [r.task_id for r in reg.expired()] == [task.task_id]
+
+
+@pytest.mark.unit
+def test_progress_from_another_pid_does_not_extend_the_deadline() -> None:
+    """A superseded copy of a task must not keep the current attempt alive."""
+    reg, _, clock, task = _running_batch("a")
+    clock.advance(50.0)
+    reg.record_progress(task.task_id, _PID + 1, "alive", None)
+    clock.advance(11.0)
+
+    assert [r.task_id for r in reg.expired()] == [task.task_id]
+
+
+@pytest.mark.unit
+def test_item_done_is_accepted_once() -> None:
+    reg, _, _, task = _running_batch("a", "b")
+
+    assert reg.record_progress(task.task_id, _PID, "item_done", "a") is True
+    assert reg.record_progress(task.task_id, _PID, "item_done", "a") is False, "a duplicate must be dropped"
+    record = reg.get(task.task_id)
+    assert record is not None
+    assert list(record.remaining) == ["b"]
+
+
+@pytest.mark.unit
+def test_item_started_marks_the_current_item_only_for_the_holder() -> None:
+    reg, _, _, task = _running_batch("a", "b")
+    record = reg.get(task.task_id)
+    assert record is not None
+
+    reg.record_progress(task.task_id, _PID + 1, "item_started", "a")
+    assert record.current_item is None
+    reg.record_progress(task.task_id, _PID, "item_started", "a")
+    assert record.current_item == "a"
+    reg.record_progress(task.task_id, _PID, "item_done", "a")
+    assert record.current_item is None
+
+
+@pytest.mark.unit
+def test_requeue_remaining_drops_the_culprit_and_requeues_the_rest() -> None:
+    reg, dispatched, _, task = _running_batch("a", "b", "c", "d")
+    reg.record_progress(task.task_id, _PID, "item_done", "a")
+    reg.record_progress(task.task_id, _PID, "item_started", "b")
+
+    culprit = reg.requeue_remaining(task.task_id, reason="timed_out")
+
+    assert culprit == "b"
+    requeued = dispatched[-1]
+    assert requeued.task_id == task.task_id
+    assert requeued.items == ("c", "d"), "the requeued batch starts after the culprit"
+    record = reg.get(task.task_id)
+    assert record is not None
+    assert record.attempt == 0, "dropping a culprit uses no retry budget"
+    assert not record.is_running
+    assert reg.count_abandoned("timed_out") == 1
+    assert reg.count_unfinished() == 2
+
+
+@pytest.mark.unit
+def test_requeue_remaining_without_an_item_in_progress_does_nothing() -> None:
+    reg, dispatched, _, task = _running_batch("a", "b")
+
+    assert reg.requeue_remaining(task.task_id, reason="crashed") is None
+    assert dispatched == [task]
+
+
+@pytest.mark.unit
+def test_requeue_remaining_on_the_last_item_abandons_the_task() -> None:
+    reg, dispatched, _, task = _running_batch("a")
+    reg.record_progress(task.task_id, _PID, "item_started", "a")
+
+    assert reg.requeue_remaining(task.task_id, reason="crashed") == "a"
+    assert len(reg) == 0
+    assert dispatched == [task], "nothing left to requeue"
+    assert reg.count_abandoned("crashed") == 1
+
+
+@pytest.mark.unit
+def test_late_item_done_for_a_skipped_item_is_accepted_and_uncounted() -> None:
+    """The item_done was already on the queue when the sweep blamed the item."""
+    reg, _, _, task = _running_batch("a", "b")
+    reg.record_progress(task.task_id, _PID, "item_started", "a")
+    reg.requeue_remaining(task.task_id, reason="timed_out")
+
+    assert reg.record_progress(task.task_id, _PID, "item_done", "a") is True
+    assert reg.record_progress(task.task_id, _PID, "item_done", "a") is False
+    assert reg.count_abandoned("timed_out") == 0
+
+
+@pytest.mark.unit
+def test_late_item_done_for_an_abandoned_batch_is_accepted_once() -> None:
+    reg, _, _, task = _running_batch("a", "b")
+    reg.abandon(task.task_id, reason="timed_out")
+    assert reg.count_abandoned("timed_out") == 2, "an abandoned batch counts its unfinished members"
+
+    assert reg.record_progress(task.task_id, _PID, "item_done", "a") is True
+    assert reg.record_progress(task.task_id, _PID, "item_done", "a") is False
+    assert reg.count_abandoned("timed_out") == 1
+
+
+@pytest.mark.unit
+def test_redispatch_trims_a_batch_to_what_remains() -> None:
+    reg, dispatched, _, task = _running_batch("a", "b", "c")
+    reg.record_progress(task.task_id, _PID, "item_done", "a")
+
+    reg.redispatch(task.task_id)
+
+    assert dispatched[-1].items == ("b", "c")
+    record = reg.get(task.task_id)
+    assert record is not None
+    assert record.attempt == 1
+
+
+@pytest.mark.unit
+def test_progress_for_an_unknown_task_is_rejected() -> None:
+    reg, _ = _registry()
+    assert reg.record_progress("nope", _PID, "item_done", "a") is False
+    assert reg.record_progress("nope", _PID, "alive", None) is False
+
+
+@pytest.mark.unit
+def test_requeue_remaining_after_an_error_result_keeps_no_skip_record() -> None:
+    """The worker reported the failure itself; the caller counts it, not the registry."""
+    reg, dispatched, _, task = _running_batch("a", "b")
+    reg.record_progress(task.task_id, _PID, "item_started", "a")
+
+    assert reg.requeue_remaining(task.task_id, reason=None) == "a"
+    assert dispatched[-1].items == ("b",)
+    assert reg.count_abandoned("timed_out") == reg.count_abandoned("crashed") == 0
+
+
+@pytest.mark.unit
+def test_requeue_remaining_after_an_error_on_the_last_item_retires_the_task() -> None:
+    reg, dispatched, _, task = _running_batch("a")
+    reg.record_progress(task.task_id, _PID, "item_started", "a")
+
+    assert reg.requeue_remaining(task.task_id, reason=None) == "a"
+    assert len(reg) == 0
+    assert dispatched == [task]
+    assert reg.count_abandoned("crashed") == 0

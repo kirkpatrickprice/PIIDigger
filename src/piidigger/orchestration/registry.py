@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
-from piidigger.models.tasks import Task
+from piidigger.models.tasks import ProgressEvent, Task
 
 # Maximum re-dispatch attempts before a task is abandoned.  The budget is what
 # stops a poison task — a malformed file that segfaults a C parser, killing its
@@ -31,9 +31,10 @@ MAX_RETRIES: int = 3
 # deadline.  "crashed": its worker died on every attempt the retry budget allowed.
 type AbandonReason = Literal["timed_out", "crashed"]
 
-# A task's wall-clock deadline is this multiple of its declared timeout.  The
-# slack absorbs queue latency and scheduling jitter, so only a genuinely hung
-# task trips it.
+# A task's wall-clock deadline is this multiple of its declared timeout, counted
+# from its start or from its last TaskProgress, whichever is later.  The slack
+# absorbs queue latency and scheduling jitter, so only a genuinely hung task
+# trips it.
 _DEADLINE_FACTOR: int = 2
 
 
@@ -61,6 +62,14 @@ class TaskRecord:
     enqueue() puts the Task on the queue, not the record.
 
     started_at is the state marker: None means QUEUED, set means RUNNING.
+
+    The last three fields matter only for a task with items (an archive
+    batch).  remaining is the single record of the items still to do.  It is
+    a dict used as an ordered set: it keeps archive order and removes in O(1),
+    where removing from the front of a list would itself be quadratic over a
+    10,000-member batch.  current_item is the item the holding worker said it
+    was starting and has not yet finished — the one to blame if the worker
+    hangs or dies.
     """
 
     task: Task
@@ -68,6 +77,9 @@ class TaskRecord:
     attempt: int = 0
     worker_pid: int | None = None
     started_at: float | None = None
+    last_progress_at: float | None = None
+    current_item: str | None = None
+    remaining: dict[str, None] = field(default_factory=dict)
 
     @property
     def task_id(self) -> str:
@@ -85,10 +97,20 @@ class TaskRecord:
         A queued task has no deadline because no worker has claimed it yet.
         That is precisely why the deadline sweep alone cannot recover a task
         lost before its heartbeat — the lost-task sweep covers that case.
+
+        Progress from the holding worker moves the deadline forward, so a long
+        batch that keeps finishing members never times out, while one that goes
+        quiet times out exactly as a single-file task does.
         """
         if self.started_at is None:
             return None
-        return self.started_at + _DEADLINE_FACTOR * self.task.timeout_seconds
+        last_sign_of_life = max(self.started_at, self.last_progress_at or self.started_at)
+        return last_sign_of_life + _DEADLINE_FACTOR * self.task.timeout_seconds
+
+    @property
+    def units(self) -> int:
+        """How many files or members this record stands for, for the end-of-scan summary."""
+        return len(self.remaining) if self.task.items else 1
 
 
 class TaskRegistry:
@@ -135,6 +157,11 @@ class TaskRegistry:
         # accepted.  See abandon().  Only timeouts and exhausted retry budgets land
         # here, so it stays small.
         self._abandoned: dict[str, tuple[TaskRecord, AbandonReason]] = {}
+        # Items dropped from a batch because they hung or crashed their worker,
+        # keyed by (task_id, item).  Kept apart from the records because the
+        # batch carries on and is eventually retired, but the skipped item still
+        # belongs in the end-of-scan summary.  See requeue_remaining().
+        self._skipped: dict[tuple[str, str], AbandonReason] = {}
 
     # -- size / termination -------------------------------------------------
 
@@ -162,7 +189,12 @@ class TaskRegistry:
         its heartbeat almost immediately, and that heartbeat must not arrive for
         a task the registry has not heard of yet.
         """
-        record = TaskRecord(task=task, enqueued_at=self._clock(), attempt=attempt)
+        record = TaskRecord(
+            task=task,
+            enqueued_at=self._clock(),
+            attempt=attempt,
+            remaining=dict.fromkeys(task.items),
+        )
         self._records[task.task_id] = record
         self._put(task)
         return record
@@ -210,17 +242,111 @@ class TaskRegistry:
         A budget-exhausted task is left in the registry.  The caller decides how
         to report giving up and then retires it, so "never heard of it" stays
         distinguishable from "tried and gave up".
+
+        A batch goes back on the queue carrying only the items not yet done.
         """
         record = self._records.get(task_id)
         if record is None or record.attempt >= self._max_retries:
             return None
         record.attempt += 1
+        self._requeue(record)
+        return record
+
+    def requeue_remaining(self, task_id: str, reason: AbandonReason | None) -> str | None:
+        """Drop the item a batch was working on when it failed; re-queue the rest.
+
+        reason says how the batch failed.  "timed_out" and "crashed" come from
+        the health sweeps: the worker is gone, so the registry remembers the
+        dropped item for the end-of-scan summary.  None means the worker itself
+        reported an error result while on that item; the caller counts the item
+        as failed, and the registry keeps no note of it.
+
+        Returns the dropped item, or None when the task is untracked or no item
+        was in progress — then there is nothing to blame, and the caller falls
+        back to its usual handling.
+
+        Uses no retry budget.  Each call removes one item, so a batch with a
+        string of bad members still runs out of items and ends.  When the
+        dropped item was the last one, nothing is re-queued: after a sweep the
+        task is abandoned, which keeps the record so a late item_done for an
+        item the worker did finish is still accepted; after an error result,
+        the worker has finished, so the task is simply retired.
+
+        After a sweep, if the dropped item's item_done arrives after all (it was
+        already on the queue when the sweep ran), record_progress() accepts it
+        and forgets the skip.
+        """
+        record = self._records.get(task_id)
+        if record is None or record.current_item is None:
+            return None
+        culprit = record.current_item
+        record.current_item = None
+        if culprit in record.remaining:
+            del record.remaining[culprit]
+            if reason is not None:
+                self._skipped[(task_id, culprit)] = reason
+        if record.remaining:
+            self._requeue(record)
+        elif reason is None:
+            self.retire(task_id)
+        else:
+            self.abandon(task_id, reason=reason)
+        return culprit
+
+    def _requeue(self, record: TaskRecord) -> None:
+        """Reset a record to QUEUED and put its task back, trimmed to what remains."""
+        if record.task.items:
+            record.task = record.task.model_copy(update={"items": tuple(record.remaining)})
         record.worker_pid = None
         record.started_at = None
+        record.last_progress_at = None
+        record.current_item = None
         record.enqueued_at = self._clock()
-        self._running.pop(task_id, None)
+        self._running.pop(record.task_id, None)
         self._put(record.task)
-        return record
+
+    def record_progress(self, task_id: str, worker_pid: int, event: ProgressEvent, item: str | None) -> bool:
+        """Apply one TaskProgress message.  Returns whether to accept its findings.
+
+        Any event from the worker holding the task pushes the deadline back.  A
+        message from any other pid — a copy superseded by a re-dispatch — never
+        does, so a stale worker cannot keep a task alive.
+
+        For item_done, True means the item was outstanding and is now done; the
+        caller writes its findings.  False means another copy already reported
+        it, and its findings must be dropped so nothing is written twice.  The
+        same holds for an abandoned task and for an item a sweep skipped: their
+        work is real, so a late item_done for them is accepted once.
+
+        For item_started and alive the return value only says whether the task
+        is known.
+        """
+        record = self._records.get(task_id)
+        if record is None:
+            entry = self._abandoned.get(task_id)
+            record = entry[0] if entry is not None else None
+            holder = False
+        else:
+            holder = record.started_at is not None and record.worker_pid == worker_pid
+        if holder and record is not None:
+            record.last_progress_at = self._clock()
+
+        if event == "item_started":
+            if holder and record is not None:
+                record.current_item = item
+            return record is not None
+        if event == "alive":
+            return record is not None
+
+        # item_done
+        if item is None:
+            return False
+        if record is not None and holder and record.current_item == item:
+            record.current_item = None
+        if record is not None and item in record.remaining:
+            del record.remaining[item]
+            return True
+        return self._skipped.pop((task_id, item), None) is not None
 
     def abandon(self, task_id: str, *, reason: AbandonReason) -> TaskRecord | None:
         """Retire a task the coordinator has stopped waiting for, keeping its record.
@@ -249,12 +375,21 @@ class TaskRegistry:
         return entry[0] if entry is not None else None
 
     def count_abandoned(self, reason: AbandonReason) -> int:
-        """Tasks abandoned for this reason whose work never turned up.
+        """Files or members given up on for this reason whose work never turned up.
 
-        A task reclaimed by a late result is no longer counted, so at the end of
-        a run this is exactly the work that did not complete.
+        Counts units, not tasks: an abandoned batch counts the members it had
+        not finished, and every member skipped out of a batch counts once.  A
+        task reclaimed by a late result, or an item whose late item_done
+        arrived, is no longer counted.  So at the end of a run this is exactly
+        the work that did not complete.
         """
-        return sum(1 for _, why in self._abandoned.values() if why == reason)
+        abandoned = sum(record.units for record, why in self._abandoned.values() if why == reason)
+        skipped = sum(1 for why in self._skipped.values() if why == reason)
+        return abandoned + skipped
+
+    def count_unfinished(self) -> int:
+        """Files or members still outstanding.  Like len(), but a batch counts its remaining members."""
+        return sum(record.units for record in self._records.values())
 
     # -- observation --------------------------------------------------------
 

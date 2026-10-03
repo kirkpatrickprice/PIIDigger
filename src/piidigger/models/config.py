@@ -73,6 +73,7 @@ _ARCHIVE_MAX_DEPTH: int = 1
 _ARCHIVE_MAX_MEMBERS: int = 10_000
 _ARCHIVE_MAX_MEMBER_SIZE_MB: int = 512
 _ARCHIVE_MAX_TOTAL_SIZE_MB: int = 8192
+_ARCHIVE_MAX_BATCH_MB: int = 1024
 _DEFAULT_BUFFER_UNIT_BYTES: int = 650
 _DEFAULT_BUFFER_UNIT_COUNT: int = 100_000
 _DEFAULT_BLANK_ROW_LIMIT: int = 250
@@ -99,6 +100,7 @@ _KNOWN_CONFIG_KEYS: tuple[str, ...] = (
     "archives.max_members",
     "archives.max_member_uncompressed_size_mb",
     "archives.max_total_uncompressed_size_mb",
+    "archives.max_batch_mb",
     "buffer.buffer_unit_bytes",
     "buffer.buffer_unit_count",
     "spreadsheet.blank_row_limit",
@@ -213,6 +215,7 @@ def generate_toml_template() -> str:
         f"max_members = {_ARCHIVE_MAX_MEMBERS}",
         f"max_member_uncompressed_size_mb = {_ARCHIVE_MAX_MEMBER_SIZE_MB}",
         f"max_total_uncompressed_size_mb = {_ARCHIVE_MAX_TOTAL_SIZE_MB}",
+        f"max_batch_mb = {_ARCHIVE_MAX_BATCH_MB}",
         "",
         "[buffer]",
         f"buffer_unit_bytes = {_DEFAULT_BUFFER_UNIT_BYTES}",
@@ -239,6 +242,16 @@ class ArchiveConfig(PiiDiggerModel):
     Controls archive scanning behaviour.  Defaults enable all registered formats.
     Limits guard against disk exhaustion and runaway scan time.
     Set enabled=False to skip all archive files without any other change.
+
+    max_total_uncompressed_size_mb also caps how far into an archive a member
+    may sit: a member is skipped if reaching it means decompressing more than
+    that much data.
+
+    max_batch_mb caps one scan task's share of an archive.  An archive is split
+    into at least one batch per worker; this cap only adds batches for archives
+    larger than workers × max_batch_mb.  Each extra batch re-decompresses the
+    part of the archive before it, so raising the cap saves CPU on very large
+    compressed tar and solid 7z archives.
     """
 
     enabled: bool = True
@@ -247,6 +260,7 @@ class ArchiveConfig(PiiDiggerModel):
     max_members: int = Field(default=_ARCHIVE_MAX_MEMBERS, ge=1)
     max_member_uncompressed_size_mb: int = Field(default=_ARCHIVE_MAX_MEMBER_SIZE_MB, ge=1)
     max_total_uncompressed_size_mb: int = Field(default=_ARCHIVE_MAX_TOTAL_SIZE_MB, ge=1)
+    max_batch_mb: int = Field(default=_ARCHIVE_MAX_BATCH_MB, ge=1)
 
     @field_validator("formats")
     @classmethod

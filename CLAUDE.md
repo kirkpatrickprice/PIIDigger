@@ -74,7 +74,7 @@ src/piidigger/
 ├── models/                 # All Pydantic data models
 │   ├── base.py             # PiiDiggerModel — shared BaseModel with extra="forbid"
 │   ├── config.py           # Config (replaces classes.Config getter-soup)
-│   ├── tasks.py            # Task, TaskResult, TaskType, SHUTDOWN
+│   ├── tasks.py            # Task, TaskResult, TaskProgress, TaskType, SHUTDOWN
 │   ├── payloads.py         # Typed per-task-type payloads
 │   ├── archive.py          # MemberInfo (archive member metadata)
 │   └── results.py          # ResultRecord (with lineage fields)
@@ -87,7 +87,8 @@ src/piidigger/
 │   │   ├── _enum_dir.py     # handle_enum_dir
 │   │   ├── _enum_archive.py # handle_enum_archive_members
 │   │   ├── _scan_file.py    # handle_scan_file
-│   │   └── _scan_archive_member.py  # handle_scan_archive_member
+│   │   ├── _scan_archive_members.py  # handle_scan_archive_members (one batch of members)
+│   │   └── _reporter.py     # ProgressReporter — TaskProgress for long tasks
 │   ├── coordinator.py      # fan-out loop, HealthMonitor (deadline/crash/lost-task sweeps)
 │   ├── registry.py         # TaskRegistry, TaskRecord — the outstanding-work record
 │   ├── pool.py              # WorkerPool, spawn_worker — process lifecycle
@@ -125,7 +126,7 @@ The legacy `src/piidigger/**` tree is exempted from ruff's `N` ruleset until the
 
 ### Models
 - The deciding question is **whether any field's value originates outside our own code**.
-- **Pydantic v2** when it does: `Config` (TOML), `Task` / payload types (filesystem metadata), `TaskResult` and `ResultRecord` (file content).
+- **Pydantic v2** when it does: `Config` (TOML), `Task` / payload types (filesystem metadata), `TaskResult`, `TaskProgress` and `ResultRecord` (file content).
 - **`dataclass`** when every field is a value we generated ourselves: `TaskStarted`, `WorkerReady`, `ShutdownSentinel`, `CoordinatorResult`, `TaskRecord`, `SweepResult`, and `WorkerContext` (which also holds `mp.Queue`/`mp.Event`, which Pydantic cannot meaningfully validate). Crossing the process boundary is not the test — `TaskStarted` crosses it and is still a dataclass.
 - Use `frozen=True` unless the object is mutated in place (e.g. `TaskRecord`). Use `slots=True` for high-volume types.
 - Document the reason for the choice at the class definition.
