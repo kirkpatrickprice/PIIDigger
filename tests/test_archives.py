@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+import os
 import queue
 import stat
 import zipfile
@@ -26,6 +27,7 @@ from typing import Any
 
 import pytest
 
+import piidigger.orchestration.secure_delete as secure_delete_mod
 from piidigger.models.config import ArchiveConfig, Config
 from piidigger.models.tasks import Task, TaskProgress, TaskResult, TaskType
 from piidigger.orchestration.context import WorkerContext
@@ -315,6 +317,44 @@ def test_secure_delete_empty_file(tmp_path: Path) -> None:
     f.write_bytes(b"")
     secure_delete(f)
     assert not f.exists()
+
+
+@pytest.mark.unit
+def test_secure_delete_overwrites_in_bounded_chunks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each pass covers the whole file, but no single write exceeds the chunk size."""
+    monkeypatch.setattr(secure_delete_mod, "_CHUNK_BYTES", 1024)
+    f = tmp_path / "member.bin"
+    original = b"4111111111111111\n" * 300  # 5100 bytes: 4 full chunks plus a partial one
+    f.write_bytes(original)
+
+    passes: list[bytes] = []
+    real_fsync = os.fsync
+
+    def snapshot_then_fsync(fd: int) -> None:
+        real_fsync(fd)
+        passes.append(f.read_bytes())
+
+    write_sizes: list[int] = []
+    real_overwrite_pass = secure_delete_mod._overwrite_pass
+
+    def recording_pass(fh: Any, size: int, chunk_for: Any) -> None:
+        def recording_chunk_for(n: int) -> bytes:
+            write_sizes.append(n)
+            return chunk_for(n)
+
+        real_overwrite_pass(fh, size, recording_chunk_for)
+
+    monkeypatch.setattr(secure_delete_mod.os, "fsync", snapshot_then_fsync)
+    monkeypatch.setattr(secure_delete_mod, "_overwrite_pass", recording_pass)
+    secure_delete(f)
+
+    assert not f.exists()
+    assert max(write_sizes) == 1024
+    assert sum(write_sizes) == 2 * len(original)
+    zero_pass, random_pass = passes
+    assert zero_pass == bytes(len(original))
+    assert len(random_pass) == len(original)
+    assert random_pass != zero_pass and random_pass != original
 
 
 # ---------------------------------------------------------------------------
@@ -1661,8 +1701,6 @@ def test_tar_gz_batches_read_the_archive_a_bounded_number_of_times(
     times here.  The members are random bytes, so the archive is as large as
     its content and several times the reader's 1 MiB buffer.
     """
-    import os
-
     from piidigger.archivehandlers import _progress_io
     from piidigger.orchestration.worker._enum_archive import split_into_batches
 

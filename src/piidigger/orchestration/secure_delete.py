@@ -15,7 +15,15 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Callable
 from pathlib import Path
+from typing import BinaryIO
+
+# Each overwrite pass writes in chunks of this size, so memory stays fixed
+# whatever the file size.  A full-size buffer would cost as much RAM as the
+# extracted member, and a MemoryError would skip the unlink below.
+_CHUNK_BYTES = 1024 * 1024
+_ZERO_CHUNK = bytes(_CHUNK_BYTES)
 
 
 def secure_delete(path: Path) -> None:
@@ -33,16 +41,23 @@ def secure_delete(path: Path) -> None:
         size = path.stat().st_size
         if size > 0:
             with path.open("r+b") as f:
-                f.write(b"\x00" * size)
-                f.flush()
-                os.fsync(f.fileno())
-                f.seek(0)
-                f.write(os.urandom(size))
-                f.flush()
-                os.fsync(f.fileno())
+                _overwrite_pass(f, size, lambda n: _ZERO_CHUNK[:n])
+                _overwrite_pass(f, size, os.urandom)
     except OSError:
         pass
     path.unlink(missing_ok=True)
+
+
+def _overwrite_pass(f: BinaryIO, size: int, chunk_for: Callable[[int], bytes]) -> None:
+    """Overwrite the first *size* bytes of *f* with chunk_for(n) chunks, then fsync."""
+    f.seek(0)
+    remaining = size
+    while remaining > 0:
+        n = min(remaining, _CHUNK_BYTES)
+        f.write(chunk_for(n))
+        remaining -= n
+    f.flush()
+    os.fsync(f.fileno())
 
 
 def secure_rmtree(root: Path) -> None:
