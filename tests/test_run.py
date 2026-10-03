@@ -11,6 +11,7 @@ import pytest
 from piidigger.models.config import Config, ResultsConfig
 from piidigger.orchestration.coordinator import CoordinatorResult
 from piidigger.run import EXIT_INCOMPLETE, EXIT_INTERRUPTED, EXIT_OK, _build_sinks, _resolve_workers, run_scan
+from tests._fs import make_dir_alias
 
 
 @pytest.mark.unit
@@ -166,10 +167,7 @@ def test_run_scan_excludes_temp_workspace_reached_via_symlink_alias(
     physical = tmp_path / "physical"
     physical.mkdir()
     alias = tmp_path / "alias"
-    try:
-        alias.symlink_to(physical, target_is_directory=True)
-    except OSError, NotImplementedError:
-        pytest.skip("symlinks not supported on this platform")
+    make_dir_alias(alias, physical)
 
     temp_dir_name = "piidigger_test"
     (physical / temp_dir_name).mkdir()
@@ -191,6 +189,64 @@ def test_run_scan_excludes_temp_workspace_reached_via_symlink_alias(
     assert txt_files, "expected an output file"
     findings = txt_files[0].read_text()
     assert "leftover.txt" not in findings, "worker scanned its own extracted-archive temp workspace"
+
+
+@pytest.mark.integration
+def test_run_scan_honours_user_exclude_written_through_symlink_alias(tmp_path: Path) -> None:
+    """A configured exclude_dirs entry written through a symlink alias must apply.
+
+    Regression test: on macOS the /etc default resolves to /private/etc, so a
+    scan reaching /private/etc never matched the unresolved pattern.
+    """
+    physical = tmp_path / "physical"
+    (physical / "secret").mkdir(parents=True)
+    (physical / "secret" / "hidden.txt").write_text("card 4111111111111111")
+    (physical / "visible.txt").write_text("card 4111111111111111")
+    alias = tmp_path / "alias"
+    make_dir_alias(alias, physical)
+
+    results_dir = tmp_path / "results"
+    config = Config(
+        start_dirs=[physical],  # reached directly, never crossing the alias
+        exclude_dirs=[str(alias / "secret")],
+        log_file=tmp_path / "test.log",
+        results=ResultsConfig(path=results_dir, formats=["text"]),
+    )
+    rc = run_scan(config)
+
+    assert rc == EXIT_OK
+    findings = next(results_dir.glob("*.txt")).read_text()
+    assert "visible.txt" in findings
+    assert "hidden.txt" not in findings, "exclude pattern written through an alias was ignored"
+
+
+@pytest.mark.integration
+def test_run_scan_skips_its_own_results_and_log_folders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scan must not read its own output folders.
+
+    Regression test: scanning / or C:\\ from a cwd under it reached the
+    relative default ./piidigger-results/ and ./logs/, so every finding was
+    reported again against the output files and each later run grew.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "source.txt").write_text("card 4111111111111111")
+    monkeypatch.chdir(root)
+
+    config = Config(start_dirs=[root], results=ResultsConfig(formats=["text"]))  # relative default paths
+    (root / config.results.path).mkdir()
+    (root / config.results.path / "previous-run.json").write_text('{"match": "4111111111111111"}')
+    (root / config.log_file.parent).mkdir()
+    (root / config.log_file.parent / "older.log").write_text("found 4111111111111111")
+
+    rc = run_scan(config)
+
+    assert rc == EXIT_OK
+    output = next((root / config.results.path).glob("*.txt"))
+    findings = output.read_text()
+    assert "source.txt" in findings
+    assert "previous-run.json" not in findings, "scan read its own results folder"
+    assert "older.log" not in findings, "scan read its own log folder"
 
 
 @pytest.mark.integration

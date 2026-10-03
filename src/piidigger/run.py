@@ -28,6 +28,7 @@ from piidigger.orchestration.logging_setup import (
 from piidigger.orchestration.pool import WorkerPool, spawn_worker
 from piidigger.orchestration.progress import ProgressDisplay
 from piidigger.orchestration.secure_delete import secure_rmtree
+from piidigger.orchestration.worker import resolve_exclude_dirs
 from piidigger.outputhandlers import HANDLER_REGISTRY, CsvSink, JsonSink, TextSink
 
 _ALL_FORMATS: frozenset[str] = frozenset(HANDLER_REGISTRY)
@@ -216,15 +217,28 @@ def run_scan(config: Config) -> int:
 
     # Create a PIIDigger-owned temp root and exclude it from directory scanning
     # so ENUM_DIR workers never attempt to scan extracted archive members.
-    # Resolved so the stored exclude pattern matches what _is_excluded() computes
-    # for each walked entry (entry.resolve()) — mkdtemp() can return a path that
-    # reaches the OS temp root through a symlink alias (e.g. macOS /var ->
-    # /private/var, or a Windows short 8.3 path component), which would
-    # otherwise never match and let workers scan each other's extracted
-    # archive members.
+    # mkdtemp() can return a path through a symlink alias (macOS /var ->
+    # /private/var) or a Windows 8.3 short name; resolving it keeps the logged
+    # path and the per-task extraction dirs consistent with the exclude pattern.
     temp_base: Path = Path(tempfile.mkdtemp(prefix="piidigger_")).resolve()
     run_logger.info("temp workspace: %s", temp_base)
-    runtime_config = config.model_copy(update={"exclude_dirs": [*config.exclude_dirs, str(temp_base)]})
+
+    # Never scan our own output: the results and log folders hold every PAN and
+    # email already found.  Resolved here because the defaults are relative and
+    # resolve_exclude_dirs() leaves relative patterns unchanged.
+    # Resolve every exclude pattern once so it matches the resolved paths
+    # _is_excluded() compares against; see resolve_exclude_dirs().
+    raw_exclude_dirs = [
+        *config.exclude_dirs,
+        str(config.results.path.resolve()),
+        str(config.log_file.parent.resolve()),
+        str(temp_base),
+    ]
+    exclude_dirs = resolve_exclude_dirs(raw_exclude_dirs)
+    for raw, resolved in zip(raw_exclude_dirs, exclude_dirs, strict=True):
+        if raw != resolved:
+            run_logger.debug("exclude_dirs: %s resolves to %s", raw, resolved)
+    runtime_config = config.model_copy(update={"exclude_dirs": exclude_dirs})
 
     logical_cores = os.cpu_count() or 1
     physical_cores = psutil.cpu_count(logical=False) or logical_cores

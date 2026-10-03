@@ -146,9 +146,9 @@ linux = ["/boot", "/dev", "/proc", "/sys", "..."]
 ```
 
 - `start_dirs`: folders to scan. `["all"]` on Windows expands to every drive letter present at scan time (`C:\`, `D:\`, …). On macOS/Linux, `/` scans the whole filesystem. Every `start_dirs` entry must exist on disk — `config validate` and `scan` both fail fast if one doesn't.
-- `exclude_dirs`: folders to skip entirely, along with everything under them, on all operating systems — this is how the built-in defaults avoid wasting time on low-value folders like OS folders. Entries starting with `*` are suffix-matched (e.g. `"*/.vscode-server"` matches that folder name anywhere); everything else is a prefix match against the resolved path. Unlike `start_dirs`, an `exclude_dirs` entry does **not** need to exist — excluding a drive or folder that isn't currently present (e.g. an unmounted Google Drive letter) is fine and has no effect.
+- `exclude_dirs`: folders to skip entirely, along with everything under them, on all operating systems — this is how the built-in defaults avoid wasting time on low-value folders like OS folders. Entries starting with `*` are suffix-matched (e.g. `"*/.vscode-server"` matches that folder name anywhere); everything else is a prefix match against the resolved path. Unlike `start_dirs`, an `exclude_dirs` entry does **not** need to exist — excluding a drive or folder that isn't currently present (e.g. an unmounted Google Drive letter) is fine and has no effect. PIIDigger always skips its own results folder (`[results].path`) and the folder holding `log_file`, so a scan never reports findings from its own output. Don't point either one at a folder you want scanned.
 
-**Do not put a trailing slash on an `exclude_dirs` entry.** `"C:/Windows"` correctly excludes everything under `C:\Windows`. `"C:/Windows/"` (trailing slash) does **not** — the extra slash breaks the prefix match and the exclusion silently does nothing. All the built-in defaults follow this rule; keep your own entries consistent with them.
+**Write full paths for `exclude_dirs` entries.** Before the scan starts, PIIDigger resolves each full path to its real location. Symlinks (macOS's `/etc` is really `/private/etc`) and Windows short names (`RANDYB~1`) therefore still match. A trailing slash on a full path is harmless: `"C:/Windows"` and `"C:/Windows/"` both exclude everything under `C:\Windows`. A relative entry such as `"node_modules"` is not resolved and never matches — use a `*` suffix pattern (`"*/node_modules"`) instead, without a trailing slash.
 
 **A note about Windows paths:** As a restriction from the TOML format, the usual back-slash (e.g. `C:\Windows`) will not be interpreted correctly.  Either use a double back-slash (`C:\\Windows`) or a front-slash (`C:/Windows`).  Either option will be read correctly by PIIDigger. Use of a single back-slash will produce the following error when validating the configuration:
 
@@ -253,7 +253,7 @@ Every path listed must exist — `piidigger config validate` will catch a typo'd
 windows = ["C:/Windows", "C:/Program Files (x86)", "C:/Program Files", "G:"]
 ```
 
-Note the entry is `"G:"` — **no trailing slash and no backslash** — following the same rule as the other `exclude_dirs` entries above. `"G:/"` would not exclude anything under that drive.
+`"G:"` and `"G:/"` both exclude the whole drive. A bare drive letter always means the drive root, never the current folder on that drive.
 
 **NOTE:** From our own testing, it *appears* that files that have actually been downloaded from Google Drive are physically present on the file system in an OS "temp" folder -- e.g. `C:/Users/<usesrname>/APPDATA/...`.  By default, PIIDigger will scan those because they're present on the drive.  By excluding the `G:` drive as described above, you can avoid downloading all files from Google Drive while still scanning those that have already exist on the file system.
 
@@ -319,7 +319,7 @@ An entry in `start_dirs` (for your OS) points to a path that isn't there — oft
 
 ### An `exclude_dirs` entry doesn't seem to work
 
-Check for a trailing slash or backslash — see the note under `[start_dirs] and [exclude_dirs]` above.
+Check that the entry is a full path (`"/Users/Shared"`, `"C:/Temp"`) or a `*` suffix pattern with no trailing slash (`"*/.cache"`). Relative entries never match — see the note under `[start_dirs] and [exclude_dirs]` above. Run with `log_level = "DEBUG"` to see each entry that resolved to a different real path, logged as `exclude_dirs: <entry> resolves to <path>`.
 
 ### Getting help
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
+import sys
 import unittest.mock
 from pathlib import Path
 
@@ -12,7 +14,9 @@ from piidigger.models.config import Config
 from piidigger.models.tasks import Task, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger
-from piidigger.orchestration.worker import handle_enum_dir, handle_scan_file
+from piidigger.orchestration.worker import handle_enum_dir, handle_scan_file, resolve_exclude_dirs
+from piidigger.orchestration.worker._enum_dir import _is_excluded
+from tests._fs import make_dir_alias
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -136,6 +140,70 @@ def test_enum_dir_exclude_dirs_forward_slash_pattern(tmp_path: Path) -> None:
     task_paths = [t["payload"].get("path", "") for t in result.new_tasks]
     assert not any("skip_me" in p for p in task_paths), "forward-slash exclude pattern was not honoured"
     assert any("keep" in p for p in task_paths)
+
+
+@pytest.mark.unit
+def test_resolve_exclude_dirs_matches_pattern_written_through_alias(tmp_path: Path) -> None:
+    """An exclude pattern written through a symlink alias must still match.
+
+    Regression test: on macOS, mkdtemp() returns /var/folders/... but entries
+    resolve to /private/var/...; the same applies to the /etc default.
+    _is_excluded() resolves the entry, so the pattern must be resolved too.
+    """
+    physical = tmp_path / "physical"
+    excluded = physical / "skip_me"
+    excluded.mkdir(parents=True)
+    (physical / "keep").mkdir()
+    alias = tmp_path / "alias"
+    make_dir_alias(alias, physical)
+
+    aliased_pattern = str(alias / "skip_me")
+    assert not _is_excluded(excluded, [aliased_pattern]), "unresolved alias pattern should not match"
+    assert _is_excluded(excluded, resolve_exclude_dirs([aliased_pattern]))
+
+    ctx = _make_ctx(tmp_path, exclude_dirs=resolve_exclude_dirs([aliased_pattern]))
+    result = handle_enum_dir(_enum_dir_task(physical), ctx, _logger())
+
+    task_paths = [t["payload"].get("path", "") for t in result.new_tasks]
+    assert not any("skip_me" in p for p in task_paths)
+    assert any("keep" in p for p in task_paths)
+
+
+@pytest.mark.unit
+def test_resolve_exclude_dirs_leaves_wildcard_and_relative_patterns() -> None:
+    assert resolve_exclude_dirs(["*/.vscode-server", "relative/dir"]) == ["*/.vscode-server", "relative/dir"]
+
+
+@pytest.mark.unit
+def test_resolve_exclude_dirs_strips_trailing_separator(tmp_path: Path) -> None:
+    excluded = tmp_path / "skip_me"
+    excluded.mkdir()
+
+    patterns = resolve_exclude_dirs([str(excluded) + os.sep, str(excluded).replace("\\", "/") + "/"])
+
+    assert all(_is_excluded(excluded / "child", [p]) for p in patterns)
+
+
+@pytest.mark.unit
+def test_resolve_exclude_dirs_keeps_missing_paths(tmp_path: Path) -> None:
+    missing = tmp_path / "not_there"
+
+    assert _is_excluded(missing / "child", resolve_exclude_dirs([str(missing)]))
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(sys.platform != "win32", reason="drive letters are Windows-only")
+def test_resolve_exclude_dirs_bare_drive_means_whole_drive(tmp_path: Path) -> None:
+    """'G:' must exclude the whole drive, not the current directory on it.
+
+    os.path.realpath('C:') returns the current working directory on C:.
+    """
+    drive = os.path.splitdrive(str(tmp_path.resolve()))[0]
+
+    for pattern in (drive, drive + "/", drive + "\\"):
+        resolved = resolve_exclude_dirs([pattern])
+        assert resolved == [drive], pattern
+        assert _is_excluded(tmp_path, resolved), pattern
 
 
 @pytest.mark.unit

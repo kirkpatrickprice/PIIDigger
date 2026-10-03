@@ -36,6 +36,39 @@ def _is_excluded(path: Path, exclude_dirs: list[str]) -> bool:
     return False
 
 
+def resolve_exclude_dirs(exclude_dirs: list[str]) -> list[str]:
+    """Return exclude_dirs with each absolute pattern resolved to its real path.
+
+    _is_excluded() compares against entry.resolve(), so a pattern that reaches
+    its target through a symlink (macOS /etc -> /private/etc, /var ->
+    /private/var) or a Windows 8.3 short name (RANDYB~1) never matches.
+    Resolving once here, before the scan starts, keeps the per-entry check
+    cheap.
+
+    - '*' suffix patterns and relative patterns are returned unchanged.
+    - A bare drive ('G:') is treated as its root; os.path.realpath() would
+      otherwise resolve it to the current directory on that drive.
+    - Trailing separators are stripped (a root becomes 'G:' or '') so the
+      prefix match in _is_excluded() still adds exactly one separator.
+    - Patterns that do not exist resolve as far as possible and still apply.
+    """
+    seps = os.sep + (os.altsep or "")
+    resolved: list[str] = []
+    for pattern in exclude_dirs:
+        candidate = pattern
+        drive, rest = os.path.splitdrive(candidate)
+        if drive and not rest:
+            candidate = drive + os.sep
+        if pattern.startswith("*") or not os.path.isabs(candidate):
+            resolved.append(pattern)
+            continue
+        try:
+            resolved.append(os.path.realpath(candidate).rstrip(seps))
+        except OSError, ValueError:
+            resolved.append(pattern)
+    return resolved
+
+
 def _detect_archive_type(filename: str, config: Config) -> str | None:
     """Return the archive_type for filename, or None if not a configured archive format."""
     if not config.archives.enabled:
