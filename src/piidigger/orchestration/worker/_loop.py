@@ -10,7 +10,7 @@ from typing import Any
 
 from piidigger.models.tasks import SHUTDOWN, ShutdownSentinel, Task, TaskResult, TaskStarted, TaskType, WorkerReady
 from piidigger.orchestration.context import WorkerContext
-from piidigger.orchestration.logging_setup import build_worker_logger, setup_warning_capture
+from piidigger.orchestration.logging_setup import build_worker_logger, route_library_logs, setup_warning_capture
 from piidigger.orchestration.secure_delete import secure_rmtree
 from piidigger.orchestration.worker._enum_archive import handle_enum_archive_members
 from piidigger.orchestration.worker._enum_dir import handle_enum_dir
@@ -100,6 +100,7 @@ def worker_loop(ctx: WorkerContext) -> None:
     """
     logger = build_worker_logger(ctx.log_queue, f"worker-{os.getpid()}")
     setup_warning_capture(ctx.log_queue)
+    route_library_logs(ctx.log_queue)
     logger.debug("worker started (pid=%d)", os.getpid())
     # Say once that this worker is up.  After this, a worker that is not running
     # a task can only be waiting in task_queue.get(); before it, silence could

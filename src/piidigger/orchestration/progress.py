@@ -135,6 +135,8 @@ class ProgressDisplay:
         self._unfinished: int = 0
         self._interrupted: bool = False
         self._workers_failed: bool = False
+        # Results files that stopped receiving findings, as (label, error).
+        self._output_failures: list[tuple[str, str]] = []
         self._scan_start: float = time.monotonic()
 
         self._bars: Progress | None = None
@@ -352,6 +354,14 @@ class ProgressDisplay:
         self._interrupted = interrupted
         self._workers_failed = workers_failed
 
+    def report_output_failure(self, label: str, error: str) -> None:
+        """Record a results file that stopped receiving findings, for the summary stop() prints.
+
+        Called by GuardedSink when it happens, which may be during teardown, so
+        it is not part of report_incomplete().
+        """
+        self._output_failures.append((label, error))
+
     @property
     def incomplete(self) -> IncompleteWork:
         """Everything the scan did not finish, as currently known."""
@@ -391,6 +401,10 @@ class ProgressDisplay:
         lines = [f"{heading} " + ("  ".join(parts) if parts else "No results.")]
         if (detail := _incomplete_summary(incomplete)) is not None:
             lines.append(detail)
+        lines.extend(
+            f"Results incomplete: {label} stopped after an error ({error}). See the log for details."
+            for label, error in self._output_failures
+        )
 
         for line in lines:
             if self._is_tty:

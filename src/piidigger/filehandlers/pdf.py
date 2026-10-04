@@ -1,4 +1,3 @@
-import logging
 from collections.abc import Iterator
 
 from pypdf import PdfReader
@@ -26,10 +25,10 @@ class PdfHandler:
     """FileHandler for PDF files.
 
     Reads via source.open_stream() — PdfReader accepts an IO[bytes] directly.
+    pypdf's log level is set by orchestration.logging_setup, not here.
     """
 
     def read(self, source, config: Config) -> Iterator[str]:  # source: ScannableItem
-        logging.getLogger("pypdf").setLevel(logging.ERROR)
         stream = source.open_stream()
         try:
             document = PdfReader(stream, strict=False)

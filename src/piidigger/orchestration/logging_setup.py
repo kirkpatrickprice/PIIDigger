@@ -9,6 +9,12 @@ from typing import Any
 # How long stop_listener() waits for queued log records to be written out.
 _LISTENER_STOP_TIMEOUT: float = 5.0
 
+# Third-party loggers held above route_library_logs()' WARNING floor.
+# pypdf logs a WARNING for many recoverable defects in malformed PDFs (bad
+# xref offsets, wrong object pointers), which would flood the log on a large
+# scan.  This is the level pdf.py used to set for itself.
+_LIBRARY_LOG_LEVELS: dict[str, int] = {"pypdf": logging.ERROR}
+
 
 def build_worker_logger(log_queue: mp.Queue[Any], name: str = "worker") -> logging.Logger:
     """Return a logger that sends all records to log_queue via QueueHandler.
@@ -25,7 +31,36 @@ def build_worker_logger(log_queue: mp.Queue[Any], name: str = "worker") -> loggi
     return logger
 
 
-def _route_to_queue(logger: logging.Logger, log_queue: mp.Queue[Any]) -> None:
+def route_library_logs(log_queue: mp.Queue[Any]) -> None:
+    """Send third-party library log records at WARNING and above to log_queue.
+
+    Library loggers (pypdf, openpyxl, py7zr…) propagate to the root logger.
+    With no handler there, Python's last-resort handler prints them to stderr:
+    they corrupt the rich.Live display and never reach the log file.  Our own
+    loggers set propagate=False, so their records are not duplicated.
+
+    Library-specific levels live here too, so file handlers never configure
+    logging themselves.  Call once in each process, after build_worker_logger().
+    Idempotent, like _route_to_queue().
+    """
+    _route_to_queue(logging.getLogger(), log_queue, level=logging.WARNING)
+    for name, level in _LIBRARY_LOG_LEVELS.items():
+        logging.getLogger(name).setLevel(level)
+
+
+def stop_library_log_routing() -> None:
+    """Remove the root logger's QueueHandler added by route_library_logs().
+
+    Call in the coordinator process once the listener has stopped.  Otherwise a
+    later record would go to a queue nobody drains.  Its feeder thread could
+    then block on a full pipe and stall interpreter exit.
+    """
+    root = logging.getLogger()
+    for handler in [h for h in root.handlers if isinstance(h, logging.handlers.QueueHandler)]:
+        root.removeHandler(handler)
+
+
+def _route_to_queue(logger: logging.Logger, log_queue: mp.Queue[Any], *, level: int = logging.NOTSET) -> None:
     """Make log_queue the logger's only QueueHandler target.
 
     Loggers are process-wide singletons keyed by name.  A check for "any
@@ -39,7 +74,9 @@ def _route_to_queue(logger: logging.Logger, log_queue: mp.Queue[Any]) -> None:
         return
     for handler in handlers:
         logger.removeHandler(handler)
-    logger.addHandler(logging.handlers.QueueHandler(log_queue))
+    handler = logging.handlers.QueueHandler(log_queue)
+    handler.setLevel(level)
+    logger.addHandler(handler)
 
 
 def start_listener(

@@ -391,6 +391,8 @@ def test_deadline_detection_replaces_hung_worker(tmp_path: Path) -> None:
 
 
 class _ListSink:
+    path = Path("in-memory")  # OutputSink names its file in error messages
+
     def __init__(self) -> None:
         self.records: list[ResultRecord] = []
 

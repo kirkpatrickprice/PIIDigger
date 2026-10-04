@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import multiprocessing as mp
@@ -21,8 +22,10 @@ from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.coordinator import run_coordinator
 from piidigger.orchestration.logging_setup import (
     build_worker_logger,
+    route_library_logs,
     setup_warning_capture,
     start_listener,
+    stop_library_log_routing,
     stop_listener,
 )
 from piidigger.orchestration.pool import WorkerPool, spawn_worker
@@ -39,7 +42,7 @@ _ADMIN_PROMPT_TIMEOUT: int = 10
 # automation gating on the exit code would treat a truncated scan as clean.
 EXIT_OK: int = 0
 EXIT_ABORTED: int = 1  # refused to start (e.g. admin check declined)
-EXIT_INCOMPLETE: int = 2  # ran, but work was left outstanding or workers could not start
+EXIT_INCOMPLETE: int = 2  # ran, but work was left outstanding, workers could not start, or results were not all written
 EXIT_INTERRUPTED: int = 130  # CTRL-C; 128 + SIGINT, the shell convention
 
 
@@ -175,13 +178,37 @@ def _build_sinks(config: Config) -> list[Any]:
     return sinks
 
 
+def _open_sinks(config: Config, logger: logging.Logger) -> list[Any] | None:
+    """Create the results folder and open every sink, or return None if any fails.
+
+    Sinks raise OSError rather than log, so the failure is reported here: to the
+    log file and, since the progress display has not started yet, to stderr.
+    Sinks already opened are closed again.
+    """
+    opened: list[Any] = []
+    try:
+        config.results.path.mkdir(parents=True, exist_ok=True)
+        for sink in _build_sinks(config):
+            sink.open()
+            opened.append(sink)
+    except OSError as exc:
+        logger.error("cannot open results file, aborting: %s", exc)
+        print(f"Error: cannot open results file: {exc}", file=sys.stderr)  # noqa: T201 — user-facing
+        for sink in opened:
+            with contextlib.suppress(OSError):
+                sink.close()
+        return None
+    return opened
+
+
 def run_scan(config: Config) -> int:
     """Run a full PII scan against config.  Returns a process exit code.
 
     Wiring order:
-      1. Build and open output sinks (create parent dirs as needed)
-      2. Start logging listener; create run-level logger
-      3. Admin privilege check (prompts user if not elevated and admin_check=True)
+      1. Start logging listener; create run-level logger; route library logs
+      2. Admin privilege check (prompts user if not elevated and admin_check=True)
+      3. Build and open output sinks (create parent dirs as needed).  Any
+         failure aborts the run: there would be nowhere to put the results.
       4. Build WorkerContext; start worker pool
       5. Start progress display; emit startup config summary
       6. Run coordinator (seeds tasks, fan-out loop, teardown)
@@ -198,21 +225,18 @@ def run_scan(config: Config) -> int:
     result_queue: mp.Queue[object] = mp.Queue()
     stop_event = mp.Event()
 
-    config.results.path.mkdir(parents=True, exist_ok=True)
-    sinks = _build_sinks(config)
-    for sink in sinks:
-        sink.open()
-
     config.log_file.parent.mkdir(parents=True, exist_ok=True)
     listener = start_listener(log_queue, config.log_file, config.log_level)
     setup_warning_capture(log_queue)
+    route_library_logs(log_queue)
     run_logger = build_worker_logger(log_queue, "run")
 
-    # Admin check — must happen before progress.start() takes over the terminal
-    if not _check_admin(config, run_logger):
-        for sink in sinks:
-            sink.close()
-        listener.stop()
+    # Admin check and sink opening both happen before progress.start() takes
+    # over the terminal, so their prompts and errors print cleanly.
+    sinks = _open_sinks(config, run_logger) if _check_admin(config, run_logger) else None
+    if sinks is None:
+        stop_listener(listener)
+        stop_library_log_routing()
         return EXIT_ABORTED
 
     # Create a PIIDigger-owned temp root and exclude it from directory scanning
@@ -272,11 +296,12 @@ def run_scan(config: Config) -> int:
         # including the one describing the failure, may never reach the log
         # file.  Stopping an already-stopped listener is a no-op.
         stop_listener(listener)
+        stop_library_log_routing()
 
     # No logging from here on: the listener is stopped, so records would be
-    # dropped.  run_coordinator has already logged both of these outcomes.
+    # dropped.  run_coordinator has already logged each of these outcomes.
     if outcome.interrupted:
         return EXIT_INTERRUPTED
-    if outcome.unfinished or outcome.workers_failed:
+    if outcome.unfinished or outcome.workers_failed or outcome.sinks_failed:
         return EXIT_INCOMPLETE
     return EXIT_OK

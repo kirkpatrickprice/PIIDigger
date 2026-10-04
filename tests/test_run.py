@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import logging.handlers
 import math
 import tempfile
 from pathlib import Path
@@ -10,7 +12,15 @@ import pytest
 
 from piidigger.models.config import Config, ResultsConfig
 from piidigger.orchestration.coordinator import CoordinatorResult
-from piidigger.run import EXIT_INCOMPLETE, EXIT_INTERRUPTED, EXIT_OK, _build_sinks, _resolve_workers, run_scan
+from piidigger.run import (
+    EXIT_ABORTED,
+    EXIT_INCOMPLETE,
+    EXIT_INTERRUPTED,
+    EXIT_OK,
+    _build_sinks,
+    _resolve_workers,
+    run_scan,
+)
 from tests._fs import make_dir_alias
 
 
@@ -125,6 +135,64 @@ def test_run_scan_returns_0_on_success(tmp_path: Path) -> None:
     assert rc == EXIT_OK
     txt_files = list(results_dir.glob("*.txt"))
     assert len(txt_files) == 1, f"expected one .txt output file; got {txt_files}"
+
+
+@pytest.mark.integration
+def test_run_scan_aborts_when_results_cannot_be_opened(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A scan with nowhere to put its results must not start.
+
+    The failure is reported on stderr and in the log file, not lost to a sink's
+    unhandled module logger.
+    """
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    blocker = tmp_path / "results"
+    blocker.write_text("a file where the results folder should be")
+    log_file = tmp_path / "test.log"
+
+    rc = run_scan(
+        Config(start_dirs=[scan_root], log_file=log_file, results=ResultsConfig(path=blocker, formats=["text"]))
+    )
+
+    assert rc == EXIT_ABORTED
+    assert "Error: cannot open results file" in capsys.readouterr().err
+    assert "cannot open results file, aborting" in log_file.read_text()
+    assert not any(isinstance(h, logging.handlers.QueueHandler) for h in logging.getLogger().handlers)
+
+
+@pytest.mark.integration
+def test_run_scan_reports_incomplete_when_a_sink_fails_mid_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A results file that stops accepting findings (e.g. a full disk) is logged
+    once, named in the summary, and turns the exit code into EXIT_INCOMPLETE.
+    The other sinks keep receiving findings."""
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    for i in range(3):
+        (scan_root / f"card{i}.txt").write_text("card 4111111111111111")
+
+    def disk_full(self: object, record: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("piidigger.outputhandlers.text.TextSink.write", disk_full)
+    results_dir = tmp_path / "results"
+    log_file = tmp_path / "test.log"
+
+    rc = run_scan(
+        Config(
+            start_dirs=[scan_root],
+            log_file=log_file,
+            results=ResultsConfig(path=results_dir, formats=["text", "csv"]),
+        )
+    )
+
+    assert rc == EXIT_INCOMPLETE
+    log_text = log_file.read_text()
+    assert log_text.count("write failed, no further results written to it") == 1
+    assert "Results incomplete: TextSink" in capsys.readouterr().out
+    csv_rows = next(results_dir.glob("*.csv")).read_text().splitlines()
+    assert len(csv_rows) == 1 + 3, "the healthy CSV sink still received every finding"
 
 
 @pytest.mark.integration

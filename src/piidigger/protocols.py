@@ -41,6 +41,16 @@ class FileHandler(Protocol):
 
 @runtime_checkable
 class OutputSink(Protocol):
+    """Writes findings to one results file.
+
+    Sinks never log.  open(), write() and close() let OSError propagate.
+    run_scan treats a failed open() as fatal.  The coordinator wraps each sink
+    in a GuardedSink, which logs a write or close failure once and stops
+    writing to that sink.  path names the file in those messages.
+    """
+
+    path: Path
+
     def open(self) -> None: ...
     def write(self, record: ResultRecord) -> None: ...
     def close(self) -> None: ...

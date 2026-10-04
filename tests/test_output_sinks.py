@@ -1,4 +1,5 @@
 import csv
+import importlib
 import json
 
 import pytest
@@ -194,3 +195,58 @@ class TestTextSink:
     def test_write_before_open_does_not_raise(self, tmp_path):
         sink = TextSink(tmp_path / "out.txt")
         sink.write(_make_record())  # should silently no-op
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "module",
+    [
+        "piidigger.outputhandlers.csv",
+        "piidigger.outputhandlers.json",
+        "piidigger.outputhandlers.text",
+        "piidigger.filehandlers.pdf",
+    ],
+)
+def test_handler_modules_do_not_use_logging(module):
+    """CLAUDE.md: handlers must not import loggers.  A module logger has no
+    handler in the coordinator, so its records went to stderr, not the log."""
+    assert not hasattr(importlib.import_module(module), "logging")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("sink_cls", [CsvSink, JsonSink, TextSink])
+def test_open_failure_raises(tmp_path, sink_cls):
+    sink = sink_cls(tmp_path / "missing-dir" / "out.file")
+
+    with pytest.raises(OSError):
+        sink.open()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("sink_cls", [CsvSink, JsonSink, TextSink])
+def test_sinks_expose_path(tmp_path, sink_cls):
+    path = tmp_path / "out.file"
+    assert sink_cls(path).path == path
+
+
+class _FailingCloseFile:
+    def write(self, data):
+        return len(data)
+
+    def close(self):
+        raise OSError(28, "No space left on device")
+
+
+@pytest.mark.unit
+def test_json_close_writes_array_even_when_stream_close_fails(tmp_path):
+    path = tmp_path / "out.json"
+    sink = JsonSink(path)
+    sink.open()
+    sink._file.close()
+    sink._file = _FailingCloseFile()
+    sink.write(_make_record())
+
+    with pytest.raises(OSError, match="No space left"):
+        sink.close()
+
+    assert len(json.loads(path.read_text())) == 1

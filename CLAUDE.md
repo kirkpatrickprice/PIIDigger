@@ -95,6 +95,7 @@ src/piidigger/
 │   ├── logging_setup.py    # QueueHandler / QueueListener helpers
 │   ├── progress.py         # rich.Live two-panel display
 │   ├── secure_delete.py    # 2-pass overwrite + fsync + unlink for extracted archive members
+│   ├── sinks.py            # GuardedSink — logs a failing OutputSink once and stops writing to it
 │   └── sources.py          # FilesystemItem (archive_path/member_path kwargs cover archive members too)
 ├── archivehandlers/         # ArchiveHandler implementations: zip, 7z, tar (+ compressed tar variants)
 ├── datahandlers/           # PII matchers — implement DataHandler protocol (pan, email implemented; phonenum, trackdata are stubs)

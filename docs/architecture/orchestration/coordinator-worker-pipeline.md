@@ -38,7 +38,7 @@ flowchart TB
     end
 
     subgraph run_group["🔧 run_scan()"]
-        RUN["Build sinks, logging,\nWorkerContext, WorkerPool"]:::coreService
+        RUN["Build logging, sinks,\nWorkerContext, WorkerPool"]:::coreService
     end
 
     subgraph coord_group["🎛️ Coordinator"]
@@ -85,9 +85,9 @@ flowchart TB
 ### `run_scan()` — wiring order
 [run.py](../../../src/piidigger/run.py) builds everything the coordinator needs, in this order:
 
-1. Open output sinks
-2. Start the logging listener
-3. Run the admin-privilege check
+1. Start the logging listener, and route third-party library logs (WARNING and above) to it
+2. Run the admin-privilege check
+3. Open output sinks. A failure aborts the run with `EXIT_ABORTED`, reported on stderr and in the log, because there would be nowhere to put the results.
 4. Build `WorkerContext`, build a `WorkerPool` bound to `spawn_worker(ctx)`, and start it
 5. Start the progress display
 6. Call `run_coordinator()`, then remove the per-run temp workspace (`secure_rmtree`) and stop the logging listener as a backstop, whether or not the coordinator raised
@@ -193,12 +193,22 @@ On `KeyboardInterrupt`, `_drain()` exits and teardown (below) runs with a shorte
 Stopping the log listener is itself bounded: `stop_listener(listener, timeout=5.0)` gives up rather than hanging forever if the listener thread is stuck (for example, reading a log record a killed worker wrote only half of). If it gives up, a warning goes to stderr after the progress display has stopped — too late for the log file itself, since that is what failed to stop.
 
 ### Outcome and exit codes
-`run_coordinator()` returns a `CoordinatorResult` (`interrupted`, `unfinished`, `workers_failed`) that `run_scan()` maps to a process exit code: 
+`run_coordinator()` returns a `CoordinatorResult` (`interrupted`, `unfinished`, `workers_failed`, `sinks_failed`) that `run_scan()` maps to a process exit code: 
 
 * `EXIT_INTERRUPTED` (EXITCODE 130) if the user pressed Ctrl-C, 
-* `EXIT_INCOMPLETE` (EXITCODE 2) if any task was left outstanding or the pool ran out of workers
-* `EXIT_ABORTED` (EXITCODE 1) if the scan failed to start; e.g. Admin check was declined
+* `EXIT_INCOMPLETE` (EXITCODE 2) if any task was left outstanding, the pool ran out of workers, or a results file stopped receiving findings
+* `EXIT_ABORTED` (EXITCODE 1) if the scan failed to start; e.g. Admin check was declined, or a results file could not be opened
 * `EXIT_OK` (EXITCODE 0). 
+
+### Output sink failures
+Sinks never log; they raise `OSError`. `run_scan()` treats a failed `open()` as fatal. During the scan, `run_coordinator()` wraps each sink in a `GuardedSink` ([sinks.py](../../../src/piidigger/orchestration/sinks.py)). On a sink's first write or close failure, the guard does the following:
+
+1. Logs the error once, through the coordinator logger.
+2. Shows it in the progress display's events panel.
+3. Stops writing to that sink. A full disk would otherwise log once per finding.
+4. Adds a "Results incomplete" line to the end-of-run summary and records the sink in `sinks_failed`.
+
+The other sinks keep receiving findings, and the scan carries on. `close()` is still called on a failed sink to release its file handle.
 
 A per-file failure (an access-denied error, a single timeout) does not by itself change the exit code — only a run that could not really scan anything, or one interrupted mid-scan, does. The progress display's end-of-run summary reports per-file failures, timeouts, and abandonments in a "Not fully scanned" line whenever any occurred, and its heading reads `Scan interrupted.` or `Scan stopped early` instead of `Scan complete.` when appropriate — so a truncated run is never described the same way as a full one.
 
@@ -209,7 +219,7 @@ Five `Protocol` classes in [protocols.py](../../../src/piidigger/protocols.py) d
 - **`ScannableItem`** — a scannable unit of content (`display_path`, `ext`, `mime`, `size`, `depth`, `open_stream()`, `open_bytes()`, `materialize()`). `FilesystemItem` is the only implementation — it represents both on-disk files and extracted archive members via optional `archive_path`/`member_path` kwargs.
 - **`FileHandler`** — reads a `ScannableItem` into text chunks (`plaintext`, `docx`, `pdf`, `xlsx`, `xls`).
 - **`DataHandler`** — finds PII matches in a text chunk (`pan`, `email`; `phonenum`/`trackdata` are stub/not yet implemented).
-- **`OutputSink`** — writes a `ResultRecord` to a destination (`csv`, `json`, `text`).
+- **`OutputSink`** — writes a `ResultRecord` to a destination (`csv`, `json`, `text`). Raises `OSError` instead of logging; `path` names its file in error messages. See [Output sink failures](#output-sink-failures).
 - **`ArchiveHandler`** — lists and extracts archive members. Covered in depth in [Archive Handling](../archives/archive-handling.md).
 
 For how to implement one of these to add a new handler, see [Extending PIIDigger](../../reference/extending.md) — this document only names the contracts the pipeline dispatches through.

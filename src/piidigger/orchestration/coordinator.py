@@ -18,6 +18,7 @@ from piidigger.orchestration.logging_setup import build_worker_logger, start_lis
 from piidigger.orchestration.pool import WorkerPool, spawn_worker
 from piidigger.orchestration.progress import ProgressDisplay
 from piidigger.orchestration.registry import AbandonReason, TaskRecord, TaskRegistry
+from piidigger.orchestration.sinks import GuardedSink
 from piidigger.orchestration.worker import broadcast_shutdown
 
 # How often (seconds) the coordinator runs its health sweep.  The sweep is
@@ -60,11 +61,16 @@ class CoordinatorResult:
     dying before checking in, and no worker was left.  The run still ends cleanly, because the lost-task
     sweep abandons the stranded work, but it did not really scan anything.  Unlike
     a failure on one file, this is a failure of the whole run.
+
+    sinks_failed names each results file that stopped receiving findings after
+    an I/O error.  The scan itself may have finished, but its results did not
+    all reach disk.
     """
 
     interrupted: bool = False
     unfinished: int = 0
     workers_failed: bool = False
+    sinks_failed: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,6 +367,8 @@ def run_coordinator(
             and stops all of them at teardown.
         listener: Logging QueueListener started before this call; stopped here.
         sinks: Opened OutputSink instances that receive findings; closed here.
+            Each is wrapped in a GuardedSink, so a failing sink is logged and
+            dropped instead of stopping the scan.
         progress: Progress display owned by this coordinator; stopped here.
         seed_tasks: Initial tasks.  Defaults to one ENUM_DIR per
             config.start_dirs.  Tests pass their own to drive particular task
@@ -372,6 +380,7 @@ def run_coordinator(
     logger = build_worker_logger(ctx.log_queue, "coordinator")
     registry = TaskRegistry(ctx.task_queue.put)
     monitor = HealthMonitor(registry, pool)
+    guarded = [GuardedSink(sink, logger, progress) for sink in sinks]
 
     seeds = build_seed_tasks(ctx.config) if seed_tasks is None else list(seed_tasks)
     # Pre-seed dirs_found so the progress bar starts at "0 / N" rather than
@@ -383,7 +392,7 @@ def run_coordinator(
 
     interrupted = False
     try:
-        _drain(ctx, registry, monitor, sinks, progress, logger)
+        _drain(ctx, registry, monitor, guarded, progress, logger)
         logger.info("coordinator: all tasks accounted for")
     except KeyboardInterrupt:
         interrupted = True
@@ -406,12 +415,18 @@ def run_coordinator(
             interrupted=interrupted,
             workers_failed=workers_failed,
         )
-        _teardown(ctx, pool, listener, sinks, progress, logger, interrupted=interrupted)
+        _teardown(ctx, pool, listener, guarded, progress, logger, interrupted=interrupted)
 
     unfinished = len(registry)
     if unfinished and not interrupted:
         logger.error("coordinator exited with %d task(s) still outstanding", unfinished)
-    return CoordinatorResult(interrupted=interrupted, unfinished=unfinished, workers_failed=workers_failed)
+    return CoordinatorResult(
+        interrupted=interrupted,
+        unfinished=unfinished,
+        workers_failed=workers_failed,
+        # After teardown, so a sink that fails while closing is counted too.
+        sinks_failed=tuple(sink.label for sink in guarded if sink.failed),
+    )
 
 
 def _drain(
