@@ -92,3 +92,38 @@ def test_xlsx_blank_row_limit_stops_early(tmp_path: Path) -> None:
     strict_content = " ".join(_read(workbook_path, strict_config))
     assert "FIRST" in strict_content
     assert "SECOND" not in strict_content
+
+
+@pytest.mark.filehandlers
+def test_xlsx_blank_col_limit_counts_consecutive_blanks_only(tmp_path: Path) -> None:
+    """Scattered blanks must not add up to the limit.
+
+    Regression test: the counter was never reset by a non-blank cell, so a row
+    with alternating data and blank columns stopped after blank_col_limit blanks
+    in total, dropping every value after that point.
+    """
+    workbook_path = tmp_path / "scattered-blanks.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for col, value in ((1, "A"), (4, "B"), (7, "C"), (10, "4111111111111111")):
+        ws.cell(row=1, column=col, value=value)  # two blank columns between each value
+    wb.save(workbook_path)
+
+    content = " ".join(_read(workbook_path, Config(spreadsheet=SpreadsheetConfig(blank_col_limit=2))))
+
+    assert content.split() == ["A", "B", "C", "4111111111111111"]
+
+
+@pytest.mark.filehandlers
+def test_xlsx_blank_col_limit_still_stops_on_a_consecutive_run(tmp_path: Path) -> None:
+    workbook_path = tmp_path / "blank-run.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.cell(row=1, column=1, value="FIRST")
+    ws.cell(row=1, column=6, value="SECOND")  # four consecutive blank columns before it
+    wb.save(workbook_path)
+
+    content = " ".join(_read(workbook_path, Config(spreadsheet=SpreadsheetConfig(blank_col_limit=3))))
+
+    assert "FIRST" in content
+    assert "SECOND" not in content

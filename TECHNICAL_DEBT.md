@@ -31,6 +31,18 @@ Known gaps we chose not to fix yet. Each entry says what is wrong, why it was de
 - **Where:** `orchestration/coordinator.py` (`HealthMonitor.tick`, crash sweep), `orchestration/registry.py` (`requeue_remaining`).
 - **Suggested fix:** Don't drop a suspect on its first crash. Requeue it with a retry budget similar to on-disk files, and drop it only after it's budget is spent.
 
+### A slow directory listing is abandoned with its whole subtree
+- **What:** `ENUM_DIR` never sends `TaskProgress`, and a timed-out task is never retried. `get_mime()` opens every file, so a very large directory on slow storage can run past 2× `default_timeout_seconds`. Examples are ~100k files on an HDD, on a network share, or under antivirus scanning. The deadline sweep then kills the worker and abandons the task as `timed_out`. No file or subdirectory under it is enqueued, and the summary shows only "1 timed out". 1.x had no such limit.
+- **Why deferred:** Rare. It needs a single directory big and slow enough to take more than a minute to list.
+- **Where:** `orchestration/worker/_enum_dir.py` (`handle_enum_dir`), `orchestration/coordinator.py` (deadline sweep).
+- **Suggested fix:** Send a `ProgressReporter.alive()` heartbeat every few hundred entries so the deadline keeps moving while the listing makes progress. Alternatively, emit the subdirectories found so far before the MIME pass, so a timeout loses only this directory's files.
+
+### A poison file can trip the startup-failure breaker
+- **What:** `WorkerPool.reap_dead()` counts a dead worker as a startup failure if the coordinator has not yet processed its `WorkerReady`. On a busy scan that message can sit behind a result backlog, or be lost in the feeder thread when the process dies. A file that crashes a C parser kills each replacement right after it checks in. Three such deaths turn `replacing` off. Later retries of the same task then kill workers that are not replaced, which can end in `workers_failed` and `EXIT_INCOMPLETE` for the whole scan.
+- **Why deferred:** Needs a native crash on a poison file, which is rare. It is the same exposure as the other segfault entries above.
+- **Where:** `orchestration/pool.py` (`reap_dead`, `_note_startup_failure`), `orchestration/coordinator.py` (`HealthMonitor.observe`).
+- **Suggested fix:** Before counting a startup failure, drain the result queue. Also count a death as a startup failure only if no task was dispatched to that worker, since the registry knows which pid held a task. Or base the breaker on time since spawn rather than on check-in.
+
 ### Batches multiply decompression CPU for low-R formats
 - **What:** `batch_count()` creates at least one batch per worker. Each batch re-decompresses the part of the archive before it, about (K−1)/2 extra passes in total. For gzip this is small next to scanning (R ≈ 200). For 7z through py7zr, R is only about 8–10, so 8 batches add roughly 40% CPU.
 - **Why deferred:** Wall-clock time still improves, and the right answer depends on measurements on real archives.
@@ -62,8 +74,10 @@ Known gaps we chose not to fix yet. Each entry says what is wrong, why it was de
 
 ### A corrupt member in a solid 7z folder fails the rest of that folder
 - **What:** After a CRC error, the batch is requeued without the bad member. py7zr still re-checks the bad member's CRC while skipping past it, so the retry fails again before reaching later members in that folder.
+  - **Quadratic cost:** each failure drops only the current member and requeues the rest. Every round decompresses the folder again from its start, so a batch of N members behind a corrupt block takes N rounds. That is the O(n²) decompression that contiguous batching removed for healthy archives, plus N `ERROR` log lines and display events. Tar avoids this, because a broken stream ends the walk with no culprit.
 - **Why deferred:** Library behavior. Data after a corrupt point in one compressed stream usually can't be decoded anyway.
-- **Where:** `archivehandlers/_7z.py`.
+- **Where:** `archivehandlers/_7z.py`, `orchestration/coordinator.py` (`_requeue_failed_batch`).
+- **Suggested fix:** After a CRC or decode error in a solid folder, fail every remaining member of that folder at once instead of requeuing them. Either the 7z handler reports the folder boundary, or `_requeue_failed_batch` stops requeuing after a repeat failure on the same archive.
 
 ## Configuration
 

@@ -59,7 +59,7 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
     else:
         enabled_handlers = [HANDLER_REGISTRY[name] for name in ctx.config.data_handlers if name in HANDLER_REGISTRY]
 
-    task_temp = ctx.temp_base / task.task_id
+    task_temp = ctx.task_workspace(task.task_id)
     task_temp.mkdir(exist_ok=True)
     temp_root = task_temp.resolve()
     reporter = ProgressReporter(ctx.result_queue.put, task.task_id)

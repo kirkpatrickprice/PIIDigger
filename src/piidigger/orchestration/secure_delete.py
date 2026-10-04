@@ -13,8 +13,8 @@ This limitation is documented in the user guide under Security Considerations.
 
 from __future__ import annotations
 
+import contextlib
 import os
-import shutil
 from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
@@ -60,20 +60,62 @@ def _overwrite_pass(f: BinaryIO, size: int, chunk_for: Callable[[int], bytes]) -
     os.fsync(f.fileno())
 
 
-def secure_rmtree(root: Path) -> None:
+def secure_rmtree(root: Path) -> list[Path]:
     """Securely delete every file under *root*, then remove the directory tree.
 
-    secure_delete() is called only on files — unlink() raises IsADirectoryError
-    on directories, which missing_ok=True does not suppress.  shutil.rmtree()
-    then removes the now-empty tree.  No-ops when root does not exist.
+    Best effort, and never raises.  Returns every path it had to leave on disk,
+    so the caller can tell the user which folder to clean up by hand.  An empty
+    list means the whole tree is gone.
+
+    The tree is walked bottom-up.  Each file is overwritten by secure_delete()
+    before it is unlinked, and each directory is removed only once it is empty.
+    So a folder that cannot be listed (a permission or antivirus error) is
+    reported and left alone: its files are never unlinked without being
+    overwritten first.  On Windows a file another process holds open without
+    share-delete cannot be unlinked; it is reported the same way.
+
+    A symlink is unlinked, never overwritten, so a link can never send the
+    overwrite to a file outside *root*.
 
     Used both per-task by workers and as the run-level backstop, so a temp tree
     left behind by a terminated worker is still overwritten rather than merely
     unlinked.
     """
     if not root.exists():
-        return
-    for path in root.rglob("*"):
-        if path.is_file():
+        return []
+    not_removed: list[Path] = []
+
+    def unreadable(exc: OSError) -> None:
+        not_removed.append(Path(exc.filename) if exc.filename else root)
+
+    for dirpath, dirnames, filenames in os.walk(root, topdown=False, onerror=unreadable):
+        here = Path(dirpath)
+        for name in filenames:
+            _remove_file(here / name, not_removed)
+        for name in dirnames:
+            # Walked already (bottom-up), unless it is a symlink, which os.walk
+            # does not follow.  rmdir() fails on a folder with leftovers, and
+            # those leftovers are reported already.
+            sub = here / name
+            if sub.is_symlink():
+                _remove_file(sub, not_removed)
+            else:
+                with contextlib.suppress(OSError):
+                    sub.rmdir()
+    try:
+        root.rmdir()
+    except OSError:
+        if not not_removed:
+            not_removed.append(root)
+    return not_removed
+
+
+def _remove_file(path: Path, not_removed: list[Path]) -> None:
+    """Remove one file (overwriting it first unless it is a symlink); record it if that fails."""
+    try:
+        if path.is_symlink():
+            path.unlink()
+        else:
             secure_delete(path)
-    shutil.rmtree(root, ignore_errors=True)
+    except OSError:
+        not_removed.append(path)

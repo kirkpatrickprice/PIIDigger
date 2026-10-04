@@ -1126,9 +1126,107 @@ def test_cleanup_temp_workspace_recursive(tmp_path: Path) -> None:
     flat_file = task_temp / "flat.txt"
     flat_file.write_bytes(b"also sensitive")
 
-    _cleanup_temp_workspace(tmp_path, task_id)
+    _cleanup_temp_workspace(task_temp, logging.getLogger("test"))
 
     assert not task_temp.exists()
+
+
+def _lock_on_unlink(monkeypatch: pytest.MonkeyPatch, locked_name: str) -> None:
+    """Make unlink() of any file called locked_name fail as a Windows AV lock does."""
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name == locked_name:
+            raise PermissionError(32, "The process cannot access the file because it is being used by another process")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+
+@pytest.mark.unit
+def test_secure_rmtree_returns_a_locked_file_instead_of_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file another process holds open must not abort the cleanup of the rest."""
+    from piidigger.orchestration.secure_delete import secure_rmtree
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "locked.txt").write_bytes(b"4111111111111111")
+    (root / "free.txt").write_bytes(b"4111111111111111")
+    _lock_on_unlink(monkeypatch, "locked.txt")
+
+    leftovers = secure_rmtree(root)
+
+    assert leftovers == [root / "locked.txt"]
+    assert not (root / "free.txt").exists()
+
+
+@pytest.mark.unit
+def test_secure_rmtree_never_unlinks_an_unlisted_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A folder that cannot be listed is reported and left, never deleted unread.
+
+    Regression test: a listing error dropped every collected path, and
+    shutil.rmtree then unlinked extracted members without overwriting them.
+    """
+    from piidigger.orchestration.secure_delete import secure_rmtree
+
+    root = tmp_path / "ws"
+    hidden = root / "unlistable"
+    hidden.mkdir(parents=True)
+    (hidden / "member.txt").write_bytes(b"4111111111111111")
+    (root / "free.txt").write_bytes(b"4111111111111111")
+    real_walk = os.walk
+
+    def walk_with_denied_subfolder(top: Any, topdown: bool = True, onerror: Any = None, followlinks: bool = False):  # type: ignore[no-untyped-def]
+        for dirpath, dirnames, filenames in real_walk(top, topdown, onerror, followlinks):
+            if Path(dirpath) == hidden:
+                onerror(PermissionError(13, "Access is denied", str(hidden)))
+                continue
+            yield dirpath, dirnames, filenames
+
+    monkeypatch.setattr(secure_delete_mod.os, "walk", walk_with_denied_subfolder)
+
+    leftovers = secure_rmtree(root)
+
+    assert leftovers == [hidden]
+    assert (hidden / "member.txt").exists(), "an unlisted file must not be unlinked without its overwrite"
+    assert not (root / "free.txt").exists()
+
+
+@pytest.mark.unit
+def test_cleanup_temp_workspace_logs_a_locked_file_instead_of_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Regression test: the PermissionError escaped worker_loop's finally and killed the worker."""
+    from piidigger.orchestration.worker._loop import _cleanup_temp_workspace
+
+    task_temp = tmp_path / "task"
+    task_temp.mkdir()
+    (task_temp / "locked.txt").write_bytes(b"secret")
+    _lock_on_unlink(monkeypatch, "locked.txt")
+
+    with caplog.at_level(logging.WARNING, logger="test"):
+        _cleanup_temp_workspace(task_temp, logging.getLogger("test"))
+
+    assert "could not remove temp file" in caplog.text
+    assert "locked.txt" in caplog.text
+
+
+@pytest.mark.unit
+def test_task_workspace_differs_between_workers_running_the_same_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: a re-dispatched task id gave two live workers one extraction folder."""
+    ctx = _make_ctx(tmp_path)
+
+    monkeypatch.setattr(os, "getpid", lambda: 1111)
+    first = ctx.task_workspace("same-task")
+    monkeypatch.setattr(os, "getpid", lambda: 2222)
+    second = ctx.task_workspace("same-task")
+
+    assert first != second
+    assert first.parent == second.parent == ctx.temp_base
 
 
 # ---------------------------------------------------------------------------
@@ -1652,7 +1750,7 @@ def test_scan_batch_streams_each_member_and_leaves_nothing_on_disk(
     archive = _build_archive(tmp_path, archive_type, members)
     ctx = _make_ctx(tmp_path, data_handlers=["pan"])
     task = _scan_archive_task(archive, "m0.txt", "m2.txt", archive_type=archive_type)
-    task_temp = tmp_path / task.task_id
+    task_temp = ctx.task_workspace(task.task_id)
 
     real_scan = scan_mod._scan_member
     on_disk_during_scan: list[int] = []

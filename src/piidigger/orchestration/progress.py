@@ -372,16 +372,21 @@ class ProgressDisplay:
             unfinished=self._unfinished,
         )
 
-    def stop(self) -> None:
+    def stop(self, *, summary: bool = True) -> None:
         """Close the rich.Live display and print a plain-text summary to stdout.
 
         The first line gives the totals.  A second line appears only when some
         work did not complete, so a partial scan cannot be mistaken for a full
         one.
+
+        Pass summary=False when the scan failed before it began.  Any summary
+        would then claim a scan that never ran.
         """
         live = self._live
         if self._is_tty and live is not None:
             live.stop()
+        if not summary:
+            return
 
         parts = []
         for k, v in self._counters.items():

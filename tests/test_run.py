@@ -12,12 +12,16 @@ import pytest
 
 from piidigger.models.config import Config, ResultsConfig
 from piidigger.orchestration.coordinator import CoordinatorResult
+from piidigger.orchestration.pool import WorkerPool
+from piidigger.outputhandlers import TextSink
 from piidigger.run import (
     EXIT_ABORTED,
     EXIT_INCOMPLETE,
     EXIT_INTERRUPTED,
     EXIT_OK,
     _build_sinks,
+    _is_broad_folder,
+    _remove_temp_workspace,
     _resolve_workers,
     run_scan,
 )
@@ -293,8 +297,8 @@ def test_run_scan_skips_its_own_results_and_log_folders(tmp_path: Path, monkeypa
     """The scan must not read its own output folders.
 
     Regression test: scanning / or C:\\ from a cwd under it reached the
-    relative default ./piidigger-results/ and ./logs/, so every finding was
-    reported again against the output files and each later run grew.
+    relative default ./piidigger-results/ and ./logs/, so workers tried to read
+    files the scan was still writing.
     """
     root = tmp_path / "root"
     root.mkdir()
@@ -375,3 +379,221 @@ def test_run_scan_maps_the_coordinator_outcome_to_an_exit_code(
     )
 
     assert rc == expected
+
+
+@pytest.mark.unit
+def test_is_broad_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a folder that holds nothing but output is excluded as a whole."""
+    cwd = tmp_path / "cwd"
+    (cwd / "logs").mkdir(parents=True)
+    scan_root = tmp_path / "scan"
+    scan_root.mkdir()
+    monkeypatch.chdir(cwd)
+    resolved_tmp = tmp_path.resolve()
+
+    assert _is_broad_folder(Path(resolved_tmp.anchor), [scan_root]), "a filesystem root"
+    assert _is_broad_folder(cwd.resolve(), [scan_root]), "the cwd"
+    assert _is_broad_folder(resolved_tmp, [scan_root]), "an ancestor of the cwd"
+    assert _is_broad_folder(scan_root.resolve(), [scan_root / "sub"]), "an ancestor of a start dir"
+    assert not _is_broad_folder((cwd / "logs").resolve(), [scan_root]), "a dedicated folder"
+
+
+@pytest.mark.integration
+def test_run_scan_bare_output_paths_exclude_only_the_output_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Output written straight into the cwd must not exclude the cwd.
+
+    Regression test: log_file = "piidigger.log" made the log folder ".", which
+    resolved to the cwd, so every subdirectory of it was skipped.
+    """
+    root = tmp_path / "root"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub" / "nested.txt").write_text("card 4111111111111111")
+    (root / "top.txt").write_text("card 4111111111111111")
+    monkeypatch.chdir(root)
+
+    config = Config(
+        start_dirs=[root],
+        log_file=Path("piidigger.log"),
+        log_level="DEBUG",
+        results=ResultsConfig(path=Path("."), formats=["text"]),
+    )
+    rc = run_scan(config)
+
+    assert rc == EXIT_OK
+    output = next(p for p in root.glob("*.txt") if p.name != "top.txt")
+    findings = output.read_text()
+    assert "nested.txt" in findings, "subdirectory of the cwd was excluded"
+    assert "top.txt" in findings
+    assert output.name not in findings, "scan read its own results file"
+    assert "piidigger.log" not in findings, "scan read its own log file"
+
+
+@pytest.mark.integration
+def test_run_scan_cleans_up_when_workers_cannot_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A startup failure closes the results files and logs the failure.
+
+    Regression test: pool.start() ran outside the try, so a spawn failure left
+    the sinks open and the reason for the failure out of the log file.
+    """
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    log_file = tmp_path / "test.log"
+
+    def no_workers(self: object, n: int) -> None:
+        raise OSError(1455, "The paging file is too small for this operation to complete")
+
+    closed: list[object] = []
+    real_close = TextSink.close
+
+    def recording_close(self: TextSink) -> None:
+        closed.append(self)
+        real_close(self)
+
+    monkeypatch.setattr("piidigger.run.WorkerPool.start", no_workers)
+    monkeypatch.setattr(TextSink, "close", recording_close)
+
+    before = set(Path(tempfile.gettempdir()).glob("piidigger_*"))
+    with pytest.raises(OSError, match="paging file"):
+        run_scan(
+            Config(
+                start_dirs=[scan_root],
+                log_file=log_file,
+                results=ResultsConfig(path=tmp_path / "results", formats=["text"]),
+            )
+        )
+
+    assert len(closed) == 1, "the results file was left open"
+    assert "scan failed during startup" in log_file.read_text()
+    assert not set(Path(tempfile.gettempdir()).glob("piidigger_*")) - before
+    assert not any(isinstance(h, logging.handlers.QueueHandler) for h in logging.getLogger().handlers)
+
+
+@pytest.mark.unit
+def test_remove_temp_workspace_warns_about_files_it_cannot_remove(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A temp file still locked after the retries is reported, not raised."""
+    stuck = tmp_path / "member.txt"
+    calls: list[Path] = []
+
+    def still_locked(root: Path) -> list[Path]:
+        calls.append(root)
+        return [stuck]
+
+    monkeypatch.setattr("piidigger.run.secure_rmtree", still_locked)
+    monkeypatch.setattr("piidigger.run._TEMP_REMOVE_RETRY_SECONDS", 0.0)
+
+    _remove_temp_workspace(tmp_path)
+
+    assert len(calls) == 3
+    assert f"could not securely remove all temporary files under {tmp_path}" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_remove_temp_workspace_still_warns_when_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A second CTRL-C during the retry wait must not swallow the warning.
+
+    Regression test: the interrupt escaped run_scan's finally, skipping the
+    warning about plaintext leftovers and stopping the listener.
+    """
+    monkeypatch.setattr("piidigger.run.secure_rmtree", lambda _root: [tmp_path / "member.txt"])
+
+    def interrupted_sleep(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("piidigger.run.time.sleep", interrupted_sleep)
+
+    _remove_temp_workspace(tmp_path)  # must not raise
+
+    assert "could not securely remove all temporary files" in capsys.readouterr().err
+
+
+def _startup_config(tmp_path: Path) -> Config:
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    return Config(
+        start_dirs=[scan_root],
+        log_file=tmp_path / "test.log",
+        results=ResultsConfig(path=tmp_path / "results", formats=["text"]),
+    )
+
+
+def _record_sink_closes(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    closed: list[object] = []
+    real_close = TextSink.close
+
+    def recording_close(self: TextSink) -> None:
+        closed.append(self)
+        real_close(self)
+
+    monkeypatch.setattr(TextSink, "close", recording_close)
+    return closed
+
+
+@pytest.mark.integration
+def test_run_scan_ctrl_c_during_startup_exits_interrupted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression test: KeyboardInterrupt escaped to Click, which exits 1 (EXIT_ABORTED), not 130."""
+
+    def interrupted(self: object, n: int) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("piidigger.run.WorkerPool.start", interrupted)
+    closed = _record_sink_closes(monkeypatch)
+    config = _startup_config(tmp_path)
+
+    rc = run_scan(config)
+
+    assert rc == EXIT_INTERRUPTED
+    assert len(closed) == 1
+    assert "scan interrupted during startup" in config.log_file.read_text()
+
+
+@pytest.mark.integration
+def test_run_scan_cleans_up_when_setup_fails_before_the_pool_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: building the exclusions ran outside the try, so a deleted
+    cwd leaked the temp workspace, the open results files and the listener."""
+
+    def cwd_gone(*_args: object) -> None:
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    monkeypatch.setattr("piidigger.run._output_exclusions", cwd_gone)
+    closed = _record_sink_closes(monkeypatch)
+    config = _startup_config(tmp_path)
+
+    before = set(Path(tempfile.gettempdir()).glob("piidigger_*"))
+    with pytest.raises(FileNotFoundError):
+        run_scan(config)
+
+    assert len(closed) == 1
+    assert "scan failed during startup" in config.log_file.read_text()
+    assert not set(Path(tempfile.gettempdir()).glob("piidigger_*")) - before
+    assert not any(isinstance(h, logging.handlers.QueueHandler) for h in logging.getLogger().handlers)
+
+
+@pytest.mark.integration
+def test_run_scan_stops_started_workers_when_startup_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Workers already running when startup fails are stopped before run_scan returns."""
+    pools: list[WorkerPool] = []
+
+    class RecordingPool(WorkerPool):
+        def start(self, n: int) -> None:
+            pools.append(self)
+            super().start(n)
+
+    def display_fails(self: object) -> None:
+        raise RuntimeError("no terminal")
+
+    monkeypatch.setattr("piidigger.run.WorkerPool", RecordingPool)
+    monkeypatch.setattr("piidigger.run.ProgressDisplay.start", display_fails)
+
+    with pytest.raises(RuntimeError, match="no terminal"):
+        run_scan(_startup_config(tmp_path))
+
+    assert pools and pools[0].processes, "the pool started workers"
+    assert all(not proc.is_alive() for proc in pools[0].processes)

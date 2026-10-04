@@ -68,6 +68,7 @@ class XlsxHandler:
                             if blank_col_count > config.spreadsheet.blank_col_limit:
                                 break
                             continue
+                        blank_col_count = 0  # the limit is on consecutive blanks
                         line += str(item) + " "
                         row_has_data = True
 

@@ -49,17 +49,22 @@ DISPATCH: dict[TaskType, _HandlerFn] = {
 }
 
 
-def _cleanup_temp_workspace(temp_base: Path, task_id: str) -> None:
+def _cleanup_temp_workspace(workspace: Path, logger: logging.Logger) -> None:
     """Securely delete this task's temp files then remove its temp directory.
 
     Walks the task temp dir recursively so handlers need not flatten extracted
     files to a single level.  No-ops gracefully when the task created no temp
     files.
 
-    Note this runs in worker_loop's finally block, which a terminate() does NOT
-    unwind — run_scan's own secure_rmtree of temp_base is the backstop for that.
+    Never raises: it runs in worker_loop's finally block, and an exception there
+    would kill the worker and lose the task's result.  A file that cannot be
+    removed yet (an antivirus or indexer lock on Windows) is logged and left
+    for run_scan's own secure_rmtree of temp_base, which runs at the end of the
+    run.  That backstop also covers a worker stopped by terminate(), which
+    never unwinds this finally block.
     """
-    secure_rmtree(temp_base / task_id)
+    for path in secure_rmtree(workspace):
+        logger.warning("could not remove temp file %s yet; it is removed when the scan ends", path)
 
 
 def _dispatch(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
@@ -124,7 +129,7 @@ def worker_loop(ctx: WorkerContext) -> None:
             try:
                 result = _dispatch(task, ctx, logger)
             finally:
-                _cleanup_temp_workspace(ctx.temp_base, task.task_id)
+                _cleanup_temp_workspace(ctx.task_workspace(task.task_id), logger)
             ctx.result_queue.put(result)
     except KeyboardInterrupt:
         logger.debug("worker interrupted; exiting after current task")

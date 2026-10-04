@@ -1,9 +1,11 @@
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+import piidigger.filehandlers.xls as xls_mod
 from piidigger.filehandlers.xls import XlsHandler
-from piidigger.models.config import Config
+from piidigger.models.config import Config, SpreadsheetConfig
 from piidigger.orchestration.sources import FilesystemItem
 
 
@@ -67,3 +69,46 @@ def test_xls_random_data_table() -> None:
     assert "First Name" in content
     assert "j.montgomery@randatmail.com" in content
     assert "Lower secondary" in content
+
+
+class _FakeSheet:
+    def __init__(self, rows: list[list[Any]]) -> None:
+        self._rows = rows
+        self.nrows = len(rows)
+        self.ncols = max(len(r) for r in rows)
+
+    def cell_value(self, row: int, col: int) -> Any:
+        return self._rows[row][col] if col < len(self._rows[row]) else ""
+
+
+class _FakeBook:
+    def __init__(self, sheet: _FakeSheet) -> None:
+        self._sheet = sheet
+
+    def sheet_names(self) -> list[str]:
+        return ["Sheet1"]
+
+    def sheet_by_name(self, _name: str) -> _FakeSheet:
+        return self._sheet
+
+    def unload_sheet(self, _name: str) -> None:
+        pass
+
+    def release_resources(self) -> None:
+        pass
+
+
+@pytest.mark.filehandlers
+def test_xls_blank_col_limit_counts_consecutive_blanks_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Scattered blanks must not add up to the limit; see the xlsx test of the same name.
+
+    xlrd cannot write .xls files, so the workbook is faked.
+    """
+    row = ["A", "", "", "B", "", "", "C", "", "", "4111111111111111"]
+    monkeypatch.setattr(xls_mod.xlrd, "open_workbook", lambda *_a, **_k: _FakeBook(_FakeSheet([row])))
+    path = tmp_path / "fake.xls"
+    path.write_bytes(b"")
+
+    content = " ".join(_read(path, Config(spreadsheet=SpreadsheetConfig(blank_col_limit=2))))
+
+    assert content.split() == ["A", "B", "C", "4111111111111111"]

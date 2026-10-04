@@ -57,6 +57,7 @@ class XlsHandler:
                             if blank_col_count > config.spreadsheet.blank_col_limit:
                                 break
                             continue
+                        blank_col_count = 0  # the limit is on consecutive blanks
                         if isinstance(item, float) and str(item)[-2:] == ".0":
                             item = str(item)[:-2]
                         line += str(item) + " "

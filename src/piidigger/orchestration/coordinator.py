@@ -382,16 +382,18 @@ def run_coordinator(
     monitor = HealthMonitor(registry, pool)
     guarded = [GuardedSink(sink, logger, progress) for sink in sinks]
 
-    seeds = build_seed_tasks(ctx.config) if seed_tasks is None else list(seed_tasks)
-    # Pre-seed dirs_found so the progress bar starts at "0 / N" rather than
-    # "0 / 0".  Each ENUM_DIR result adds the subdirectories it discovers.
-    progress.update({"dirs_found": sum(1 for t in seeds if t.task_type == TaskType.ENUM_DIR)})
-    for task in seeds:
-        registry.enqueue(task)
-    logger.info("coordinator seeded %d initial task(s)", len(seeds))
-
     interrupted = False
+    # Seeding is inside the try: run_scan hands teardown to this function as
+    # soon as it calls it, so nothing that can fail may run outside the finally.
     try:
+        seeds = build_seed_tasks(ctx.config) if seed_tasks is None else list(seed_tasks)
+        # Pre-seed dirs_found so the progress bar starts at "0 / N" rather than
+        # "0 / 0".  Each ENUM_DIR result adds the subdirectories it discovers.
+        progress.update({"dirs_found": sum(1 for t in seeds if t.task_type == TaskType.ENUM_DIR)})
+        for task in seeds:
+            registry.enqueue(task)
+        logger.info("coordinator seeded %d initial task(s)", len(seeds))
+
         _drain(ctx, registry, monitor, guarded, progress, logger)
         logger.info("coordinator: all tasks accounted for")
     except KeyboardInterrupt:
@@ -401,6 +403,11 @@ def run_coordinator(
             "WARNING",
             "Scan interrupted — shutting down gracefully  (CTRL-C again to force-quit)",
         )
+    except Exception:
+        # Logged here, while the listener still runs: teardown stops it, and
+        # the exception would otherwise reach only the console.
+        logger.exception("coordinator failed")
+        raise
     finally:
         # Checked before teardown, whose join() can drop stuck workers.  The run
         # failed as a whole only if the pool stopped replacing workers AND none
@@ -415,11 +422,13 @@ def run_coordinator(
             interrupted=interrupted,
             workers_failed=workers_failed,
         )
+        # Logged before teardown, which stops the listener: a record put on
+        # the log queue after that never reaches the log file.
+        unfinished = len(registry)
+        if unfinished and not interrupted:
+            logger.error("coordinator exited with %d task(s) still outstanding", unfinished)
         _teardown(ctx, pool, listener, guarded, progress, logger, interrupted=interrupted)
 
-    unfinished = len(registry)
-    if unfinished and not interrupted:
-        logger.error("coordinator exited with %d task(s) still outstanding", unfinished)
     return CoordinatorResult(
         interrupted=interrupted,
         unfinished=unfinished,
@@ -750,6 +759,41 @@ def _flush_sinks(sinks: list[Any], logger: logging.Logger) -> None:
             logger.exception("error closing sink %r", sink)
 
 
+def stop_workers(ctx: WorkerContext, pool: WorkerPool, *, interrupted: bool) -> None:
+    """Ask every worker to stop, wait for them, then stop whatever is left.
+
+    Workers are asked to stop, not killed outright.  Killing a worker can cut a
+    queue message in half, and a half-written message can hang whoever reads
+    it next.  pool.join() still escalates to terminate() and kill() for any
+    worker that does not exit within the budget.  Used by the coordinator's
+    teardown and by run_scan when startup fails before the coordinator runs.
+    """
+    if interrupted:
+        # Cancel feeder-thread joins NOW, before any step that could block.  If
+        # a second CTRL-C breaks out of teardown, the atexit handler sees
+        # _joincancelled=True and skips thread.join(), so the multiprocessing
+        # atexit hook raises no unhandled KeyboardInterrupt.
+        ctx.task_queue.cancel_join_thread()
+        ctx.result_queue.cancel_join_thread()
+        ctx.log_queue.cancel_join_thread()
+
+    # Set before the sentinels go out.  Sentinels queue up behind anything
+    # still in the task queue; with stop_event set, a worker that takes one of
+    # those leftovers exits instead of running it.
+    ctx.stop_event.set()
+    # One sentinel per process the pool knows about, stragglers included, so
+    # every worker blocked in get() wakes.  Too many is harmless; too few leaves
+    # a worker blocked forever.
+    broadcast_shutdown(ctx.task_queue, len(pool.processes))
+    pool.join(_INTERRUPT_JOIN_TIMEOUT if interrupted else _JOIN_TIMEOUT)
+
+    # Every worker has exited or been stopped, so nothing will read the task
+    # queue again.  Anything still buffered in it (re-dispatched copies, or
+    # every task if no worker was left) would otherwise make interpreter
+    # exit wait on a pipe that no one drains.
+    ctx.task_queue.cancel_join_thread()
+
+
 def _teardown(
     ctx: WorkerContext,
     pool: WorkerPool,
@@ -763,40 +807,13 @@ def _teardown(
     """Stop the workers, flush the sinks, and stop the listener and display.
 
     Normal completion and CTRL-C take the same path; only the join budget
-    differs.  Workers are asked to stop, not killed outright.  Killing a worker
-    can cut a queue message in half, and a half-written message can hang
-    whoever reads it next.  pool.join() still escalates to terminate() and
-    kill() for any worker that does not exit within the budget.
+    differs.  See stop_workers() for how the workers are stopped.
     """
-    if interrupted:
-        # Cancel feeder-thread joins NOW, before any teardown step that could
-        # block.  If a second CTRL-C breaks out of this function, the atexit
-        # handler sees _joincancelled=True and skips thread.join(), so the
-        # multiprocessing atexit hook raises no unhandled KeyboardInterrupt.
-        ctx.task_queue.cancel_join_thread()
-        ctx.result_queue.cancel_join_thread()
-        ctx.log_queue.cancel_join_thread()
-
-    # Set before the sentinels go out.  Sentinels queue up behind anything
-    # still in the task queue; with stop_event set, a worker that takes one of
-    # those leftovers exits instead of running it.
-    ctx.stop_event.set()
-    # One sentinel per process the pool knows about, stragglers included, so
-    # every worker blocked in get() wakes.  Too many is harmless; too few leaves
-    # a worker blocked forever.
-    broadcast_shutdown(ctx.task_queue, len(pool.processes))
-
     listener_stopped = True
     try:
         if interrupted:
             progress.log_event("INFO", "Waiting for workers to stop…")
-        pool.join(_INTERRUPT_JOIN_TIMEOUT if interrupted else _JOIN_TIMEOUT)
-
-        # Every worker has exited or been stopped, so nothing will read the task
-        # queue again.  Anything still buffered in it (re-dispatched copies, or
-        # every task if no worker was left) would otherwise make interpreter
-        # exit wait on a pipe that no one drains.
-        ctx.task_queue.cancel_join_thread()
+        stop_workers(ctx, pool, interrupted=interrupted)
 
         if interrupted:
             progress.log_event("INFO", "Saving results to output files…")

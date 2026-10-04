@@ -10,6 +10,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ from wakepy import keep
 
 from piidigger.models.config import Config
 from piidigger.orchestration.context import WorkerContext
-from piidigger.orchestration.coordinator import run_coordinator
+from piidigger.orchestration.coordinator import CoordinatorResult, run_coordinator, stop_workers
 from piidigger.orchestration.logging_setup import (
     build_worker_logger,
     route_library_logs,
@@ -37,6 +38,10 @@ from piidigger.outputhandlers import HANDLER_REGISTRY, CsvSink, JsonSink, TextSi
 _ALL_FORMATS: frozenset[str] = frozenset(HANDLER_REGISTRY)
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 _ADMIN_PROMPT_TIMEOUT: int = 10
+# A temp file another process holds open (antivirus, the Windows indexer)
+# usually frees up within a second or two, so the final cleanup retries.
+_TEMP_REMOVE_ATTEMPTS: int = 3
+_TEMP_REMOVE_RETRY_SECONDS: float = 1.0
 
 # Process exit codes.  A scan that did not finish must never report success —
 # automation gating on the exit code would treat a truncated scan as clean.
@@ -201,6 +206,113 @@ def _open_sinks(config: Config, logger: logging.Logger) -> list[Any] | None:
     return opened
 
 
+def _is_broad_folder(folder: Path, start_dirs: list[Path]) -> bool:
+    """Return True when excluding *folder* would also exclude work the user asked for.
+
+    *folder* must already be resolved.  It is broad when it is a filesystem
+    root, the cwd or one of its ancestors, or contains a start dir.  A bare
+    log_file = "piidigger.log" puts the log folder at the cwd; excluding that
+    would skip the user's whole working tree.
+    """
+    if folder.parent == folder:
+        return True
+    if Path.cwd().resolve().is_relative_to(folder):
+        return True
+    return any(Path(d).resolve().is_relative_to(folder) for d in start_dirs)
+
+
+def _output_exclusions(config: Config, sinks: list[Any], logger: logging.Logger) -> tuple[list[str], frozenset[str]]:
+    """Return the folders and files the scan must skip because this run is writing them.
+
+    The results files and the log file stay open for writing for the whole
+    scan, so reading one can never find anything.  Each output folder is
+    excluded as a whole unless it is too broad (see _is_broad_folder()); then
+    only the files this run writes are excluded.  Folders come back resolved;
+    files come back resolved and normcased, as _is_excluded_file() compares
+    them.
+    """
+    outputs = [
+        (config.results.path.resolve(), [Path(sink.path) for sink in sinks]),
+        (config.log_file.parent.resolve(), [config.log_file]),
+    ]
+    dirs: list[str] = []
+    files: set[str] = set()
+    for folder, written in outputs:
+        if _is_broad_folder(folder, config.start_dirs):
+            logger.info("output folder %s is too broad to exclude; skipping only the files this run writes", folder)
+            files.update(os.path.normcase(os.path.realpath(path)) for path in written)
+        else:
+            dirs.append(str(folder))
+    return dirs, frozenset(files)
+
+
+def _abort_startup(
+    ctx: WorkerContext | None,
+    pool: WorkerPool | None,
+    sinks: list[Any],
+    progress: ProgressDisplay,
+    logger: logging.Logger,
+    *,
+    interrupted: bool,
+) -> None:
+    """Undo a startup that failed before run_coordinator took over teardown.
+
+    Called from an except block.  ctx and pool are None when the failure came
+    before they were built.  Stops any workers already started, the same way
+    the coordinator's teardown does, then closes the results files and the
+    display.  The listener is left running, so the failure logged here reaches
+    the log file; run_scan's finally stops it.
+    """
+    if interrupted:
+        logger.warning("scan interrupted during startup")
+    else:
+        logger.exception("scan failed during startup")
+    if ctx is not None and pool is not None:
+        stop_workers(ctx, pool, interrupted=interrupted)
+    for sink in sinks:
+        try:
+            sink.close()
+        except Exception:  # noqa: BLE001
+            logger.exception("error closing sink %r", sink)
+    if interrupted:
+        progress.report_incomplete(timed_out=0, abandoned=0, unfinished=0, interrupted=True)
+        progress.stop()
+    else:
+        # The traceback that follows explains the failure; a summary would
+        # claim a scan that never ran.
+        progress.stop(summary=False)
+
+
+def _remove_temp_workspace(temp_base: Path) -> None:
+    """Securely remove the run's temp workspace, and tell the user if anything is left.
+
+    Secure deletion is best effort.  Files still in use (antivirus, the
+    Windows indexer) usually free up within a second or two, so this retries.
+    Whatever is still there is reported on stderr: the coordinator has stopped
+    the listener by now, and the user must clean it up by hand, because a
+    leftover may be an extracted archive member, which is plaintext PII.
+
+    Never raises.  It runs in run_scan's finally, so a second CTRL-C here would
+    otherwise skip both this warning and stopping the listener.  An interrupt
+    stops the retries and goes straight to the warning.
+    """
+    leftovers = [temp_base]  # assume the worst until a pass completes
+    try:
+        for attempt in range(_TEMP_REMOVE_ATTEMPTS):
+            if attempt:
+                time.sleep(_TEMP_REMOVE_RETRY_SECONDS)
+            leftovers = secure_rmtree(temp_base)
+            if not leftovers:
+                return
+    except KeyboardInterrupt:
+        pass
+    print(  # noqa: T201 — user-facing
+        f"Warning: could not securely remove all temporary files under {temp_base}. "
+        "They may hold extracted archive contents; delete that folder manually.",
+        file=sys.stderr,
+    )
+
+
 def run_scan(config: Config) -> int:
     """Run a full PII scan against config.  Returns a process exit code.
 
@@ -214,9 +326,11 @@ def run_scan(config: Config) -> int:
       6. Run coordinator (seeds tasks, fan-out loop, teardown)
 
     Teardown (join workers, flush sinks, stop listener, stop progress)
-    is owned by run_coordinator's finally block.  The temp workspace is owned
-    here and removed in a finally, so an exception escaping the coordinator
-    cannot leave extracted archive members — plaintext PII — on disk.
+    is owned by run_coordinator's finally block.  A failure in steps 4-5,
+    before the coordinator is called, is torn down by _abort_startup().  The
+    temp workspace is owned here and removed in a finally, so an exception
+    escaping the coordinator cannot leave extracted archive members —
+    plaintext PII — on disk.
 
     Exit codes: EXIT_OK, EXIT_ABORTED, EXIT_INCOMPLETE, EXIT_INTERRUPTED.
     """
@@ -239,57 +353,71 @@ def run_scan(config: Config) -> int:
         stop_library_log_routing()
         return EXIT_ABORTED
 
-    # Create a PIIDigger-owned temp root and exclude it from directory scanning
-    # so ENUM_DIR workers never attempt to scan extracted archive members.
-    # mkdtemp() can return a path through a symlink alias (macOS /var ->
-    # /private/var) or a Windows 8.3 short name; resolving it keeps the logged
-    # path and the per-task extraction dirs consistent with the exclude pattern.
-    temp_base: Path = Path(tempfile.mkdtemp(prefix="piidigger_")).resolve()
-    run_logger.info("temp workspace: %s", temp_base)
-
-    # Never scan our own output: the results and log folders hold every PAN and
-    # email already found.  Resolved here because the defaults are relative and
-    # resolve_exclude_dirs() leaves relative patterns unchanged.
-    # Resolve every exclude pattern once so it matches the resolved paths
-    # _is_excluded() compares against; see resolve_exclude_dirs().
-    raw_exclude_dirs = [
-        *config.exclude_dirs,
-        str(config.results.path.resolve()),
-        str(config.log_file.parent.resolve()),
-        str(temp_base),
-    ]
-    exclude_dirs = resolve_exclude_dirs(raw_exclude_dirs)
-    for raw, resolved in zip(raw_exclude_dirs, exclude_dirs, strict=True):
-        if raw != resolved:
-            run_logger.debug("exclude_dirs: %s resolves to %s", raw, resolved)
-    runtime_config = config.model_copy(update={"exclude_dirs": exclude_dirs})
-
-    logical_cores = os.cpu_count() or 1
-    physical_cores = psutil.cpu_count(logical=False) or logical_cores
-    worker_count = _resolve_workers(config.performance, physical_cores, logical_cores)
-    ctx = WorkerContext(
-        config=runtime_config,
-        task_queue=task_queue,
-        result_queue=result_queue,
-        log_queue=log_queue,
-        stop_event=stop_event,
-        temp_base=temp_base,
-        n_workers=worker_count,
-    )
-    pool = WorkerPool(lambda: spawn_worker(ctx), logger=build_worker_logger(log_queue, "pool"))
-    pool.start(worker_count)
-
+    # Teardown belongs to run_coordinator once it is called.  Anything that
+    # fails before then (a worker that cannot spawn, CTRL-C during startup, a
+    # deleted cwd) is undone by _abort_startup() instead.  So the try starts
+    # before anything that needs undoing.
+    temp_base: Path | None = None
+    ctx: WorkerContext | None = None
+    pool: WorkerPool | None = None
     progress = ProgressDisplay()
-    progress.start()
-
+    handed_off = False
     try:
+        # Create a PIIDigger-owned temp root and exclude it from directory
+        # scanning so ENUM_DIR workers never attempt to scan extracted archive
+        # members.  mkdtemp() can return a path through a symlink alias (macOS
+        # /var -> /private/var) or a Windows 8.3 short name; resolving it keeps
+        # the logged path and the per-task extraction dirs consistent with the
+        # exclude pattern.
+        temp_base = Path(tempfile.mkdtemp(prefix="piidigger_")).resolve()
+        run_logger.info("temp workspace: %s", temp_base)
+
+        # Skip the files this run is writing; see _output_exclusions().
+        # Resolve every exclude pattern once so it matches the resolved paths
+        # _is_excluded() compares against; see resolve_exclude_dirs().
+        output_dirs, output_files = _output_exclusions(config, sinks, run_logger)
+        raw_exclude_dirs = [*config.exclude_dirs, *output_dirs, str(temp_base)]
+        exclude_dirs = resolve_exclude_dirs(raw_exclude_dirs)
+        for raw, resolved in zip(raw_exclude_dirs, exclude_dirs, strict=True):
+            if raw != resolved:
+                run_logger.debug("exclude_dirs: %s resolves to %s", raw, resolved)
+        runtime_config = config.model_copy(update={"exclude_dirs": exclude_dirs})
+
+        logical_cores = os.cpu_count() or 1
+        physical_cores = psutil.cpu_count(logical=False) or logical_cores
+        worker_count = _resolve_workers(config.performance, physical_cores, logical_cores)
+        worker_ctx = WorkerContext(
+            config=runtime_config,
+            task_queue=task_queue,
+            result_queue=result_queue,
+            log_queue=log_queue,
+            stop_event=stop_event,
+            temp_base=temp_base,
+            n_workers=worker_count,
+            exclude_files=output_files,
+        )
+        ctx = worker_ctx
+        pool = WorkerPool(lambda: spawn_worker(worker_ctx), logger=build_worker_logger(log_queue, "pool"))
+        pool.start(worker_count)
+        progress.start()
         with keep.running(on_fail="pass") as wake_mode:
             _emit_startup_info(progress, run_logger, config, worker_count, wake_mode)
-            outcome = run_coordinator(ctx, pool, listener, sinks, progress)
+            handed_off = True
+            outcome = run_coordinator(worker_ctx, pool, listener, sinks, progress)
+    except BaseException as exc:
+        interrupted = isinstance(exc, KeyboardInterrupt)
+        if not handed_off:
+            _abort_startup(ctx, pool, sinks, progress, run_logger, interrupted=interrupted)
+        if not interrupted:
+            raise
+        # CTRL-C must exit EXIT_INTERRUPTED, not Click's "Aborted!" exit 1,
+        # which automation would read as EXIT_ABORTED.
+        outcome = CoordinatorResult(interrupted=True)
     finally:
         # secure_rmtree, not shutil.rmtree: a worker killed by terminate() never
         # unwinds its own finally, so its extracted members survive to here.
-        secure_rmtree(temp_base)
+        if temp_base is not None:
+            _remove_temp_workspace(temp_base)
         # run_coordinator stops the listener during its own teardown.  This is
         # the backstop for anything that raises before that teardown runs.
         # Without it the listener thread is left running and queued records,

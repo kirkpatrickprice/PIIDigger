@@ -36,6 +36,17 @@ def _is_excluded(path: Path, exclude_dirs: list[str]) -> bool:
     return False
 
 
+def _is_excluded_file(path: Path, exclude_names: frozenset[str], exclude_files: frozenset[str]) -> bool:
+    """Return True if path is one of exclude_files (resolved, normcased paths).
+
+    exclude_names holds their normcased basenames.  Checking the name first
+    means resolve() runs only for a likely match, not for every file scanned.
+    """
+    if os.path.normcase(path.name) not in exclude_names:
+        return False
+    return os.path.normcase(str(path.resolve())) in exclude_files
+
+
 def resolve_exclude_dirs(exclude_dirs: list[str]) -> list[str]:
     """Return exclude_dirs with each absolute pattern resolved to its real path.
 
@@ -161,6 +172,8 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
                 )
                 dirs_found += 1
             elif entry.is_file():
+                if _is_excluded_file(entry, ctx.exclude_file_names, ctx.exclude_files):
+                    continue
                 if config.local_files_only and _is_cloud_placeholder(entry):
                     continue
                 ext = entry.suffix

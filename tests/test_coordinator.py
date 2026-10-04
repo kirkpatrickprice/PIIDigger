@@ -871,3 +871,63 @@ def test_interrupt_asks_workers_to_stop_rather_than_killing_them(tmp_path: Path)
 
     assert ctx.stop_event.is_set()
     assert worker.exitcode == 0, f"worker was killed (exit code {worker.exitcode}) instead of stopping cleanly"
+
+
+@pytest.mark.integration
+def test_outstanding_tasks_error_reaches_the_log_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 'still outstanding' error is logged while the listener can still write it.
+
+    Regression test: it was logged after _teardown had stopped the listener, so
+    the log file never explained why the run ended incomplete.
+    """
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    log_queue: mp.Queue[object] = mp.Queue()
+    stop_event = mp.Event()
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [])
+    log_file = tmp_path / "outstanding.log"
+    listener = start_listener(log_queue, log_file, "WARNING")
+    pool = _start_pool(ctx, 1)
+
+    def drain_fails(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("drain exploded")
+
+    monkeypatch.setattr(coord_mod, "_drain", drain_fails)
+
+    with pytest.raises(RuntimeError, match="drain exploded"):
+        run_coordinator(ctx, pool, listener, [], _non_tty_progress(), seed_tasks=[Task(task_type=TaskType.NOOP)])
+
+    log_text = log_file.read_text()
+    assert "coordinator exited with 1 task(s) still outstanding" in log_text
+    assert "coordinator failed" in log_text, "the exception itself must reach the log file"
+    assert "drain exploded" in log_text
+
+
+class _SeedsThatFail:
+    """A seed list whose iteration raises, as a bad seed task would during validation."""
+
+    def __iter__(self) -> object:
+        raise ValueError("bad seed")
+
+
+@pytest.mark.integration
+def test_seeding_failure_is_torn_down(tmp_path: Path) -> None:
+    """A failure while seeding still stops the workers and the listener.
+
+    Regression test: seeding ran before run_coordinator's try, and run_scan had
+    already handed teardown over, so neither side stopped the workers.
+    """
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    log_queue: mp.Queue[object] = mp.Queue()
+    stop_event = mp.Event()
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [])
+    log_file = tmp_path / "seed.log"
+    listener = start_listener(log_queue, log_file, "WARNING")
+    pool = _start_pool(ctx, 1)
+
+    with pytest.raises(ValueError, match="bad seed"):
+        run_coordinator(ctx, pool, listener, [], _non_tty_progress(), seed_tasks=_SeedsThatFail())  # type: ignore[arg-type]
+
+    assert all(not w.is_alive() for w in pool.processes)
+    assert "bad seed" in log_file.read_text()
