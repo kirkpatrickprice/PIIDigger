@@ -4,6 +4,27 @@ Known gaps we chose not to fix yet. Each entry says what is wrong, why it was de
 
 ## Orchestration
 
+### A worker killed while holding a queue lock can hang the scan
+- **What:** `mp.Queue` and `mp.Event` use cross-process locks. A worker that dies while holding one never releases it, and no sweep can recover it.
+  - **Result-queue write lock (Linux/macOS only; scenarios 2a and 2b in the measurement README):** this is the measured risk. The write lock exists only on POSIX. A worker's feeder thread holds it for each send. If the worker dies mid-send, no worker's message reaches the coordinator again. `TaskStarted` never arrives, so tasks stay QUEUED and the registry never empties. A large message cut in half instead leaves the coordinator stuck in `recv_bytes()`.
+  - **Task-queue read lock (all platforms; scenario 1):** a worker killed while idle in `task_queue.get()` starves every other worker. The lost-task sweep then abandons the remaining work: an incomplete scan, not a hang.
+  - **`stop_event` (all platforms; scenario 3):** a worker killed inside `is_set()` makes teardown's `stop_event.set()` block forever.
+- **Measured exposure (2026-10-04, Linux under WSL2, small text files on local ext4):**
+  - **Per worker death:** 12 of 70 real scans hung, each with 5 SIGKILLs at random moments. That is about 4% per death (95% range about 2–6%) at both `fast` and `balanced`.
+  - **Cause:** the coordinator reads only about 1,000–1,200 messages/s. Feeders queue behind the write lock, which some worker held 56–63% of the time.
+  - **Hang type:** every hang was the small-message, lock-held case. The other two locks caused none in 350 kills.
+  - **Windows:** a killed writer's partial message is discarded, and other workers' messages still arrive.
+  - **Scripts and full results:** [docs/architecture/orchestration/measurements/queue-lock-hangs/](docs/architecture/orchestration/measurements/queue-lock-hangs/README.md). Rerun them after the fix.
+- **Why deferred:** Accepted for now; to be fixed in the next release.
+  - Exposure requires a worker death on Linux/macOS. Deadline kills are low-risk, because a worker silent for 2× its timeout has long since flushed its messages.
+  - The realistic trigger is a native crash on a poison file. Only a few mature libraries can crash that way: `lxml`, py7zr's codecs (`pyppmd`, `inflate64`, `bcj`, `brotli`, `pycryptodomex`), stdlib `zlib`/`lzma`/`bz2`, and `charset-normalizer`. `pypdf` is pure Python.
+  - Slower storage, such as network shares, lowers coordinator saturation and the rate. That case is unmeasured.
+- **Where:** `orchestration/context.py` (the shared queues and event), `orchestration/worker/_loop.py`, `orchestration/coordinator.py` (`_drain`, `_teardown`), `run.py` (queue creation).
+- **Suggested fix:**
+  - Give each worker a private `mp.Pipe` for results, progress and logs. The coordinator closes its copy of the child end and waits on all pipes with `multiprocessing.connection.wait()`. A dead writer then shows up as `EOFError`/`OSError` instead of a held lock. Task scheduling is unchanged.
+  - Replace `stop_event` with a lock-free `mp.RawValue` flag.
+  - Leave the task-queue read lock unless measurements show it matters; fixing it means push scheduling.
+
 ### Crash blame can pick the wrong archive member
 - **What:** When a batch's worker crashes, the coordinator blames `current_item` — the member the worker last reported starting. `mp.Queue` sends through a background feeder thread, so a hard crash can lose the last `item_done` / `item_started` messages. The coordinator can then drop a member that actually finished (losing its findings) or find no member to blame and fall back to `redispatch`, which abandons the rest of the batch after `MAX_RETRIES`.
 - **Why deferred:** Needs a design decision; only native crashes (segfaults) trigger it.  Quite rare, could only really happen if a worker hard-crashed within milliseconds of finishing the prior archive member.
