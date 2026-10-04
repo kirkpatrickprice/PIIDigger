@@ -250,10 +250,13 @@ def test_worker_loop_in_thread_dispatches_task() -> None:
     t.join(timeout=10.0)
     assert not t.is_alive(), "worker_loop thread did not exit within 10 s"
 
-    msgs = []
-    while not result_queue.empty():
-        msgs.append(result_queue.get_nowait())
+    # Blocking reads, not empty()/get_nowait(): mp.Queue.put() hands each item
+    # to a feeder thread, which may not have written it to the pipe yet when
+    # the worker thread exits.  The worker sends exactly WorkerReady,
+    # TaskStarted and TaskResult; a timeout here means a message never came.
+    msgs = [result_queue.get(timeout=10) for _ in range(3)]
 
+    assert sum(isinstance(m, WorkerReady) for m in msgs) == 1
     task_results = [m for m in msgs if isinstance(m, TaskResult)]
     heartbeats = [m for m in msgs if isinstance(m, TaskStarted)]
     assert len(task_results) == 1
