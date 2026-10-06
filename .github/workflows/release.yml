@@ -1,21 +1,33 @@
-name: Push Release to PyPI
+name: Release
+
 on:
   release:
     types: [published]
 
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
 jobs:
-  build-deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-      - name: Install dependencies
-        run: python -m pip install -e .[pypi]
-      - name: Build and Push to PyPI
-        run: |
-          python -m build
-          python -m twine upload dist/*
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+  verify:
+    uses: ./.github/workflows/_release-verify.yml
+
+  publish-pypi:
+    needs: verify
+    uses: ./.github/workflows/_release-publish-pypi.yml
+    secrets: inherit
+
+  build-standalone:
+    needs: verify
+    uses: ./.github/workflows/_release-build-standalone.yml
+    secrets: inherit
+
+  virustotal-scan:
+    needs: build-standalone
+    uses: ./.github/workflows/_release-virustotal.yml
+    secrets: inherit
+
+  deploy-docs:
+    needs: verify
+    uses: ./.github/workflows/_release-deploy-docs.yml
+    secrets: inherit

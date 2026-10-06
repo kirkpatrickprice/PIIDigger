@@ -1,0 +1,246 @@
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+from typing import Any
+
+from piidigger.getmime import get_mime, test_magic
+from piidigger.models.config import Config
+from piidigger.models.payloads import EnumDirPayload
+from piidigger.models.tasks import Task, TaskResult, TaskType
+from piidigger.orchestration.context import WorkerContext
+
+
+def _is_excluded(path: Path, exclude_dirs: list[str]) -> bool:
+    """Return True if path matches any exclude pattern.
+
+    Patterns that start with '*' are suffix-matched against the resolved path
+    (e.g. '*/.vscode-server' matches any directory ending with that component).
+    All others are exact- or prefix-matched against the resolved path.
+
+    os.path.normcase() is applied to both sides so that on Windows, config
+    entries written with forward slashes (e.g. 'C:/Program Files') correctly
+    match the backslash paths returned by Path.resolve(), and case differences
+    are tolerated.  On POSIX normcase is a no-op so behaviour is unchanged.
+    """
+    resolved = os.path.normcase(str(path.resolve()))
+    for pattern in exclude_dirs:
+        if pattern.startswith("*"):
+            if resolved.endswith(os.path.normcase(pattern[1:])):
+                return True
+        else:
+            norm = os.path.normcase(pattern)
+            if resolved == norm or resolved.startswith(norm + os.sep):
+                return True
+    return False
+
+
+def _is_excluded_file(path: Path, exclude_names: frozenset[str], exclude_files: frozenset[str]) -> bool:
+    """Return True if path is one of exclude_files (resolved, normcased paths).
+
+    exclude_names holds their normcased basenames.  Checking the name first
+    means resolve() runs only for a likely match, not for every file scanned.
+    """
+    if os.path.normcase(path.name) not in exclude_names:
+        return False
+    return os.path.normcase(str(path.resolve())) in exclude_files
+
+
+def resolve_exclude_dirs(exclude_dirs: list[str]) -> list[str]:
+    """Return exclude_dirs with each absolute pattern resolved to its real path.
+
+    _is_excluded() compares against entry.resolve(), so a pattern that reaches
+    its target through a symlink (macOS /etc -> /private/etc, /var ->
+    /private/var) or a Windows 8.3 short name (RANDYB~1) never matches.
+    Resolving once here, before the scan starts, keeps the per-entry check
+    cheap.
+
+    - '*' suffix patterns and relative patterns are returned unchanged.
+    - A bare drive ('G:') is treated as its root; os.path.realpath() would
+      otherwise resolve it to the current directory on that drive.
+    - Trailing separators are stripped (a root becomes 'G:' or '') so the
+      prefix match in _is_excluded() still adds exactly one separator.
+    - Patterns that do not exist resolve as far as possible and still apply.
+    """
+    seps = os.sep + (os.altsep or "")
+    resolved: list[str] = []
+    for pattern in exclude_dirs:
+        candidate = pattern
+        drive, rest = os.path.splitdrive(candidate)
+        if drive and not rest:
+            candidate = drive + os.sep
+        if pattern.startswith("*") or not os.path.isabs(candidate):
+            resolved.append(pattern)
+            continue
+        try:
+            resolved.append(os.path.realpath(candidate).rstrip(seps))
+        except OSError, ValueError:
+            resolved.append(pattern)
+    return resolved
+
+
+def _detect_archive_type(filename: str, config: Config) -> str | None:
+    """Return the archive_type for filename, or None if not a configured archive format."""
+    if not config.archives.enabled:
+        return None
+    from piidigger.archivehandlers import detect_archive_type  # noqa: PLC0415
+
+    archive_type = detect_archive_type(filename)
+    if archive_type is None:
+        return None
+    if "all" in config.archives.formats:
+        return archive_type
+    return archive_type if archive_type in {f.lower() for f in config.archives.formats} else None
+
+
+def _is_cloud_placeholder(path: Path) -> bool:
+    """Return True if path is a cloud-sync placeholder not yet downloaded locally.
+
+    Checks Windows file attribute bits:
+      0x400000 (Recall)  — OneDrive file whose content is not on local disk.
+      0x001000 (Offline) — Dropbox file whose content is not on local disk.
+
+    A set bit means skip the file; the content would have to be downloaded on
+    demand, which defeats the purpose of local-only scanning.
+
+    Returns False on non-Windows, when pywin32 is not installed, or when the
+    attribute read fails — all treated as "assume local, scan it."
+
+    Reference: https://superuser.com/questions/1718444/determining-if-a-onedrive-file-is-synced-locally-via-a-terminal
+    """
+    recall_bit = 0x400000
+    offline_bit = 0x001000
+    if os.name != "nt":
+        return False
+    try:
+        from win32api import GetFileAttributes
+
+        attr = GetFileAttributes(str(path))
+        return bool(attr & recall_bit) or bool(attr & offline_bit)
+    except Exception:
+        return False
+
+
+def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
+    """Enumerate one directory: produce ENUM_DIR tasks for subdirs and SCAN_FILE tasks for files."""
+    from piidigger.filehandlers import select_handler  # lazy: xlrd import triggers SyntaxWarning
+
+    payload = EnumDirPayload(**task.payload)
+    path = payload.path
+
+    new_tasks: list[dict[str, Any]] = []
+    dirs_found = 0
+    files_found = 0
+    bytes_found = 0
+
+    try:
+        entries = list(path.iterdir())
+    except PermissionError as exc:
+        logger.warning("permission denied listing %s: %s", path, exc)
+        return TaskResult(
+            task_id=task.task_id,
+            task_type=task.task_type,
+            status="error",
+            error_message=str(exc),
+            counters={"dirs_scanned": 1},
+            worker_pid=os.getpid(),
+        )
+    except (OSError, FileNotFoundError) as exc:
+        logger.warning("cannot list %s: %s", path, exc)
+        return TaskResult(
+            task_id=task.task_id,
+            task_type=task.task_type,
+            status="error",
+            error_message=str(exc),
+            counters={"dirs_scanned": 1},
+            worker_pid=os.getpid(),
+        )
+
+    config = ctx.config
+    for entry in entries:
+        try:
+            if entry.is_symlink():
+                continue
+            if entry.is_dir():
+                if _is_excluded(entry, config.exclude_dirs):
+                    continue
+                new_tasks.append(
+                    {
+                        "task_type": TaskType.ENUM_DIR,
+                        "payload": {"path": str(entry), "depth": payload.depth},
+                        "timeout_seconds": config.default_timeout_seconds,
+                    }
+                )
+                dirs_found += 1
+            elif entry.is_file():
+                if _is_excluded_file(entry, ctx.exclude_file_names, ctx.exclude_files):
+                    continue
+                if config.local_files_only and _is_cloud_placeholder(entry):
+                    continue
+                ext = entry.suffix
+                mime: str | None = get_mime(str(entry)) if test_magic() else None
+
+                # Archive files are enumerated separately — emit before the regular
+                # handler check so they are not silently skipped (no FileHandler
+                # is registered for .zip, .tar.gz, etc.).
+                archive_type = _detect_archive_type(entry.name, config)
+                if archive_type is not None:
+                    new_tasks.append(
+                        {
+                            "task_type": TaskType.ENUM_ARCHIVE_MEMBERS,
+                            "payload": {
+                                "archive_path": str(entry),
+                                "archive_type": archive_type,
+                                "depth": 0,
+                            },
+                            "timeout_seconds": config.default_timeout_seconds,
+                        }
+                    )
+                    files_found += 1
+                    # bytes_found for archive members is counted in _enum_archive.py
+                    # using uncompressed member sizes — not the compressed on-disk size here.
+                    continue
+
+                # include_exts / include_mime, and a handler to read it with.
+                # The same rule is applied to archive members.
+                if select_handler(ext, mime, config.include_exts, config.include_mime) is None:
+                    continue
+
+                try:
+                    size = entry.stat().st_size
+                except OSError:
+                    size = 0
+
+                new_tasks.append(
+                    {
+                        "task_type": TaskType.SCAN_FILE,
+                        "payload": {
+                            "display_path": str(entry),
+                            "file_path": str(entry),
+                            "ext": ext,
+                            "mime": mime,
+                            "size": size,
+                            "depth": payload.depth,
+                        },
+                        "timeout_seconds": config.default_timeout_seconds,
+                    }
+                )
+                files_found += 1
+                bytes_found += size
+        except OSError:
+            continue
+
+    return TaskResult(
+        task_id=task.task_id,
+        task_type=task.task_type,
+        status="ok",
+        new_tasks=new_tasks,
+        counters={
+            "dirs_scanned": 1,
+            "dirs_found": dirs_found,
+            "files_found": files_found,
+            "bytes_found": bytes_found,
+        },
+        worker_pid=os.getpid(),
+    )

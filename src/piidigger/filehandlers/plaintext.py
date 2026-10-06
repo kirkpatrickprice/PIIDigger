@@ -1,100 +1,123 @@
-import codecs
 from collections.abc import Iterator
 
-from piidigger.getencoding import getEncoding
-from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.globalvars import maxChunkSize
-from piidigger.globalvars import defaultChunkCount
-from piidigger.logmanager import LogManager
+from piidigger.exceptions import UndetectableEncodingError
+from piidigger.filehandlers._sharedfuncs import ContentBuffer
+from piidigger.getencoding import detect_file_encoding
+from piidigger.models.config import Config
 
-# Each filehandler must have the following:
-#   "handles" -     dictionary to identify lists of file extensions and mime types that the handler will manage.
-#                   This will be read by globals upon initial load to build the full list of supported mime types and file extensions
-#   "processFile" - Function that manages opening and reading of the file.  The main module will call this handler wtih the "processFile(filename)" function.
-#                   processFile should provide the lines of text to each of the dataHandlers
-
-handles={
-    'ext': [
-        '.aplt', '.applescript', '.armx', '.asp', '.asax', '.asmx', '.aspx',
-        '.bat',
-        '.c', '.cc', '.cfm', '.clj', '.cljs', '.clojure', '.cob', '.cpp', '.csh', '.csv',
-        '.erl',
-        '.h', '.hrl', '.htm', '.ht4', '.html', '.html5',
-        '.go', '.gvy',
-        '.j', '.json', '.js', '.jsp',
-        '.log',
-        '.perl', '.php', '.pl', '.ps1', '.py',
-        '.rb',
-        '.scpt', '.sdef', '.ser', '.sh',
-        '.toml', '.txt',
-        '.vb',
-        '.xml',
-        '.yaml',
-        '.zsh',
+HANDLES = {
+    "ext": [
+        ".aplt",
+        ".applescript",
+        ".armx",
+        ".asp",
+        ".asax",
+        ".asmx",
+        ".aspx",
+        ".bat",
+        ".c",
+        ".cc",
+        ".cfm",
+        ".clj",
+        ".cljs",
+        ".clojure",
+        ".cob",
+        ".cpp",
+        ".csh",
+        ".csv",
+        ".erl",
+        ".h",
+        ".hrl",
+        ".htm",
+        ".ht4",
+        ".html",
+        ".html5",
+        ".go",
+        ".gvy",
+        ".j",
+        ".json",
+        ".js",
+        ".jsp",
+        ".log",
+        ".perl",
+        ".php",
+        ".pl",
+        ".ps1",
+        ".py",
+        ".rb",
+        ".scpt",
+        ".sdef",
+        ".ser",
+        ".sh",
+        ".toml",
+        ".txt",
+        ".vb",
+        ".xml",
+        ".yaml",
+        ".zsh",
     ],
-    'mime': [
-        'application/json',
-        'application/toml',
-        'application/xml',
-        'text/html',
-        'text/plain',
+    "mime": [
+        "application/json",
+        "application/toml",
+        "application/xml",
+        "text/html",
+        "text/plain",
     ],
 }
 
+# Backward-compat alias for globalfuncs dynamic discovery (uses lowercase 'handles')
+handles = HANDLES
 
-def readFile(filename: str, 
-            logManager: LogManager,
-            maxChunkCount: int = defaultChunkCount,
-            ) -> Iterator[str]:
-    ''''
-    Handle all file IO and text extraction operations for this file type.  Returns a generator object tied to maxChunkSize (650) * maxChunkCount bytes of text.  
-    "filename" is a string of the path and filename to process.
-    '''
 
-    logger = logManager.getLogger('plaintext_handler')
-    
-    enc = getEncoding(filename=filename, logManager=logManager)
+# Upper bound on the characters readline() returns in one call.  A longer line
+# arrives in pieces over several calls (nothing is skipped), so a file with no
+# newlines, e.g. minified JSON, never lands in memory whole.
+#
+# There is a risk that if a PII record spans the boundary, it will
+# be split across multiple reads.  This would lead a false negative in PII detection.
+_MAX_LINE_CHARS = 1024 * 1024
 
-    if enc == None:
-        logger.info('%s: Unknown encoding type', filename)
-        return ['']
-    else:
-        logger.debug('%s: Encoding %s', filename, enc)
-    
-    # After getting the encoding from chardet, replace any unexpected characters with a plain ASCII "?"
-    # The risk is we could lose something important, but if that's the one piece of data anywhere on the file system that would have matched,
-    # then it's a risk worth taking for a more stable discovery tool.  More likely is that we might miss ONE INSTANCE of data in a file system that has 
-    # many more instances for discovery.
 
-    # File IO is the bottle neck but we could also hit some really big files.
-    # By returning (through yield) the content in chunks, we can strike a balance between memory consumption and file IO speed.
+class PlaintextHandler:
+    """FileHandler for text-based files.
 
-    # First we open the file, then we add each line so long as the resulting line length remains less than maxContentSize.  
-    # For the last line, we add one word at a time until we reach the limit.  
+    Reads the file line by line from source.materialize(), so memory stays
+    bounded whatever the file size.  Archive members are extracted to disk
+    before scanning, so a real path is always available.
 
-    try:
-        with codecs.open(filename, 'r', encoding=enc, errors='replace') as f:
-            handler: ContentHandler = ContentHandler(maxContentSize = maxChunkSize * maxChunkCount)
-            for line in f:
-                handler.appendContent(line)
-                if handler.contentBufferFull():
-                    yield handler.getContent()
+    The encoding comes from detect_file_encoding(), which samples the start of
+    the file — the same answer `piidigger inspect encoding` reports.  Reading
+    stops once config.plaintext.max_scan_bytes of text has been read.
 
-    # Once we've processed the entire file, it's time to send that last bit of info that hasn't already been sent.
-        logger.debug('%s: Read %d lines', filename, handler.totalBytes)
+    Raises UndetectableEncodingError for a non-empty file whose encoding
+    cannot be detected.
+    """
 
-        # Return the last chunk of content    
-        yield handler.finalizeContent()
+    def read(self, source, config: Config) -> Iterator[str]:  # source: ScannableItem
+        path = source.materialize()
+        enc = detect_file_encoding(path)
+        if not enc:
+            # An empty file has nothing to read.  Anything else was never read,
+            # and the caller needs to say so.
+            if path.stat().st_size == 0:
+                return
+            raise UndetectableEncodingError("text encoding could not be detected")
 
-    except FileNotFoundError:
-        logger.error('Previously discovered file no longer exists: %s. File skipped', f.absolute())
-    except PermissionError as e:
-        logger.error('PermissionError adding %s.  File skipped.  Error message: %s', f.absolute(), str(e))
-    except OSError as e:
-        logger.error('OSError adding %s.  File skipped.  Error message: %s', f.absolute(), str(e))
-    except UnicodeDecodeError as e:
-        logger.error('Unicode error processing file %s (enc=%s): %s', filename, enc, e)
-    except LookupError as e:
-        logger.error('Codec lookup error processing file %s (enc=%s)', filename, enc)
-    except Exception as e:
-        logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
+        content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
+        max_scan_chars = config.plaintext.max_scan_bytes
+        chars_read = 0
+        with open(path, encoding=enc, errors="replace") as f:
+            while line := f.readline(_MAX_LINE_CHARS):
+                content_buffer.append_content(line)
+                if content_buffer.content_buffer_full():
+                    yield content_buffer.get_content()
+                chars_read += len(line)
+                if chars_read >= max_scan_chars:
+                    break
+
+        final = content_buffer.finalize_content()
+        if final:
+            yield final
+
+
+handler = PlaintextHandler()
