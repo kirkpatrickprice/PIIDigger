@@ -301,3 +301,35 @@ def test_from_toml_missing_start_dir(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="start directory does not exist"):
         Config.from_toml(toml)
+
+
+@pytest.mark.unit
+def test_from_toml_start_dirs_without_this_os_key_rejected(tmp_path: Path) -> None:
+    """A [start_dirs] table with no key for this OS would scan nothing and exit 0."""
+    import platform
+
+    system = platform.system().lower()
+    this_os = "macos" if system == "darwin" else system
+    other_os = next(k for k in ("windows", "macos", "linux") if k != this_os)
+    toml = tmp_path / "cfg.toml"
+    toml.write_text(f'[start_dirs]\n{other_os} = ["{tmp_path.as_posix()}"]\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match=rf"start_dirs is empty for this OS \({this_os}\)"):
+        Config.from_toml(toml)
+
+
+@pytest.mark.unit
+def test_from_toml_explicit_empty_start_dirs_rejected(tmp_path: Path) -> None:
+    toml = tmp_path / "cfg.toml"
+    toml.write_text("start_dirs = []\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="start_dirs is empty"):
+        Config.from_toml(toml)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("blank", ["", "  ", "*", " * "])
+def test_config_drops_blank_exclude_dirs(blank: str) -> None:
+    """An empty pattern or a bare '*' would match every folder and silently exclude them all."""
+    c = Config(start_dirs=[], exclude_dirs=[blank, "/usr", "*/.git"])
+    assert c.exclude_dirs == ["/usr", "*/.git"]

@@ -44,6 +44,30 @@ def test_root_version_exits_0() -> None:
 
 
 @pytest.mark.unit
+def test_root_version_comes_from_the_package_not_its_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The PyInstaller builds ship no dist-info, so importlib.metadata cannot be relied on."""
+    import importlib
+    import importlib.metadata
+
+    import piidigger
+    import piidigger.cli.main
+
+    def no_metadata(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", no_metadata)
+    reloaded = importlib.reload(piidigger.cli.main)
+    try:
+        result = CliRunner().invoke(reloaded.cli, ["--version"])
+    finally:
+        monkeypatch.undo()
+        importlib.reload(piidigger.cli.main)
+
+    assert result.exit_code == 0
+    assert f"PIIDigger version: {piidigger.__version__}" in result.output
+
+
+@pytest.mark.unit
 def test_inspect_help_exits_0() -> None:
     result = CliRunner().invoke(cli, ["inspect", "--help"])
     assert result.exit_code == 0

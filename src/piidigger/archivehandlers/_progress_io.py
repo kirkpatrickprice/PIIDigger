@@ -57,7 +57,11 @@ class _ProgressRaw(io.RawIOBase):
         return self._raw.tell()
 
     def close(self) -> None:
-        self._raw.close()
+        # IOBase.__del__ calls close() even when __init__ failed (the file could
+        # not be opened), so _raw may not exist yet.
+        raw = getattr(self, "_raw", None)
+        if raw is not None:
+            raw.close()
         super().close()
 
 

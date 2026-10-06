@@ -232,7 +232,7 @@ def _output_exclusions(config: Config, sinks: list[Any], logger: logging.Logger)
     them.
     """
     outputs = [
-        (config.results.path.resolve(), [Path(sink.path) for sink in sinks]),
+        (config.results.path.resolve(), [Path(p) for sink in sinks for p in sink.paths]),
         (config.log_file.parent.resolve(), [config.log_file]),
     ]
     dirs: list[str] = []

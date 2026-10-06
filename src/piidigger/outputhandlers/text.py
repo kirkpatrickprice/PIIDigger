@@ -17,6 +17,10 @@ class TextSink:
         self.path = path
         self._file = None
 
+    @property
+    def paths(self) -> tuple[Path, ...]:
+        return (self.path,)
+
     def open(self) -> None:
         self._file = open(self.path, "w", encoding="utf-8")
 

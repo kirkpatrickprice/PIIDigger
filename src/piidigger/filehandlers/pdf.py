@@ -9,6 +9,11 @@ from pypdf.errors import (
 from piidigger.filehandlers._sharedfuncs import ContentBuffer
 from piidigger.models.config import Config
 
+# What pypdf can raise, even with strict=False, on a malformed content stream,
+# font or metadata dictionary.  One bad page is skipped rather than costing the
+# text of every page before it.
+_PAGE_ERRORS = (ValueError, KeyError, IndexError, TypeError, RecursionError)
+
 HANDLES = {
     "ext": [
         ".pdf",
@@ -35,13 +40,19 @@ class PdfHandler:
             content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
 
             for page in document.pages:
-                page_content = page.extract_text()
+                try:
+                    page_content = page.extract_text()
+                except _PAGE_ERRORS:
+                    continue
                 for line in page_content.split("\n"):
                     content_buffer.append_content(line)
                     if content_buffer.content_buffer_full():
                         yield content_buffer.get_content()
 
-            metadata = document.metadata
+            try:
+                metadata = document.metadata
+            except _PAGE_ERRORS:
+                metadata = None
             if metadata:
                 for key in metadata.keys():
                     val = metadata.get(key)

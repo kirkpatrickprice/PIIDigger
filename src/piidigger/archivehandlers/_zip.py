@@ -91,6 +91,13 @@ class ZipArchiveHandler:
                     if on_started is not None:
                         on_started(member)
                     dest = dest_dir / Path(member).name
+                    # On Windows a name such as "foo/d:run.bat" has the basename
+                    # "d:run.bat", and joining a drive-relative name discards
+                    # dest_dir.  On POSIX the parent always matches.
+                    if dest.parent != dest_dir:
+                        if on_failed is not None:
+                            on_failed(member, "member name escapes the extraction folder")
+                        continue
                     try:
                         with zf.open(entry) as src, dest.open("wb") as out:
                             shutil.copyfileobj(src, out)

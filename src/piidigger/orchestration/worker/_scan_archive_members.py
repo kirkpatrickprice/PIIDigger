@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from piidigger.exceptions import ArchiveReadError
+from piidigger.exceptions import ArchiveReadError, UndetectableEncodingError
 from piidigger.models.config import Config
 from piidigger.models.payloads import ScanArchiveMembersPayload
 from piidigger.models.results import ResultRecord
@@ -96,6 +96,13 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             return
         try:
             findings, counters = _scan_member(member, path, payload, ctx.config, enabled_handlers)
+        except UndetectableEncodingError as exc:
+            # As in handle_scan_file: logged, counted as scanned, not a failure.
+            discard(member, path)
+            logger.info("skipping archive member %s::%s: %s", payload.archive_path, member, exc)
+            reported.add(member)
+            reporter.item_done(member, [], {"files_scanned": 1})
+            return
         except Exception as exc:  # noqa: BLE001
             discard(member, path)
             failed(member, str(exc))

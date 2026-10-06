@@ -4,6 +4,7 @@ import logging
 import os
 from typing import Any
 
+from piidigger.exceptions import UndetectableEncodingError
 from piidigger.models.payloads import ScanFilePayload
 from piidigger.models.results import ResultRecord
 from piidigger.models.tasks import Task, TaskResult
@@ -50,6 +51,17 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
                     if values:
                         bucket = per_handler.setdefault(dh.name, {})
                         bucket.setdefault(match_type, set()).update(values)
+    except UndetectableEncodingError as exc:
+        # Usually binary content behind a text extension: not a failure, but
+        # logged so an operator can see which files were never read.
+        logger.info("skipping %s: %s", payload.display_path, exc)
+        return TaskResult(
+            task_id=task.task_id,
+            task_type=task.task_type,
+            status="ok",
+            counters={"files_scanned": 1, "bytes_scanned": payload.size},
+            worker_pid=os.getpid(),
+        )
     except Exception as exc:  # noqa: BLE001
         logger.error("error reading %s: %s", payload.display_path, exc)
         return TaskResult(

@@ -250,3 +250,20 @@ def test_json_close_writes_array_even_when_stream_close_fails(tmp_path):
         sink.close()
 
     assert len(json.loads(path.read_text())) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "sink_cls, extra_suffixes",
+    [(CsvSink, []), (JsonSink, [".jsonl"]), (TextSink, [])],
+)
+def test_sinks_list_every_file_they_write(tmp_path, sink_cls, extra_suffixes):
+    """run_scan excludes these from the scan, so a missing one gets read back as a finding."""
+    path = tmp_path / "out.file"
+    sink = sink_cls(path)
+    sink.open()
+    sink.write(_make_record())
+    sink.close()
+
+    assert sink.paths == (path, *(path.with_suffix(s) for s in extra_suffixes))
+    assert sorted(tmp_path.iterdir()) == sorted(sink.paths)

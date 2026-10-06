@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from importlib.metadata import version as _pkg_version
-
 import click
 
+from piidigger import __version__
 from piidigger.cli.commands.config import config_group
 from piidigger.cli.commands.inspect import inspect_group
 from piidigger.cli.commands.scan import scan
@@ -14,7 +13,7 @@ from piidigger.cli.commands.scan import scan
     invoke_without_command=True,
 )
 @click.version_option(
-    _pkg_version("piidigger"),
+    __version__,
     "-v",
     "--version",
     prog_name="PIIDigger",

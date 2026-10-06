@@ -410,10 +410,11 @@ def run_coordinator(
         raise
     finally:
         # Checked before teardown, whose join() can drop stuck workers.  The run
-        # failed as a whole only if the pool stopped replacing workers AND none
-        # were left.  A breaker trip that left healthy workers still finishes
-        # the scan, just with less capacity.
-        workers_failed = not pool.replacing and pool.size == 0
+        # failed as a whole only if no workers were left.  pool.replacing is not
+        # checked: failed respawns can empty the pool while it is still True.  A
+        # breaker trip that left healthy workers still finishes the scan, just
+        # with less capacity.
+        workers_failed = pool.size == 0
         # Before teardown, which is where the display prints its summary.
         progress.report_incomplete(
             timed_out=registry.count_abandoned("timed_out"),
@@ -600,9 +601,8 @@ def _handle_result(
         )
         if _is_access_denied(msg):
             progress.log_event("WARNING", f"Access denied: {_truncate_path(_denied_path(msg))}")
-        elif result.task_type == TaskType.SCAN_FILE:
-            file_path = str(task.payload.get("display_path", ""))
-            progress.log_event("ERROR", f"Error: {_truncate_path(file_path)} — {_short_error(msg)}")
+        else:
+            progress.log_event("ERROR", f"Error: {_truncate_path(err_path)} — {_short_error(msg)}")
 
     for new_task_dict in result.new_tasks:
         # Task has extra="forbid", so a malformed producer dict raises
@@ -636,11 +636,14 @@ def _handle_result(
     # One update per result, so the display refreshes once.  tasks_pending is
     # read after the children above were enqueued.  A failed task counts as
     # completed for the ETA, and separately as not scanned for the summary.
+    # Unreported members also count as scanned, as _requeue_failed_batch()
+    # counts its failed member, so files_scanned still reaches files_found.
     update = {**result.counters, "tasks_completed": 1, "tasks_pending": len(registry)}
     if result.status == "error" and not task.items:
         update["tasks_failed"] = 1
     elif unreported:
         update["tasks_failed"] = unreported
+        update["files_scanned"] = update.get("files_scanned", 0) + unreported
     progress.update(update)
 
 

@@ -15,7 +15,7 @@ HANDLES = {
     "ext": [
         ".xlsx",
         ".xlsm",
-        ".xlst",
+        ".xltx",
         ".xltm",
     ],
     "mime": [
@@ -48,8 +48,8 @@ class XlsxHandler:
         else:
             book = openpyxl.load_workbook(filename=str(source.materialize()), read_only=True, data_only=True)
         try:
-            for sheet_name in book.sheetnames:
-                active_sheet = book[sheet_name]
+            # worksheets, not sheetnames: a chart sheet has no cells to read.
+            for active_sheet in book.worksheets:
                 content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
                 blank_row_count = 0
                 row_count = 0

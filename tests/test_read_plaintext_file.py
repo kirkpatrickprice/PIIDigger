@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from piidigger.exceptions import UndetectableEncodingError
 from piidigger.filehandlers.plaintext import _MAX_LINE_CHARS, PlaintextHandler
 from piidigger.getencoding import _ENCODING_SAMPLE_BYTES
 from piidigger.models.config import BufferConfig, Config, PlaintextConfig
@@ -20,7 +21,6 @@ def _read(path: Path, config: Config | None = None) -> list[str]:
     "filename",
     [
         "testdata/plaintext/empty-file-utf16le-crlf.txt",
-        "testdata/plaintext/mislabeled-text-file.txt",
         "testdata/plaintext/unknown-encoding.txt",
         "testdata/plaintext/zero-byte-file.txt",
     ],
@@ -29,6 +29,14 @@ def test_plaintext_no_meaningful_content(filename: str) -> None:
     chunks = _read(Path(filename))
     content = "".join(chunks).replace("﻿", "").strip()
     assert content == ""
+
+
+@pytest.mark.filehandlers
+def test_plaintext_undetectable_encoding_raises() -> None:
+    # A binary header longer than the text after it.  Yielding nothing would make
+    # the file a silent skip; the scan handlers log the typed error instead.
+    with pytest.raises(UndetectableEncodingError):
+        _read(Path("testdata/plaintext/mislabeled-text-file.txt"))
 
 
 # Files with small, predictable content that fits in a single chunk.

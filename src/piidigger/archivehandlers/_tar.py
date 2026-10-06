@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import lzma
 import tarfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -40,7 +41,9 @@ class TarArchiveHandler:
                         )
                     )
                 return members
-        except (tarfile.TarError, OSError) as exc:
+        # A truncated compressed tar raises EOFError; a corrupt .tar.xz raises
+        # LZMAError, which is not an OSError.
+        except (tarfile.TarError, OSError, EOFError, lzma.LZMAError) as exc:
             raise ArchiveReadError(str(exc)) from exc
 
     def extract_members(
@@ -107,7 +110,7 @@ class TarArchiveHandler:
                             on_failed(info.name, "member not found in the extraction folder")
                         continue
                     on_extracted(info.name, extracted)
-        except (tarfile.TarError, OSError, EOFError) as exc:
+        except (tarfile.TarError, OSError, EOFError, lzma.LZMAError) as exc:
             raise ArchiveReadError(str(exc)) from exc
 
 

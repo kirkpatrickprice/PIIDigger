@@ -28,6 +28,10 @@ class CsvSink:
         self._file = None
         self._writer = None
 
+    @property
+    def paths(self) -> tuple[Path, ...]:
+        return (self.path,)
+
     def open(self) -> None:
         self._file = open(self.path, "w", newline="", encoding="utf-8")
         try:

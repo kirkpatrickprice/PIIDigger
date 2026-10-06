@@ -410,6 +410,15 @@ class Config(PiiDiggerModel):
             raise ValueError(f"unknown MIME type(s): {', '.join(unknown)}; known: {', '.join(sorted(known))}")
         return v
 
+    @field_validator("exclude_dirs")
+    @classmethod
+    def _drop_blank_exclude_dirs(cls, v: list[str]) -> list[str]:
+        # "" prefix-matches every absolute POSIX path and "*" suffix-matches
+        # every path, so either would silently exclude every folder.  A leftover
+        # placeholder in the TOML list is enough.  Dropped here rather than in
+        # resolve_exclude_dirs(), where a real "/" legitimately resolves to "".
+        return [p for p in v if p.strip() not in ("", "*")]
+
     @field_validator("data_handlers")
     @classmethod
     def _validate_data_handlers(cls, v: list[str]) -> list[str]:
@@ -472,6 +481,13 @@ class Config(PiiDiggerModel):
             config = cls.model_validate(data)
         except ValidationError as e:
             raise ValueError(_format_validation_errors(path, e)) from e
+
+        # A config that leaves start_dirs out uses the defaults.  One that has it
+        # but lists nothing for this OS would scan nothing and still exit 0.
+        if "start_dirs" in data and not config.start_dirs:
+            raise ValueError(
+                f"invalid configuration in {path}:\n- start_dirs is empty for this OS ({os_key}); nothing would be scanned."
+            )
 
         for d in config.start_dirs:
             if not d.exists():

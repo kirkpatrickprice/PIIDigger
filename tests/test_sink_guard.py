@@ -10,6 +10,7 @@ import pytest
 from piidigger.models.results import ResultRecord
 from piidigger.orchestration.progress import ProgressDisplay
 from piidigger.orchestration.sinks import GuardedSink
+from piidigger.outputhandlers.csv import CsvSink
 
 _LOG = logging.getLogger("tests.sink_guard")
 
@@ -74,6 +75,24 @@ def test_write_failure_is_logged_once_and_further_writes_skipped(caplog: pytest.
     assert "No space left" in (guarded.error or "")
     assert len([r for r in caplog.records if r.levelno == logging.ERROR]) == 1
     assert progress._output_failures == [(guarded.label, guarded.error)]
+
+
+@pytest.mark.unit
+def test_unencodable_file_name_fails_the_sink_not_the_scan(tmp_path: Path) -> None:
+    # On POSIX a file name that is not valid UTF-8 arrives as surrogate escapes,
+    # and a UTF-8 results file raises UnicodeEncodeError (a ValueError) on it.
+    sink = CsvSink(tmp_path / "out.csv")
+    sink.open()
+    progress = _progress()
+    guarded = GuardedSink(sink, _LOG, progress)
+    record = ResultRecord(source_path="/data/caf\udce9.txt", handler="pan", matches={"visa": ["4111 11** **** 1111"]})
+
+    guarded.write(record)
+    guarded.close()
+
+    assert guarded.failed
+    assert "surrogates not allowed" in (guarded.error or "")
+    assert len(progress._output_failures) == 1
 
 
 @pytest.mark.unit

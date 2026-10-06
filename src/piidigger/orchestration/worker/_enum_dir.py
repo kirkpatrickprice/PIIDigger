@@ -111,6 +111,8 @@ def _is_cloud_placeholder(path: Path) -> bool:
     """
     recall_bit = 0x400000
     offline_bit = 0x001000
+    if os.name != "nt":
+        return False
     try:
         from win32api import GetFileAttributes
 

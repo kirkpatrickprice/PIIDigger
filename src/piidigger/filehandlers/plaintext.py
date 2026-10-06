@@ -1,5 +1,6 @@
 from collections.abc import Iterator
 
+from piidigger.exceptions import UndetectableEncodingError
 from piidigger.filehandlers._sharedfuncs import ContentBuffer
 from piidigger.getencoding import detect_file_encoding
 from piidigger.models.config import Config
@@ -87,13 +88,20 @@ class PlaintextHandler:
     The encoding comes from detect_file_encoding(), which samples the start of
     the file — the same answer `piidigger inspect encoding` reports.  Reading
     stops once config.plaintext.max_scan_bytes of text has been read.
+
+    Raises UndetectableEncodingError for a non-empty file whose encoding
+    cannot be detected.
     """
 
     def read(self, source, config: Config) -> Iterator[str]:  # source: ScannableItem
         path = source.materialize()
         enc = detect_file_encoding(path)
         if not enc:
-            return
+            # An empty file has nothing to read.  Anything else was never read,
+            # and the caller needs to say so.
+            if path.stat().st_size == 0:
+                return
+            raise UndetectableEncodingError("text encoding could not be detected")
 
         content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
         max_scan_chars = config.plaintext.max_scan_bytes

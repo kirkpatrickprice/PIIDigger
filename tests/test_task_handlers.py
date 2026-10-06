@@ -342,3 +342,44 @@ def test_scan_file_permission_denied_returns_error(tmp_path: Path) -> None:
 
     assert result.status == "error"
     assert result.counters.get("files_scanned") == 1
+
+
+@pytest.mark.unit
+def test_scan_file_undetectable_encoding_is_logged_and_counted(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A text file that was never read must show up in the log, not pass as a silent ok."""
+    import logging
+
+    f = Path("testdata/plaintext/mislabeled-text-file.txt")
+    logger = logging.getLogger("tests.scan_file.encoding")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path), logger)
+
+    assert result.status == "ok"
+    assert result.counters == {"files_scanned": 1, "bytes_scanned": f.stat().st_size}
+    assert result.findings == []
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.INFO, f"skipping {f}: text encoding could not be detected")
+    ]
+
+
+# ---------------------------------------------------------------------------
+# _is_cloud_placeholder
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_cloud_placeholder_check_skips_win32api_off_windows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Off Windows the answer is always False, without retrying the failed import for every file."""
+    from piidigger.orchestration.worker._enum_dir import _is_cloud_placeholder
+
+    consulted: list[str] = []
+    fake = unittest.mock.MagicMock()
+    fake.GetFileAttributes.side_effect = lambda p: consulted.append(p) or 0x400000
+    monkeypatch.setitem(sys.modules, "win32api", fake)
+    monkeypatch.setattr(os, "name", "posix")
+
+    assert _is_cloud_placeholder(tmp_path) is False
+    assert consulted == []

@@ -36,7 +36,9 @@ class GuardedSink:
             return
         try:
             self._sink.write(record)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
+            # ValueError covers UnicodeEncodeError: on POSIX, a file name that
+            # is not valid UTF-8 reaches the sink as surrogate escapes.
             self._fail("write", exc)
 
     def close(self) -> None:
@@ -48,7 +50,7 @@ class GuardedSink:
             else:
                 self._fail("close", exc)
 
-    def _fail(self, action: str, exc: OSError) -> None:
+    def _fail(self, action: str, exc: Exception) -> None:
         self.error = str(exc)
         self._logger.error("%s: %s failed, no further results written to it: %s", self.label, action, exc)
         self._progress.log_event("ERROR", f"Results file failed: {self.label}: {exc}")

@@ -816,6 +816,44 @@ def test_breaker_trip_with_healthy_workers_left_is_not_a_failed_run(tmp_path: Pa
     assert progress._tasks_completed == 4
 
 
+@pytest.mark.slow
+def test_pool_emptied_by_failed_respawns_is_a_failed_run(tmp_path: Path) -> None:
+    """Respawns that fail with OSError leave pool.replacing True but no workers.
+
+    The only worker checks in, takes the task and dies.  Every replacement
+    fails to start, so the pool is empty while still "replacing".  The task is
+    eventually abandoned and the registry drains, but nothing was scanned, so
+    the run must report failure rather than exit 0.
+    """
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    log_queue: mp.Queue[object] = mp.Queue()
+    stop_event = mp.Event()
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [])
+    listener = start_listener(log_queue, tmp_path / "respawn.log", "DEBUG")
+    spawned = {"n": 0}
+
+    def spawn() -> mp.Process:
+        spawned["n"] += 1
+        if spawned["n"] > 1:
+            raise OSError(11, "Resource temporarily unavailable")
+        return _spawn(ctx, _crash_after_heartbeat_worker)
+
+    pool = WorkerPool(spawn, logger=_POOL_LOG)
+    pool.start(1)
+    progress = _non_tty_progress()
+
+    outcome = _run_in_thread(
+        lambda: run_coordinator(ctx, pool, listener, [], progress, seed_tasks=[Task(task_type=TaskType.NOOP)]),
+        timeout=60.0,
+    )
+
+    assert outcome is not None, "the coordinator never drained an empty pool's work"
+    assert pool.replacing, "the breaker tripped, so this test proved nothing"
+    assert spawned["n"] > 1, "no respawn was attempted"
+    assert outcome.workers_failed is True
+
+
 # ---------------------------------------------------------------------------
 # Teardown
 # ---------------------------------------------------------------------------

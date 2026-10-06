@@ -46,10 +46,14 @@ class OutputSink(Protocol):
     Sinks never log.  open(), write() and close() let OSError propagate.
     run_scan treats a failed open() as fatal.  The coordinator wraps each sink
     in a GuardedSink, which logs a write or close failure once and stops
-    writing to that sink.  path names the file in those messages.
+    writing to that sink.  path names the file in those messages.  paths lists
+    every file the sink writes, so the scan can skip them.
     """
 
     path: Path
+
+    @property
+    def paths(self) -> tuple[Path, ...]: ...
 
     def open(self) -> None: ...
     def write(self, record: ResultRecord) -> None: ...

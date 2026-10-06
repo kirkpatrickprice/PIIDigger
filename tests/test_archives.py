@@ -2103,3 +2103,129 @@ def test_enum_dir_follows_the_same_rule(
     result = handle_enum_dir(_enum_dir_task(root), ctx, _logger())
 
     assert [Path(t["payload"]["file_path"]).name for t in result.new_tasks] == ([name] if scanned else [])
+
+
+# ---------------------------------------------------------------------------
+# Damaged archives and hostile member names
+# ---------------------------------------------------------------------------
+
+
+def _text_tar(path: Path, mode: str) -> Path:
+    """A compressed tar of three compressible text members, so its output is deterministic."""
+    import io
+    import tarfile
+
+    with tarfile.open(path, mode) as tf:
+        for i in range(3):
+            data = (b"line of text %d\n" % i) * 20000
+            info = tarfile.TarInfo(f"m{i}.txt")
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return path
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("mode, ext", [("w:gz", "tar.gz"), ("w:xz", "tar.xz")])
+def test_tar_handler_truncated_compressed_tar_raises_archive_read_error(tmp_path: Path, mode: str, ext: str) -> None:
+    from piidigger.archivehandlers._tar import handler
+    from piidigger.exceptions import ArchiveReadError
+
+    archive = _text_tar(tmp_path / f"cut.{ext}", mode)
+    archive.write_bytes(archive.read_bytes()[: archive.stat().st_size // 2])
+
+    with pytest.raises(ArchiveReadError) as exc_info:
+        handler.list_members(archive)
+    assert isinstance(exc_info.value.__cause__, EOFError)
+
+
+@pytest.mark.unit
+def test_tar_handler_corrupt_xz_raises_archive_read_error(tmp_path: Path) -> None:
+    """LZMAError is not an OSError, so it needs its own entry in both handlers' except clauses."""
+    import lzma
+
+    from piidigger.archivehandlers._tar import handler
+    from piidigger.exceptions import ArchiveReadError
+
+    archive = _text_tar(tmp_path / "bad.tar.xz", "w:xz")
+    data = bytearray(archive.read_bytes())
+    mid = len(data) // 2
+    data[mid : mid + 16] = b"\xff" * 16
+    archive.write_bytes(bytes(data))
+
+    with pytest.raises(ArchiveReadError) as listed:
+        handler.list_members(archive)
+    assert isinstance(listed.value.__cause__, lzma.LZMAError)
+    with pytest.raises(ArchiveReadError) as extracted:
+        handler.extract_members(archive, ["m2.txt"], tmp_path / "out", on_extracted=lambda m, p: None)
+    assert isinstance(extracted.value.__cause__, lzma.LZMAError)
+
+
+@pytest.mark.unit
+def test_open_with_progress_on_unreadable_file_leaves_no_unraisable_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """IOBase.__del__ closes the half-built reader; close() must cope with _raw never being set."""
+    import gc
+    import sys
+
+    from piidigger.archivehandlers._progress_io import open_with_progress
+
+    unraisable: list[Any] = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+
+    with pytest.raises(FileNotFoundError):
+        open_with_progress(tmp_path / "gone.zip")
+    gc.collect()
+
+    assert unraisable == []
+
+
+def _unused_drive_letter() -> str:
+    for letter in "QRSTUVWXYZ":
+        if not os.path.exists(f"{letter}:\\"):
+            return letter
+    pytest.skip("no unused drive letter to aim the member at")
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "nt", reason="drive-relative names exist only on Windows")
+def test_zip_refuses_a_member_whose_basename_names_another_drive(tmp_path: Path) -> None:
+    # Path("foo/q:run.bat").name is "q:run.bat", and dest_dir / "q:run.bat" drops
+    # dest_dir.  The drive is one that does not exist, so a regression fails the
+    # assertion on the reason rather than writing anywhere.
+    member = f"foo/{_unused_drive_letter().lower()}:run.bat"
+    zp = tmp_path / "drive.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr(member, b"@echo off")
+        zf.writestr("after.txt", b"fine")
+    got: list[str] = []
+    failed: list[tuple[str, str]] = []
+
+    _archive_handler("zip").extract_members(
+        zp,
+        [member, "after.txt"],
+        tmp_path / "out",
+        on_extracted=lambda m, p: got.append(m),
+        on_failed=lambda m, reason: failed.append((m, reason)),
+    )
+
+    assert failed == [(member, "member name escapes the extraction folder")]
+    assert got == ["after.txt"]
+
+
+@pytest.mark.unit
+def test_scan_archive_member_with_undetectable_encoding_is_counted_not_failed(tmp_path: Path) -> None:
+    zp = tmp_path / "mixed.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr("binary.txt", Path("testdata/plaintext/mislabeled-text-file.txt").read_bytes())
+        zf.writestr("after.txt", "card number: 4111111111111111")
+
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+    task = _scan_archive_task(zp, "binary.txt", "after.txt")
+    result = _scan(task, ctx)
+
+    assert result.status == "ok"
+    assert [p.item for p in result.done] == ["binary.txt", "after.txt"]
+    assert result.done[0].counters == {"files_scanned": 1}
+    assert "tasks_failed" not in result.counters
+    assert result.findings[0]["source_member_path"] == "after.txt"

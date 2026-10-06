@@ -14,6 +14,7 @@ from piidigger.models.config import Config, ResultsConfig
 from piidigger.orchestration.coordinator import CoordinatorResult
 from piidigger.orchestration.pool import WorkerPool
 from piidigger.outputhandlers import TextSink
+from piidigger.outputhandlers.json import JsonSink
 from piidigger.run import (
     EXIT_ABORTED,
     EXIT_INCOMPLETE,
@@ -21,6 +22,7 @@ from piidigger.run import (
     EXIT_OK,
     _build_sinks,
     _is_broad_folder,
+    _output_exclusions,
     _remove_temp_workspace,
     _resolve_workers,
     run_scan,
@@ -428,6 +430,22 @@ def test_run_scan_bare_output_paths_exclude_only_the_output_files(
     assert "top.txt" in findings
     assert output.name not in findings, "scan read its own results file"
     assert "piidigger.log" not in findings, "scan read its own log file"
+
+
+@pytest.mark.unit
+def test_output_exclusions_list_the_json_sinks_jsonl_stream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """JsonSink streams <stem>.jsonl all run; the plaintext handler accepts it as application/json."""
+    import os
+
+    monkeypatch.chdir(tmp_path)  # results in the cwd: too broad, so only the files are excluded
+    config = Config(
+        start_dirs=[tmp_path], log_file=tmp_path / "logs" / "piidigger.log", results=ResultsConfig(path=tmp_path)
+    )
+    sink = JsonSink(tmp_path / "results.json")
+
+    _, files = _output_exclusions(config, [sink], logging.getLogger("tests.run"))
+
+    assert files == {os.path.normcase(os.path.realpath(p)) for p in sink.paths}
 
 
 @pytest.mark.integration

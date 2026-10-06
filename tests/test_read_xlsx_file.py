@@ -127,3 +127,50 @@ def test_xlsx_blank_col_limit_still_stops_on_a_consecutive_run(tmp_path: Path) -
 
     assert "FIRST" in content
     assert "SECOND" not in content
+
+
+def _workbook_with_chart_sheet(path: Path) -> None:
+    """Two worksheets with a chart sheet between them."""
+    from openpyxl.chart import BarChart, Reference
+
+    wb = openpyxl.Workbook()
+    first = wb.active
+    first.title = "First"
+    first.append(["FIRSTSHEET", 1])
+    chart = BarChart()
+    chart.add_data(Reference(first, min_col=2, min_row=1, max_row=1))
+    wb.create_chartsheet("Chart").add_chart(chart)
+    wb.create_sheet("Last").append(["LASTSHEET"])
+    wb.save(path)
+
+
+class _InMemorySource:
+    """A source that offers its bytes, as an archive member does."""
+
+    def __init__(self, path: Path) -> None:
+        self._data = path.read_bytes()
+
+    def open_bytes(self) -> bytes:
+        return self._data
+
+
+@pytest.mark.filehandlers
+@pytest.mark.parametrize("in_memory", [False, True], ids=["on-disk", "in-memory"])
+def test_xlsx_chart_sheet_is_skipped_not_fatal(tmp_path: Path, in_memory: bool) -> None:
+    # A chart sheet has no cells.  Reading it used to raise after the earlier
+    # sheets were yielded, and the scan dropped the whole workbook's findings.
+    path = tmp_path / "with-chart.xlsx"
+    _workbook_with_chart_sheet(path)
+    source = _InMemorySource(path) if in_memory else FilesystemItem(path)
+
+    content = " ".join(XlsxHandler().read(source, Config()))
+
+    assert "FIRSTSHEET" in content
+    assert "LASTSHEET" in content
+
+
+@pytest.mark.filehandlers
+def test_xlsx_handler_selected_for_excel_templates() -> None:
+    from piidigger.filehandlers import get_handler_for
+
+    assert isinstance(get_handler_for(".xltx", None), XlsxHandler)

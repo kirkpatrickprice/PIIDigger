@@ -23,6 +23,10 @@ class JsonSink:
         self._file = None
         self._records: list[dict] = []
 
+    @property
+    def paths(self) -> tuple[Path, ...]:
+        return (self.path, self._jsonl_path)
+
     def open(self) -> None:
         self._file = open(self._jsonl_path, "w", encoding="utf-8")
 
