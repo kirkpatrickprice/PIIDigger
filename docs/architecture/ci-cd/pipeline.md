@@ -159,7 +159,13 @@ debugging a single stage):
    - *linux*: built inside a `manylinux2014` Docker container (glibc 2.17) via
      `.github/scripts/build-linux-standalone.sh`, run with `docker run` rather
      than a job-level `container:` because GitHub's JS-based actions need a
-     newer glibc/Node than the CentOS-7 base image provides.
+     newer glibc/Node than the CentOS-7 base image provides. The script freezes
+     with a uv-managed python-build-standalone CPython, not the image's
+     `/opt/python` interpreters, because those lack the shared `libpython`
+     that PyInstaller requires.
+   - *linux* and *macos* both freeze `src/piidigger/__main__.py` with
+     `--name piidigger`. The repo-root `piidigger.py` shadows the `piidigger`
+     package during PyInstaller analysis, so it is not a usable entry script.
    - *windows*: embedded-Python build via `build_windows_embedded.ps1`, zipped.
    - *macos*: matrix over `macos-latest` (arm64) and `macos-13` (x86_64),
      built directly with `pyinstaller --onedir`. Unsigned/unnotarized —

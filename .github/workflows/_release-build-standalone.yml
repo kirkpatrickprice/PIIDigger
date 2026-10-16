@@ -109,7 +109,9 @@ jobs:
       # wants a .icns on macOS. Add one later if a signed/branded app bundle
       # is wanted.
       - name: Build standalone binary
-        run: pyinstaller --onedir --distpath dist --collect-submodules wakepy piidigger.py
+        # Entry is the package's __main__.py: a repo-root piidigger.py shadows
+        # the piidigger package during PyInstaller analysis.
+        run: pyinstaller --onedir --distpath dist --name piidigger --collect-submodules wakepy src/piidigger/__main__.py
 
       - name: Package artifact
         run: |

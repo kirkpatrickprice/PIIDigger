@@ -2,26 +2,31 @@
 # Runs *inside* the quay.io/pypa/manylinux2014_x86_64 container (invoked via
 # `docker run` from the `linux` job in _release-build-standalone.yml) to
 # freeze a PyInstaller build against glibc 2.17 for broad Linux compatibility.
+#
+# The image's own /opt/python/* interpreters are built without a shared
+# libpython (by design, for wheel building), and PyInstaller requires one.
+# Instead, uv installs a python-build-standalone CPython, which ships
+# libpython3.14.so and itself targets glibc 2.17. The manylinux2014 container
+# still supplies the glibc 2.17 userland that PyInstaller collects from.
 set -euo pipefail
 
-CPYTHON_DIR="/opt/python/cp314-cp314"
-
-if [ ! -d "$CPYTHON_DIR" ]; then
-  echo "::error::cp314 not found under /opt/python/ in quay.io/pypa/manylinux2014_x86_64." \
-       "Available interpreters: $(ls /opt/python/ 2>/dev/null || echo none). " \
-       "Python 3.14 may not yet be built into this manylinux2014 image; " \
-       "see docs/refactor for the accepted fallback options." >&2
-  exit 1
-fi
-
-export PATH="$CPYTHON_DIR/bin:$PATH"
+UV_VERSION="0.13.1"
+PYTHON_VERSION="3.14"
 
 TAG="${RELEASE_TAG:-dev}"
 
-python -m pip install --upgrade pip
-python -m pip install .[build]
+curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_INSTALL_DIR=/usr/local/bin sh
 
-pyinstaller --onedir --distpath dist -i piidigger.ico --collect-submodules wakepy piidigger.py
+uv venv --python "$PYTHON_VERSION" --managed-python /tmp/build-venv
+export VIRTUAL_ENV=/tmp/build-venv
+export PATH="$VIRTUAL_ENV/bin:$PATH"
+
+uv pip install ".[build]"
+
+# Entry is the package's __main__.py, not the repo-root piidigger.py: PyInstaller
+# puts the script's directory first on its search path, and a root-level
+# piidigger.py shadows the piidigger package so none of it gets bundled.
+pyinstaller --onedir --distpath dist --name piidigger --collect-submodules wakepy src/piidigger/__main__.py
 
 ARTIFACT="piidigger-${TAG}-linux-x86_64-manylinux2014.tar.gz"
 tar -C dist -czf "$ARTIFACT" piidigger
