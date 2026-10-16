@@ -1,31 +1,20 @@
 #!/usr/bin/env python
-'''src/piidigger/piidigger.py wrapper'''
+"""Entry point for the embedded-Python Windows launcher (piidigger.cmd).
+
+sys.path is extended to include src/ so that the piidigger package is
+importable when running via bin/python.exe without a full installation.
+freeze_support() must be called before any multiprocessing on Windows
+when the interpreter is a standalone/frozen binary.
+"""
 
 import sys
-import traceback
+from multiprocessing import freeze_support
 from pathlib import Path
-from multiprocessing import Process, freeze_support, set_start_method
 
 sys.path.insert(0, str(Path(__file__).absolute().parent / "src"))
 
-from piidigger.piidigger import main
-from piidigger.globalvars import errorCodes
+if __name__ == "__main__":
+    freeze_support()
+    from piidigger.cli.main import cli
 
-exitCode = errorCodes['ok']
-
-if __name__=='__main__':
-    try:
-        freeze_support()
-        m = Process(target=main)
-        m.start()
-        m.join()
-        exitCode = m.exitcode
-    except KeyboardInterrupt:
-        pass
-    except Exception:
-        exit_code = errorCodes['unknownError']
-        errorFile='piidigger.exc'
-        print(f'An unknown error was encountered.  Detailed error information has been written to {errorFile}.')
-        traceback.print_exception(file=errorFile)
-    sys.exit(exitCode)
-    
+    cli()

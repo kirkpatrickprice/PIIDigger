@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/kirkpatrickprice/PIIDigger/security/advisories/new
+    about: Do not report security vulnerabilities through public issues — use private advisory reporting (see SECURITY.md).
