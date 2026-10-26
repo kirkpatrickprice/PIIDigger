@@ -26,6 +26,9 @@ _COUNTER_KEYS: tuple[str, ...] = (
 )
 
 _EVENTS_BUFFER_SIZE = 20
+_PANEL_BORDER_ROWS = 2
+_PROGRESS_PANEL_ROWS = 5 + _PANEL_BORDER_ROWS
+_EVENTS_HEADER_ROWS = 1
 
 # Minimum completed tasks before showing an ETA.  Below this threshold the
 # rate estimate is too noisy, and scans that finish this quickly are already
