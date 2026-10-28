@@ -15,6 +15,7 @@ import pytest
 
 from piidigger.models.tasks import Task, TaskStarted, TaskType, WorkerReady
 from piidigger.orchestration.coordinator import HealthMonitor, SweepResult
+from piidigger.orchestration.feeder import TaskFeeder
 from piidigger.orchestration.pool import WorkerPool
 from piidigger.orchestration.registry import MAX_RETRIES, TaskRegistry
 from tests._fakes import FakeClock, FakeProcess, Spawner
@@ -513,3 +514,22 @@ def test_crash_on_a_batch_member_skips_it_without_spending_the_retry_budget() ->
     record = h.registry.get(task.task_id)
     assert record is not None
     assert record.attempt == 0
+
+
+@pytest.mark.unit
+def test_lost_task_sweep_skips_tasks_still_waiting_in_the_feeder() -> None:
+    """Only the task put on the queue can be lost; the one held back never left the coordinator."""
+    h = Harness(max_retries=0)
+    feeder = TaskFeeder(h.dispatched.append, window=1)
+    h.registry = TaskRegistry(feeder.submit, clock=h.clock, max_retries=0)
+    h.monitor = HealthMonitor(h.registry, h.pool, feeder=feeder, clock=h.clock)
+    sent, waiting = _lost(h), _lost(h)
+    h.all_checked_in()
+    h.clock.advance(3.0)
+
+    h.monitor.tick()
+    sweep = h.monitor.tick()
+
+    assert [r.task_id for r in sweep.abandoned] == [sent.task_id]
+    assert waiting.task_id in h.registry
+    assert h.dispatched == [sent, waiting], "abandoning the lost task frees its slot for the next one"

@@ -154,11 +154,21 @@ class ProgressDisplay:
         """Build a fresh Table from the bounded events deque."""
         table = Table(show_header=True, header_style="bold", expand=True, box=None)
         table.add_column("Level", width=8)
-        table.add_column("Event", ratio=1)
-        for level, message in self._events:
+        table.add_column("Event", ratio=1, no_wrap=True, overflow="ellipsis")
+        for level, message in self._visible_events():
             color = {"ERROR": "red", "WARNING": "yellow", "INFO": "green"}.get(level.upper(), "white")
             table.add_row(f"[{color}]{level}[/{color}]", message)
         return table
+
+    def _visible_events(self) -> list[tuple[str, str]]:
+        """Newest events that fit below the config and progress panels.
+
+        A display taller than the terminal cannot be redrawn in place, so the
+        whole screen flickers on every refresh.
+        """
+        used = len(self._startup_lines) + _PANEL_BORDER_ROWS + _PROGRESS_PANEL_ROWS
+        room = self._console.height - used - _PANEL_BORDER_ROWS - _EVENTS_HEADER_ROWS
+        return list(self._events)[-room:] if room > 0 else []
 
     def _compute_eta(self) -> str:
         """Return a human-readable ETA string based on task completion rate.
@@ -267,9 +277,9 @@ class ProgressDisplay:
         live = Live(
             self._build_live_renderable(),
             console=self._console,
-            refresh_per_second=4,
+            refresh_per_second=2,
+            screen=True,
         )
-        self._console.clear()
         live.start()
         self._live = live
 

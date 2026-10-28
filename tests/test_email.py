@@ -155,3 +155,16 @@ def test_email_prefilter_skips_regex_on_long_no_at_string() -> None:
 if __name__ == "__main__":
     # This allows running the tests directly with python
     pytest.main(["-v", __file__])
+
+
+@pytest.mark.datahandlers
+def test_email_regex_is_linear_on_long_run_without_at() -> None:
+    base64_block = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" * 300
+    text = f"contact user@example.com\n{base64_block}"
+
+    start = time.perf_counter()
+    result = email.handler.find_matches(text)
+    elapsed = time.perf_counter() - start
+
+    assert result == {"email": {"u***@example.com"}}
+    assert elapsed < 1.0, f"regex took {elapsed:.3f}s — quadratic backtracking on the local part"

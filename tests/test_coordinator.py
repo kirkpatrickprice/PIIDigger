@@ -969,3 +969,31 @@ def test_seeding_failure_is_torn_down(tmp_path: Path) -> None:
 
     assert all(not w.is_alive() for w in pool.processes)
     assert "bad seed" in log_file.read_text()
+
+
+@pytest.mark.slow
+def test_fan_out_larger_than_the_macos_queue_limit_completes(tmp_path: Path) -> None:
+    """More tasks than macOS's 32,767-item queue cap must not deadlock the coordinator.
+
+    Needs more than about 49,000 tasks: without the feeder, the coordinator is
+    still blocked on put() after workers fill the result queue with two
+    messages per task.
+    """
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    log_queue: mp.Queue[object] = mp.Queue()
+    stop_event = mp.Event()
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [])
+    listener = start_listener(log_queue, tmp_path / "fanout.log", "WARNING")
+    pool = _start_pool(ctx, 2)
+    progress = _non_tty_progress()
+    seeds = [Task(task_type=TaskType.NOOP) for _ in range(60_000)]
+
+    outcome = _run_in_thread(
+        lambda: run_coordinator(ctx, pool, listener, [], progress, seed_tasks=seeds),
+        timeout=300.0,
+    )
+
+    assert outcome is not None, "coordinator deadlocked on a fan-out past the queue's item limit"
+    assert outcome.unfinished == 0
+    assert progress._tasks_completed == 60_000

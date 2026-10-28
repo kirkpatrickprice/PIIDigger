@@ -174,3 +174,16 @@ def test_xlsx_handler_selected_for_excel_templates() -> None:
     from piidigger.filehandlers import get_handler_for
 
     assert isinstance(get_handler_for(".xltx", None), XlsxHandler)
+
+
+@pytest.mark.filehandlers
+def test_xlsx_without_an_excel_extension_is_read(tmp_path: Path) -> None:
+    """MIME detection picks the handler for extensionless files; openpyxl must not reject the name."""
+    book = openpyxl.Workbook()
+    book.active.append(["card", "4111111111111111"])
+    path = tmp_path / "upload-0001"
+    book.save(path)
+
+    chunks = _read(path)
+
+    assert any("4111111111111111" in chunk for chunk in chunks)

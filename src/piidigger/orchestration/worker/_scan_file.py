@@ -63,12 +63,14 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
             worker_pid=os.getpid(),
         )
     except Exception as exc:  # noqa: BLE001
-        logger.error("error reading %s: %s", payload.display_path, exc)
+        # The coordinator logs the failure; this line only adds the traceback.
+        logger.debug("error reading %s", payload.display_path, exc_info=True)
         return TaskResult(
             task_id=task.task_id,
             task_type=task.task_type,
             status="error",
-            error_message=str(exc),
+            # With the type: str() of a KeyError is only the key, e.g. '7'.
+            error_message=f"{type(exc).__name__}: {exc}",
             counters={"files_scanned": 1, "bytes_scanned": payload.size},
             worker_pid=os.getpid(),
         )

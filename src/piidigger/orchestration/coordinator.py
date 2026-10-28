@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from piidigger.models.config import Config
 from piidigger.models.tasks import Task, TaskProgress, TaskResult, TaskStarted, TaskType, WorkerReady
 from piidigger.orchestration.context import WorkerContext
+from piidigger.orchestration.feeder import TaskFeeder
 from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
 from piidigger.orchestration.pool import WorkerPool, spawn_worker
 from piidigger.orchestration.progress import ProgressDisplay
@@ -38,6 +39,10 @@ LOST_TASK_MIN_AGE: float = 2.0
 # How long teardown waits for workers to exit before stopping them.
 _JOIN_TIMEOUT: float = 5.0
 _INTERRUPT_JOIN_TIMEOUT: float = 2.0
+
+# Tasks per worker the feeder keeps on the task queue.  The rest wait in the
+# coordinator's memory, so the queue never nears macOS's 32,767-item cap.
+DISPATCH_WINDOW_PER_WORKER: int = 4
 
 _ACCESS_DENIED_PHRASES: tuple[str, ...] = ("Access is denied", "Permission denied", "WinError 5", "Errno 13")
 
@@ -159,6 +164,10 @@ class HealthMonitor:
     retry budget, because every such re-queue removes a member.  Without a
     member in progress, a batch follows the same rules as any other task.
 
+    With a feeder, step 3 skips tasks still in the feeder's backlog.  They were
+    never put on the queue, so they cannot be lost, and re-dispatching them
+    would spend retry budget on work that never ran.
+
     A false positive in step 3 is harmless.  A task re-dispatched while its
     original was still pending keeps its task_id, so whichever copy finishes
     second is dropped as a duplicate.
@@ -169,12 +178,14 @@ class HealthMonitor:
         registry: TaskRegistry,
         pool: WorkerPool,
         *,
+        feeder: TaskFeeder | None = None,
         clock: Callable[[], float] = time.monotonic,
         lost_task_confirm_sweeps: int = LOST_TASK_CONFIRM_SWEEPS,
         lost_task_min_age: float = LOST_TASK_MIN_AGE,
     ) -> None:
         self._registry = registry
         self._pool = pool
+        self._feeder = feeder
         self._clock = clock
         self._lost_task_confirm_sweeps = lost_task_confirm_sweeps
         self._lost_task_min_age = lost_task_min_age
@@ -235,11 +246,18 @@ class HealthMonitor:
             self._quiet_sweeps += 1
             if self._quiet_sweeps >= self._lost_task_confirm_sweeps:
                 self._quiet_sweeps = 0
-                for record in self._registry.records():
+                feeder = self._feeder
+                # Decided before the loop: releasing an abandoned task's slot
+                # puts a waiting task on the queue, which must not then be
+                # judged lost in the same sweep.
+                candidates = [r for r in self._registry.records() if feeder is None or not feeder.is_waiting(r.task_id)]
+                for record in candidates:
                     if self._registry.redispatch(record.task_id) is not None:
                         lost.append(record)
                     else:
                         self._registry.abandon(record.task_id, reason="crashed")
+                        if feeder is not None:
+                            feeder.release(record.task_id)
                         abandoned.append(record)
         else:
             self._quiet_sweeps = 0
@@ -378,8 +396,9 @@ def run_coordinator(
         CoordinatorResult describing how the run ended, for exit-code mapping.
     """
     logger = build_worker_logger(ctx.log_queue, "coordinator")
-    registry = TaskRegistry(ctx.task_queue.put)
-    monitor = HealthMonitor(registry, pool)
+    feeder = TaskFeeder(ctx.task_queue.put, window=DISPATCH_WINDOW_PER_WORKER * pool.size)
+    registry = TaskRegistry(feeder.submit)
+    monitor = HealthMonitor(registry, pool, feeder=feeder)
     guarded = [GuardedSink(sink, logger, progress) for sink in sinks]
 
     interrupted = False
@@ -394,7 +413,7 @@ def run_coordinator(
             registry.enqueue(task)
         logger.info("coordinator seeded %d initial task(s)", len(seeds))
 
-        _drain(ctx, registry, monitor, guarded, progress, logger)
+        _drain(ctx, registry, monitor, feeder, guarded, progress, logger)
         logger.info("coordinator: all tasks accounted for")
     except KeyboardInterrupt:
         interrupted = True
@@ -443,6 +462,7 @@ def _drain(
     ctx: WorkerContext,
     registry: TaskRegistry,
     monitor: HealthMonitor,
+    feeder: TaskFeeder,
     sinks: list[Any],
     progress: ProgressDisplay,
     logger: logging.Logger,
@@ -463,6 +483,9 @@ def _drain(
         else:
             monitor.observe(message)
             _handle_message(message, registry, sinks, progress, logger)
+            # Each TaskStarted frees one slot in the feeder's window.
+            if isinstance(message, TaskStarted):
+                feeder.started(message.task_id)
         if time.monotonic() >= next_sweep:
             _report_sweep(monitor.tick(), registry, progress, logger)
             next_sweep = time.monotonic() + HEARTBEAT_CHECK_INTERVAL
@@ -593,7 +616,11 @@ def _handle_result(
     if result.status == "error":
         msg = result.error_message or "(no message)"
         err_path = _task_path(task)
-        logger.error(
+        # The only log line for a failed task: workers log theirs at DEBUG.
+        # Access denied is expected (e.g. macOS privacy protection without Full
+        # Disk Access), so it is a warning, as in the display.
+        logger.log(
+            logging.WARNING if _is_access_denied(msg) else logging.ERROR,
             "[%s]%s: %s",
             result.task_type.value,
             f" path={err_path!r}" if err_path else "",

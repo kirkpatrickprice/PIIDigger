@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import dataclasses
+import functools
 import multiprocessing as mp
 import os
+import stat
 import sys
+import types
 import unittest.mock
 from pathlib import Path
 
 import pytest
 
 from piidigger.models.config import Config
-from piidigger.models.tasks import Task, TaskType
+from piidigger.models.tasks import Task, TaskProgress, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger
 from piidigger.orchestration.worker import handle_enum_dir, handle_scan_file, resolve_exclude_dirs
@@ -383,3 +387,142 @@ def test_cloud_placeholder_check_skips_win32api_off_windows(monkeypatch: pytest.
 
     assert _is_cloud_placeholder(tmp_path) is False
     assert consulted == []
+
+
+class _StatStub:
+    def __init__(self, flags: int | None, *, size: int = 10, blocks: int = 8) -> None:
+        self._flags = flags
+        self._size = size
+        self._blocks = blocks
+
+    def stat(self, *, follow_symlinks: bool = True) -> object:
+        if self._flags is None:
+            raise OSError("gone")
+        return types.SimpleNamespace(st_flags=self._flags, st_size=self._size, st_blocks=self._blocks)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [(stat.SF_DATALESS, True), (stat.SF_DATALESS | stat.UF_COMPRESSED, True), (0, False), (None, False)],
+)
+def test_cloud_placeholder_on_macos_reads_dataless_flag(
+    monkeypatch: pytest.MonkeyPatch, flags: int | None, expected: bool
+) -> None:
+    from piidigger.orchestration.worker._enum_dir import _is_cloud_placeholder
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    assert _is_cloud_placeholder(_StatStub(flags)) is expected  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("flags", "size", "blocks", "expected"),
+    [
+        (0, 168_000_000, 0, True),  # OneDrive's sparse placeholder: full size, nothing on disk
+        (stat.UF_COMPRESSED, 4096, 0, False),  # APFS-compressed files also report zero blocks
+        (0, 0, 0, False),  # empty file
+        (0, 4096, 8, False),  # ordinary file
+    ],
+)
+def test_cloud_placeholder_on_macos_treats_unallocated_files_as_placeholders(
+    monkeypatch: pytest.MonkeyPatch, flags: int, size: int, blocks: int, expected: bool
+) -> None:
+    from piidigger.orchestration.worker._enum_dir import _is_cloud_placeholder
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    assert _is_cloud_placeholder(_StatStub(flags, size=size, blocks=blocks)) is expected  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_enum_dir_skips_cloud_placeholders(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import piidigger.orchestration.worker._enum_dir as enum_dir_mod
+
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "local.txt").write_text("here")
+    (root / "cloud.txt").write_text("not really here")
+    monkeypatch.setattr(enum_dir_mod, "_is_cloud_placeholder", lambda path: path.name == "cloud.txt")
+
+    result = handle_enum_dir(_enum_dir_task(root), _make_ctx(tmp_path), _logger())
+
+    names = [Path(t["payload"]["file_path"]).name for t in result.new_tasks]
+    assert names == ["local.txt"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("local_only", "expected"), [(True, ["local"]), (False, ["local", "nfs"])])
+def test_enum_dir_skips_network_filesystems_when_local_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, local_only: bool, expected: list[str]
+) -> None:
+    import piidigger.orchestration.worker._enum_dir as enum_dir_mod
+
+    root = tmp_path / "root"
+    (root / "local").mkdir(parents=True)
+    (root / "nfs").mkdir()
+    monkeypatch.setattr(enum_dir_mod, "is_remote_filesystem", lambda path, dev: path.endswith("nfs"))
+
+    result = handle_enum_dir(_enum_dir_task(root), _make_ctx(tmp_path, local_files_only=local_only), _logger())
+
+    assert sorted(Path(t["payload"]["path"]).name for t in result.new_tasks) == expected
+
+
+@pytest.mark.unit
+def test_enum_dir_retries_a_listing_interrupted_by_a_signal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "a.txt").write_text("x")
+    real_iterdir = Path.iterdir
+    calls: list[Path] = []
+
+    def flaky_iterdir(self: Path):  # type: ignore[no-untyped-def]
+        calls.append(self)
+        if len(calls) == 1:
+            raise InterruptedError(4, "Interrupted system call")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", flaky_iterdir)
+
+    result = handle_enum_dir(_enum_dir_task(root), _make_ctx(tmp_path), _logger())
+
+    assert result.status == "ok"
+    assert len(calls) == 2
+    assert [Path(t["payload"]["file_path"]).name for t in result.new_tasks] == ["a.txt"]
+
+
+@pytest.mark.unit
+def test_enum_dir_reports_alive_while_listing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import piidigger.orchestration.worker._enum_dir as enum_dir_mod
+
+    root = tmp_path / "root"
+    root.mkdir()
+    for i in range(3):
+        (root / f"f{i}.txt").write_text("x")
+    sent: list[object] = []
+    ctx = _make_ctx(tmp_path)
+    ctx = dataclasses.replace(ctx, result_queue=types.SimpleNamespace(put=sent.append))  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        enum_dir_mod, "ProgressReporter", functools.partial(enum_dir_mod.ProgressReporter, alive_interval=0.0)
+    )
+    task = _enum_dir_task(root)
+
+    handle_enum_dir(task, ctx, _logger())
+
+    alive = [m for m in sent if isinstance(m, TaskProgress) and m.event == "alive"]
+    assert len(alive) == 3
+    assert {m.task_id for m in alive} == {task.task_id}
+
+
+@pytest.mark.unit
+def test_scan_file_error_message_names_the_exception_type(tmp_path: Path) -> None:
+    """str() of a KeyError is only the key, which on its own tells the reader nothing."""
+    f = tmp_path / "broken.txt"
+    f.write_text("content")
+
+    with unittest.mock.patch("piidigger.getencoding.open", side_effect=KeyError("7"), create=True):
+        result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path), _logger())
+
+    assert result.status == "error"
+    assert result.error_message == "KeyError: '7'"

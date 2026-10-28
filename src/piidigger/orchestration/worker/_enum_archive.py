@@ -111,7 +111,8 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
     try:
         member_list = handler.list_members(archive_path, reporter.alive)
     except ArchiveReadError as exc:
-        logger.warning("cannot read archive %s: %s", archive_path, exc)
+        # The coordinator logs the failure; a worker line would duplicate it.
+        logger.debug("cannot read archive %s: %s", archive_path, exc)
         return TaskResult(
             task_id=task.task_id,
             task_type=task.task_type,

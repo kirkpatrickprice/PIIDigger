@@ -142,6 +142,13 @@ For such a task, the record also holds:
 
 Summary counts are in files and members, not tasks. An abandoned batch counts its remaining members, and each dropped member counts once.
 
+### `TaskFeeder` — a short task queue
+[orchestration/feeder.py](../../../src/piidigger/orchestration/feeder.py) sits between the registry and `task_queue`. The registry's `put` callable is `feeder.submit`, so registering a task is unchanged. The feeder keeps at most `DISPATCH_WINDOW_PER_WORKER × pool.size` (4 per worker) unstarted tasks on the queue. The rest wait in an in-memory backlog. Each `TaskStarted` frees one slot, and the drain loop calls `feeder.started()` to fill it.
+
+The window exists because an "unbounded" `multiprocessing.Queue` is capped by `SemLock.SEM_VALUE_MAX`: 32,767 on macOS. A large fan-out once filled the task queue past that cap. The coordinator blocked in `put()` while every worker blocked putting results it was not reading, and the scan deadlocked. With the window, the coordinator never blocks on `put()`.
+
+The backlog is keyed by `task_id`. A task re-submitted while still waiting replaces its entry in place. A task re-submitted after it was put frees its old slot first, so a task lost before its heartbeat cannot hold a slot forever. The lost-task sweep skips tasks still in the backlog, because they never reached the queue. When it abandons a lost task, it calls `feeder.release()` to free that slot.
+
 ### `WorkerPool` — process lifecycle
 [orchestration/pool.py](../../../src/piidigger/orchestration/pool.py) is the single place worker processes are created (`spawn_worker`, `daemon=True` so a straggler cannot block interpreter exit), replaced, and stopped. `replace(pid)` removes a pid from the active set *before* starting its replacement, so a pid can be replaced at most once even if both the deadline sweep and the crash sweep notice the same death. `reap_dead()` replaces any worker that died without being asked to. Stopping a worker escalates `terminate()` then `kill()`; a process that survives both is kept as a straggler rather than dropped, so teardown still accounts for it.
 
@@ -238,6 +245,7 @@ A task type that works through many items can opt into per-item progress without
 - **Timeout multiplier**: a task is only declared timed-out at `2 × timeout_seconds`, not at `timeout_seconds` itself (`registry._DEADLINE_FACTOR`) — this absorbs normal scheduling jitter without doubling real wait time for the common case (results usually arrive well under the limit). The clock restarts on each `TaskProgress` from the holding worker.
 - **Progress traffic**: `alive` is capped at one message per second per task (`_ALIVE_INTERVAL` in `worker/_reporter.py`). `item_started` and `item_done` are not capped: two small messages per archive member.
 - **Redispatch retry cap**: `MAX_RETRIES = 3` (`registry.py`) per task before it is abandoned with a synthetic error — applies uniformly to a crash-after-heartbeat redispatch and a lost-task-before-heartbeat redispatch, preventing an unrecoverable task (e.g. one that reliably crashes its worker) from retrying forever.
+- **Dispatch window**: `DISPATCH_WINDOW_PER_WORKER = 4` (`coordinator.py`) unstarted tasks per worker on the task queue. Enough that a worker finishing a task finds the next one waiting; small enough that the shared queues stay far below any platform's item cap.
 - **Lost-task confirmation window**: `LOST_TASK_CONFIRM_SWEEPS = 2` sweeps and `LOST_TASK_MIN_AGE = 2.0` seconds (`coordinator.py`) — both must hold before a task is judged lost, so a task that simply has not been picked up yet, or a worker still booting, is not mistaken for lost work.
 - **Startup-failure breaker**: `_MAX_STARTUP_FAILURES = 3` (`pool.py`) consecutive workers dying before checking in stops the pool from replacing them — bounding how long a broken worker environment is retried before the run gives up instead of respawning forever.
 - **Join budget**: `WorkerPool.join()` uses one shared wall-clock deadline across all workers (default 5s, 2s during a `KeyboardInterrupt`), not a per-worker timeout — so worker count does not multiply shutdown latency.

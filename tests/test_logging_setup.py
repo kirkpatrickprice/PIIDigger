@@ -5,11 +5,19 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import queue
+import warnings
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
-from piidigger.orchestration.logging_setup import route_library_logs, stop_library_log_routing
+from piidigger.getmime import get_mime
+from piidigger.orchestration.logging_setup import (
+    route_library_logs,
+    start_listener,
+    stop_library_log_routing,
+    stop_listener,
+)
 
 
 @pytest.fixture
@@ -59,3 +67,44 @@ def test_routing_is_idempotent_and_removable(log_queue: queue.Queue[logging.LogR
 
     stop_library_log_routing()
     assert not any(isinstance(h, logging.handlers.QueueHandler) for h in root.handlers)
+
+
+@pytest.mark.unit
+def test_log_file_keeps_each_message_on_one_line(tmp_path: Path) -> None:
+    """Multi-line exception text (tarfile lists every method it tried) must not split a record."""
+    log_q: queue.Queue[logging.LogRecord] = queue.Queue()
+    log_file = tmp_path / "run.log"
+    listener = start_listener(log_q, log_file, "INFO")  # type: ignore[arg-type]
+    logger = logging.getLogger("tests.single_line")
+    logger.propagate = False
+    handler = logging.handlers.QueueHandler(log_q)
+    logger.addHandler(handler)
+    try:
+        logger.warning("cannot read archive %s: %s", "a.tar", "not a tar file\n- method gz: ReadError")
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            logger.exception("with traceback")
+    finally:
+        logger.removeHandler(handler)
+        stop_listener(listener)
+
+    lines = log_file.read_text(encoding="utf-8").splitlines()
+    assert lines[0].endswith("cannot read archive a.tar: not a tar file - method gz: ReadError")
+    assert lines[1].endswith("with traceback")
+    assert lines[2] == "Traceback (most recent call last):", "tracebacks keep their own lines"
+
+
+@pytest.mark.unit
+def test_mime_detection_does_not_emit_syntax_warnings(tmp_path: Path) -> None:
+    """puremagic ast.parse()s text files; their invalid escapes must not flood the log."""
+    # Parses as Python, so the scanner's ast.parse() gets far enough to warn.
+    # At least 100 bytes: the scanner skips smaller files without a .py name.
+    js = tmp_path / "bundle"
+    js.write_text('path = "\\/usr\\/lib"\npattern = "\\d+"\n' * 10)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        get_mime(str(js))
+
+    assert not [w for w in caught if issubclass(w.category, SyntaxWarning)]

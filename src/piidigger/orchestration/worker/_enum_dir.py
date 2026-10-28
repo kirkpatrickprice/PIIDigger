@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,11 @@ from piidigger.models.config import Config
 from piidigger.models.payloads import EnumDirPayload
 from piidigger.models.tasks import Task, TaskResult, TaskType
 from piidigger.orchestration.context import WorkerContext
+from piidigger.orchestration.worker._filesystems import is_remote_filesystem
+from piidigger.orchestration.worker._reporter import ProgressReporter
+
+# Attempts at listing a directory when a signal interrupts the read (EINTR).
+_LIST_ATTEMPTS: int = 3
 
 
 def _is_excluded(path: Path, exclude_dirs: list[str]) -> bool:
@@ -97,18 +104,34 @@ def _detect_archive_type(filename: str, config: Config) -> str | None:
 def _is_cloud_placeholder(path: Path) -> bool:
     """Return True if path is a cloud-sync placeholder not yet downloaded locally.
 
-    Checks Windows file attribute bits:
+    On macOS, checks the SF_DATALESS file flag, which File Provider sets on
+    iCloud Drive, OneDrive and other CloudStorage files whose content is not on
+    local disk.  Opening such a file blocks while macOS downloads it.  Also
+    treats a sparse file with no blocks at all as a placeholder: OneDrive's own
+    storage under ~/Library/Group Containers holds such files, which report
+    their full size but read back as zeros, and are not marked SF_DATALESS.
+    APFS-compressed files also report zero blocks, so those are kept.
+
+    On Windows, checks file attribute bits:
       0x400000 (Recall)  — OneDrive file whose content is not on local disk.
       0x001000 (Offline) — Dropbox file whose content is not on local disk.
 
     A set bit means skip the file; the content would have to be downloaded on
     demand, which defeats the purpose of local-only scanning.
 
-    Returns False on non-Windows, when pywin32 is not installed, or when the
+    Returns False on other platforms, when pywin32 is not installed, or when the
     attribute read fails — all treated as "assume local, scan it."
 
     Reference: https://superuser.com/questions/1718444/determining-if-a-onedrive-file-is-synced-locally-via-a-terminal
     """
+    if sys.platform == "darwin":
+        try:
+            st = path.stat(follow_symlinks=False)
+        except OSError:
+            return False
+        if st.st_flags & stat.SF_DATALESS:
+            return True
+        return st.st_size > 0 and st.st_blocks == 0 and not (st.st_flags & stat.UF_COMPRESSED)
     recall_bit = 0x400000
     offline_bit = 0x001000
     if os.name != "nt":
@@ -120,6 +143,21 @@ def _is_cloud_placeholder(path: Path) -> bool:
         return bool(attr & recall_bit) or bool(attr & offline_bit)
     except Exception:
         return False
+
+
+def _list_dir(path: Path) -> list[Path]:
+    """List path, retrying when a signal interrupts the read.
+
+    Seen in macOS app sandbox containers.  Without the retry the directory, and
+    everything under it, is skipped.
+    """
+    for attempt in range(_LIST_ATTEMPTS):
+        try:
+            return list(path.iterdir())
+        except InterruptedError:
+            if attempt == _LIST_ATTEMPTS - 1:
+                raise
+    raise AssertionError("unreachable")
 
 
 def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
@@ -135,9 +173,10 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
     bytes_found = 0
 
     try:
-        entries = list(path.iterdir())
+        entries = _list_dir(path)
     except PermissionError as exc:
-        logger.warning("permission denied listing %s: %s", path, exc)
+        # The coordinator logs the failure; worker lines would duplicate it.
+        logger.debug("permission denied listing %s: %s", path, exc)
         return TaskResult(
             task_id=task.task_id,
             task_type=task.task_type,
@@ -147,7 +186,7 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
             worker_pid=os.getpid(),
         )
     except (OSError, FileNotFoundError) as exc:
-        logger.warning("cannot list %s: %s", path, exc)
+        logger.debug("cannot list %s: %s", path, exc)
         return TaskResult(
             task_id=task.task_id,
             task_type=task.task_type,
@@ -158,12 +197,20 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
         )
 
     config = ctx.config
+    # A heartbeat per entry (sent at most once a second): MIME detection makes
+    # a directory of tens of thousands of files take minutes, and a listing
+    # that keeps making progress must not be killed at its deadline.
+    reporter = ProgressReporter(ctx.result_queue.put, task.task_id)
     for entry in entries:
+        reporter.alive()
         try:
             if entry.is_symlink():
                 continue
             if entry.is_dir():
                 if _is_excluded(entry, config.exclude_dirs):
+                    continue
+                if config.local_files_only and is_remote_filesystem(str(entry), entry.stat().st_dev):
+                    logger.info("skipping %s: network filesystem (local_files_only)", entry)
                     continue
                 new_tasks.append(
                     {

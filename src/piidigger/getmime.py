@@ -4,6 +4,7 @@
 import contextlib
 import os
 import sys
+import warnings
 
 import click
 
@@ -24,7 +25,12 @@ def get_mime(filename: str) -> str | None:
         return "Directory"
 
     try:
-        mime_type = puremagic.from_file(filename, mime=True) if test_magic() else None
+        # puremagic ast.parse()s text-like files to spot Python; every invalid
+        # escape in JavaScript, JSON, etc. raises a SyntaxWarning, which the
+        # warnings capture would otherwise forward to the log.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            mime_type = puremagic.from_file(filename, mime=True) if test_magic() else None
     except Exception:
         mime_type = None
 

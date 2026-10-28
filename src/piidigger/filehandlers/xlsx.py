@@ -36,17 +36,27 @@ class XlsxHandler:
     Members are bounded by max_member_uncompressed_size_mb so full buffering
     is safe.
 
-    Fallback path (on-disk files): source.open_bytes() returns None, so
-    source.materialize() is called for a filesystem path and read_only=True
-    is used for memory-efficient streaming of potentially large files.
+    Fallback path (on-disk files): source.open_bytes() returns None, so the
+    file is opened with source.open_stream() and read_only=True is used for
+    memory-efficient streaming of potentially large files.  A file object, not
+    a path: given a path, load_workbook rejects any name without an Excel
+    extension, so a workbook MIME detection found under another name would
+    never be read.  read_only reads lazily, so the stream stays open until the
+    book is closed.
     """
 
     def read(self, source, config: Config) -> Iterator[str]:  # source: ScannableItem
         data = source.open_bytes()
+        stream = None
         if data is not None:
             book = openpyxl.load_workbook(filename=BytesIO(data), read_only=False, data_only=True)
         else:
-            book = openpyxl.load_workbook(filename=str(source.materialize()), read_only=True, data_only=True)
+            stream = source.open_stream()
+            try:
+                book = openpyxl.load_workbook(filename=stream, read_only=True, data_only=True)
+            except BaseException:
+                stream.close()
+                raise
         try:
             # worksheets, not sheetnames: a chart sheet has no cells to read.
             for active_sheet in book.worksheets:
@@ -88,6 +98,8 @@ class XlsxHandler:
                     yield final
         finally:
             book.close()
+            if stream is not None:
+                stream.close()
 
 
 handler = XlsxHandler()

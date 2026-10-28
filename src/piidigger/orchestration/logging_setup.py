@@ -79,6 +79,25 @@ def _route_to_queue(logger: logging.Logger, log_queue: mp.Queue[Any], *, level: 
     logger.addHandler(handler)
 
 
+_TRACEBACK_HEADER = "Traceback (most recent call last):"
+
+
+class _SingleLineFormatter(logging.Formatter):
+    """Keeps each record's message on one line, so line-based tools read the log right.
+
+    Some exception text spans several lines; tarfile, for one, lists every
+    compression method it tried.  Only the message is collapsed: a traceback
+    from logger.exception() still follows on its own lines.  QueueHandler
+    folds the traceback into the message text before it crosses the queue,
+    so the split is made at the traceback's header line.
+    """
+
+    def formatMessage(self, record: logging.LogRecord) -> str:  # noqa: N802 — logging.Formatter API
+        text = super().formatMessage(record)
+        head, marker, tail = text.partition(_TRACEBACK_HEADER)
+        return head.replace("\r\n", " ").replace("\n", " ").rstrip() + ("\n" + marker + tail if marker else "")
+
+
 def start_listener(
     log_queue: mp.Queue[Any],
     log_file: Path,
@@ -102,7 +121,7 @@ def start_listener(
     # display.
     handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
     handler.setLevel(level)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+    handler.setFormatter(_SingleLineFormatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
     listener = logging.handlers.QueueListener(
         log_queue,
         handler,
