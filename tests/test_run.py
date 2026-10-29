@@ -13,6 +13,7 @@ import pytest
 from piidigger.models.config import Config, ResultsConfig
 from piidigger.orchestration.coordinator import CoordinatorResult
 from piidigger.orchestration.pool import WorkerPool
+from piidigger.orchestration.progress import ProgressDisplay
 from piidigger.outputhandlers import TextSink
 from piidigger.outputhandlers.json import JsonSink
 from piidigger.run import (
@@ -21,6 +22,7 @@ from piidigger.run import (
     EXIT_INTERRUPTED,
     EXIT_OK,
     _build_sinks,
+    _emit_startup_info,
     _is_broad_folder,
     _output_exclusions,
     _remove_temp_workspace,
@@ -615,3 +617,20 @@ def test_run_scan_stops_started_workers_when_startup_fails(tmp_path: Path, monke
 
     assert pools and pools[0].processes, "the pool started workers"
     assert all(not proc.is_alive() for proc in pools[0].processes)
+
+
+@pytest.mark.unit
+def test_startup_panel_shows_windows_drive_roots_intact() -> None:
+    """A start dir ending in a backslash must not escape the closing [/cyan] tag."""
+    from rich.console import Console
+
+    progress = ProgressDisplay()
+    config = Config(start_dirs=["C:\\", "D:\\"])
+
+    _emit_startup_info(progress, logging.getLogger("tests.startup"), config, 4, wake_mode=None)
+
+    console = Console(width=200, color_system=None)
+    with console.capture() as captured:
+        console.print(progress._build_config_panel())
+    assert "Scan directories: C:\\, D:\\ " in captured.get()
+    assert "[/cyan]" not in captured.get()

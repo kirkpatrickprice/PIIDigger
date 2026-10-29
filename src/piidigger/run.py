@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+from rich.markup import escape
 from wakepy import keep
 
 from piidigger.models.config import Config
@@ -79,7 +80,7 @@ def _prompt_admin_continue(timeout: int = _ADMIN_PROMPT_TIMEOUT) -> bool:
     def _read() -> None:
         try:
             result[0] = sys.stdin.readline().strip()
-        except (EOFError, OSError):
+        except EOFError, OSError:
             pass
         ev.set()
 
@@ -136,7 +137,9 @@ def _emit_startup_info(
     ]
     display_entries = [
         f"[bold white]Performance:[/bold white] [cyan]{config.performance} — {worker_count} worker process{plural}[/cyan]",
-        f"[bold white]Scan directories:[/bold white] [cyan]{dirs}[/cyan]",
+        # Escaped: a path ending in a backslash (C:\) would otherwise escape
+        # the closing tag, and a "[" in a path would be read as markup.
+        f"[bold white]Scan directories:[/bold white] [cyan]{escape(dirs)}[/cyan]",
         f"[bold white]Sleep prevention:[/bold white] {sleep_markup}",
         "Press CTRL-C to terminate the scan",
     ]

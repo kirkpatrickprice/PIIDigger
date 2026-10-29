@@ -157,7 +157,9 @@ class ProgressDisplay:
         table.add_column("Event", ratio=1, no_wrap=True, overflow="ellipsis")
         for level, message in self._visible_events():
             color = {"ERROR": "red", "WARNING": "yellow", "INFO": "green"}.get(level.upper(), "white")
-            table.add_row(f"[{color}]{level}[/{color}]", message)
+            # Text, not a str: a message is plain text (often a path), and a
+            # str cell is parsed as markup, so "\[" or "[draft]" would be mangled.
+            table.add_row(f"[{color}]{level}[/{color}]", Text(message))
         return table
 
     def _visible_events(self) -> list[tuple[str, str]]:

@@ -192,3 +192,25 @@ def test_workers_failing_to_start_is_not_reported_as_complete(
     first, second = capsys.readouterr().out.splitlines()
     assert first.startswith("Scan stopped early: workers could not start.")
     assert "2 abandoned after crashing a worker" in second
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Error: C:\\data\\[draft] notes.txt — bad",  # backslash before "[" would escape it
+        "Error: /home/a/[draft] notes.txt — bad",  # bracketed word would be read as a style tag
+        "Access denied: D:\\Users\\x\\",
+    ],
+)
+def test_events_panel_shows_messages_literally(message: str) -> None:
+    """Event messages are plain text (usually paths), never markup."""
+    from rich.console import Console
+
+    display = ProgressDisplay()
+    display.log_event("ERROR", message)
+
+    console = Console(width=200, color_system=None)
+    with console.capture() as captured:
+        console.print(display._build_events_table())
+    assert message in captured.get()
