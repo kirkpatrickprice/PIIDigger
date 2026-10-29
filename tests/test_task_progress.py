@@ -159,7 +159,7 @@ def test_batch_result_counts_unreported_members_as_failed() -> None:
 @pytest.mark.unit
 def test_a_read_at_end_of_file_is_not_progress(tmp_path: Path) -> None:
     """A decoder spinning at EOF reads 0 bytes; that must not keep its task alive."""
-    from piidigger.archivehandlers._progress_io import _ProgressRaw
+    from piidigger._progress_io import _ProgressRaw
 
     path = tmp_path / "data.bin"
     path.write_bytes(b"0123456789")

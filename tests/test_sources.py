@@ -66,3 +66,15 @@ class TestFilesystemItem:
         f.write_bytes(b"x")
         item = FilesystemItem(f)
         assert item.materialize() == f
+
+    def test_open_stream_reports_each_read_that_returns_data(self, tmp_path):
+        f = tmp_path / "big.dat"
+        f.write_bytes(b"x" * 10)
+        calls: list[int] = []
+        stream = FilesystemItem(f, on_progress=lambda: calls.append(1)).open_stream()
+        try:
+            assert stream.read() == b"x" * 10
+            assert stream.read() == b"", "a read at end of file"
+        finally:
+            stream.close()
+        assert calls == [1], "only the read that returned data counts as progress"

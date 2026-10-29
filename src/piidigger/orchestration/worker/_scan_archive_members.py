@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -95,7 +96,7 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             failed(member, f"extracted path {path} is outside the task folder")
             return
         try:
-            findings, counters = _scan_member(member, path, payload, ctx.config, enabled_handlers)
+            findings, counters = _scan_member(member, path, payload, ctx.config, enabled_handlers, reporter.alive)
         except UndetectableEncodingError as exc:
             # As in handle_scan_file: logged, counted as scanned, not a failure.
             discard(member, path)
@@ -150,8 +151,13 @@ def _scan_member(
     payload: ScanArchiveMembersPayload,
     config: Config,
     enabled_handlers: list[DataHandler],
+    on_progress: Callable[[], None],
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Run the file handler and data handlers over one extracted member.
+
+    on_progress is called on every read of the extracted file and after each
+    piece of content, as in handle_scan_file, so a large member keeps its batch
+    alive.
 
     Returns the member's findings (one ResultRecord dict per data handler that
     matched) and its counters.  Raises on any reader error; the caller reports
@@ -166,10 +172,13 @@ def _scan_member(
         raise ValueError(f"no file handler for ext={ext!r}")
 
     size = path.stat().st_size
-    item = FilesystemItem(path, mime=None, archive_path=payload.archive_path, member_path=member)
+    item = FilesystemItem(
+        path, mime=None, archive_path=payload.archive_path, member_path=member, on_progress=on_progress
+    )
 
     per_handler: dict[str, dict[str, set[str]]] = {}
     for content in file_handler.read(item, config):
+        on_progress()
         if not content:
             continue
         for dh in enabled_handlers:

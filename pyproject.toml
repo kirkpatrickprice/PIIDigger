@@ -143,6 +143,7 @@ ignore_errors = true
 module = [
     "piidigger.orchestration.*",
     "piidigger.archivehandlers.*",
+    "piidigger._progress_io",
 ]
 strict = true
 enable_error_code = ["no-untyped-call"]

@@ -10,6 +10,7 @@ from piidigger.models.results import ResultRecord
 from piidigger.models.tasks import Task, TaskResult
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.sources import FilesystemItem
+from piidigger.orchestration.worker._reporter import ProgressReporter
 
 
 def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
@@ -35,7 +36,12 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
     else:
         enabled_handlers = [HANDLER_REGISTRY[name] for name in ctx.config.data_handlers if name in HANDLER_REGISTRY]
 
-    item = FilesystemItem(payload.file_path, mime=payload.mime)
+    # A large file can take longer than the task deadline.  Two signals keep it
+    # alive without any file handler knowing: reads from disk through
+    # open_stream(), and each piece of content the handler yields (for handlers
+    # that read via materialize()).  A handler stuck with neither still times out.
+    reporter = ProgressReporter(ctx.result_queue.put, task.task_id)
+    item = FilesystemItem(payload.file_path, mime=payload.mime, on_progress=reporter.alive)
 
     # Aggregate matches per data-handler across all content pieces to produce one
     # ResultRecord per (file, handler) pair.
@@ -43,6 +49,7 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
 
     try:
         for content in file_handler.read(item, ctx.config):
+            reporter.alive()
             if not content:
                 continue
             for dh in enabled_handlers:

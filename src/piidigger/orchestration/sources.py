@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import IO
+
+from piidigger._progress_io import open_with_progress
 
 
 class FilesystemItem:
@@ -16,8 +19,10 @@ class FilesystemItem:
     original archive context rather than the temp file path.
 
     materialize() returns the path itself — no temp copy needed for on-disk files.
-    open_stream() returns an unbuffered binary file handle; the caller is
-    responsible for closing it.
+    open_stream() returns a buffered, seekable binary file handle; the caller is
+    responsible for closing it.  When on_progress is given, every read from disk
+    that returns data calls it, so a handler that reads a large file slowly
+    keeps its task alive without knowing about progress at all.
     open_bytes() returns None — signals binary handlers to use the materialize()
     path, which avoids loading large files fully into memory.
     """
@@ -29,11 +34,13 @@ class FilesystemItem:
         *,
         archive_path: Path | None = None,
         member_path: str | None = None,
+        on_progress: Callable[[], None] | None = None,
     ) -> None:
         self._path = path
         self._mime = mime
         self._archive_path = archive_path
         self._member_path = member_path
+        self._on_progress = on_progress
 
     @property
     def display_path(self) -> str:
@@ -58,7 +65,7 @@ class FilesystemItem:
         return 0
 
     def open_stream(self) -> IO[bytes]:
-        return open(self._path, "rb")  # noqa: WPS515 — caller owns the close
+        return open_with_progress(self._path, self._on_progress)  # caller owns the close
 
     def open_bytes(self) -> bytes | None:
         return None

@@ -1,10 +1,14 @@
-"""A read-only archive file that reports each read, so long decompression keeps a task alive.
+"""A read-only file that reports each read, so a long read keeps its task alive.
 
 Archive readers (tarfile, py7zr, zipfile) pull compressed bytes through this
-wrapper.  Every read calls on_progress(), which the worker turns into a
-rate-limited TaskProgress "alive" message.  The signal is honest: it fires only
-while bytes are actually being read.  A reader stuck inside a decoder reads
+wrapper, and so do file handlers that read through FilesystemItem.open_stream()
+(pypdf, openpyxl).  Every read calls on_progress(), which the worker turns into
+a rate-limited TaskProgress "alive" message.  The signal is honest: it fires
+only while bytes are actually being read.  A reader stuck inside a decoder reads
 nothing, sends nothing, and still trips the task deadline.
+
+It lives at the package root because both archivehandlers and orchestration
+use it, and archivehandlers must not import orchestration.
 """
 
 from __future__ import annotations

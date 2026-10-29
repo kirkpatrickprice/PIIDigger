@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile, ZipInfo
 
-from piidigger.archivehandlers._progress_io import open_with_progress
+from piidigger._progress_io import open_with_progress
 from piidigger.exceptions import ArchiveReadError
 from piidigger.models.archive import MemberInfo
 

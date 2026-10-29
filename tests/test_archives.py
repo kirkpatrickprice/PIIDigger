@@ -1799,7 +1799,7 @@ def test_tar_gz_batches_read_the_archive_a_bounded_number_of_times(
     times here.  The members are random bytes, so the archive is as large as
     its content and several times the reader's 1 MiB buffer.
     """
-    from piidigger.archivehandlers import _progress_io
+    from piidigger import _progress_io
     from piidigger.orchestration.worker._enum_archive import split_into_batches
 
     members = {f"m{i:03d}.txt": os.urandom(20_000) for i in range(400)}
@@ -2168,7 +2168,7 @@ def test_open_with_progress_on_unreadable_file_leaves_no_unraisable_error(
     import gc
     import sys
 
-    from piidigger.archivehandlers._progress_io import open_with_progress
+    from piidigger._progress_io import open_with_progress
 
     unraisable: list[Any] = []
     monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
@@ -2229,3 +2229,19 @@ def test_scan_archive_member_with_undetectable_encoding_is_counted_not_failed(tm
     assert result.done[0].counters == {"files_scanned": 1}
     assert "tasks_failed" not in result.counters
     assert result.findings[0]["source_member_path"] == "after.txt"
+
+
+@pytest.mark.unit
+def test_scan_member_reports_progress_while_reading(tmp_path: Path) -> None:
+    """An extracted member keeps its batch alive by being read, as a file on disk does."""
+    from piidigger.models.payloads import ScanArchiveMembersPayload
+    from piidigger.orchestration.worker._scan_archive_members import _scan_member
+
+    path = tmp_path / "m.pdf"
+    path.write_bytes(Path("testdata/pan/sample-pans.pdf").read_bytes())
+    payload = ScanArchiveMembersPayload(archive_path=tmp_path / "a.zip", archive_type="zip")
+    calls: list[int] = []
+
+    _scan_member("m.pdf", path, payload, Config(start_dirs=[]), [], lambda: calls.append(1))
+
+    assert calls, "on_progress was never called"

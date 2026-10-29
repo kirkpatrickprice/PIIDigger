@@ -542,3 +542,64 @@ def test_scan_file_error_message_names_the_exception_type(tmp_path: Path) -> Non
 
     assert result.status == "error"
     assert result.error_message == "KeyError: '7'"
+
+
+# ---------------------------------------------------------------------------
+# handle_scan_file: progress keeps a long scan alive
+# ---------------------------------------------------------------------------
+
+
+class _ListQueue:
+    """Stands in for result_queue so the TaskProgress messages can be read back at once."""
+
+    def __init__(self) -> None:
+        self.items: list[object] = []
+
+    def put(self, item: object) -> None:
+        self.items.append(item)
+
+
+def _alive_count(ctx: WorkerContext) -> int:
+    return sum(1 for m in ctx.result_queue.items if isinstance(m, TaskProgress) and m.event == "alive")  # type: ignore[attr-defined]
+
+
+def _scan_with_handler(tmp_path: Path, handler: object, monkeypatch: pytest.MonkeyPatch) -> WorkerContext:
+    """Run handle_scan_file with a stand-in file handler and no rate limit on alive()."""
+    from piidigger.orchestration.worker import _scan_file as scan_mod
+    from piidigger.orchestration.worker._reporter import ProgressReporter
+
+    monkeypatch.setattr(scan_mod, "ProgressReporter", functools.partial(ProgressReporter, alive_interval=0.0))
+    f = tmp_path / "big.txt"
+    f.write_bytes(b"x" * 4096)
+    ctx = dataclasses.replace(_make_ctx(tmp_path), result_queue=_ListQueue())  # type: ignore[arg-type]
+    with unittest.mock.patch("piidigger.filehandlers.get_handler_for", return_value=handler):
+        result = handle_scan_file(_scan_file_task(f), ctx, _logger())
+    assert result.status == "ok"
+    return ctx
+
+
+@pytest.mark.unit
+def test_scan_file_reads_through_open_stream_report_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A handler that only reads (pypdf, openpyxl) keeps its task alive without knowing about progress."""
+
+    class _Reader:
+        def read(self, source, config):  # noqa: ANN001, ANN202
+            with source.open_stream() as stream:
+                while stream.read(512):
+                    pass
+            return iter(())
+
+    ctx = _scan_with_handler(tmp_path, _Reader(), monkeypatch)
+    assert _alive_count(ctx) >= 1
+
+
+@pytest.mark.unit
+def test_scan_file_each_content_piece_reports_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A handler that reads via materialize() still keeps its task alive by yielding content."""
+
+    class _Yielder:
+        def read(self, source, config):  # noqa: ANN001, ANN202
+            yield from ["one", "", "three"]
+
+    ctx = _scan_with_handler(tmp_path, _Yielder(), monkeypatch)
+    assert _alive_count(ctx) == 3, "every piece counts, empty ones included"
