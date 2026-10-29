@@ -53,16 +53,22 @@ jobs:
         shell: bash
         run: echo "tag=${{ github.event.release.tag_name || 'dev' }}" >> "$GITHUB_OUTPUT"
 
+      # .python-version pins only major.minor; check-latest resolves it to the
+      # newest patch release instead of whatever the runner image has cached.
+      # The resolved version is reused for the embedded Python download so the
+      # venv's compiled packages match the bundled interpreter exactly.
       - uses: actions/setup-python@v7
+        id: setup-python
         with:
           python-version-file: .python-version
+          check-latest: true
 
       - name: Install and build
         run: |
           python -m venv .venv
           .venv\Scripts\activate
           pip install -e .[win]
-          .\build_windows_embedded.ps1 -arch amd64 -pyVersion 3.14.0 -venv .venv
+          .\build_windows_embedded.ps1 -arch amd64 -pyVersion ${{ steps.setup-python.outputs.python-version }} -venv .venv
 
       - name: Package artifact
         shell: pwsh

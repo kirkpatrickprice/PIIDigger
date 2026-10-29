@@ -13,6 +13,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).absolute().parent / "src"))
 
+# Embedded Python skips site, so pywin32.pth never runs its bootstrap.  Without it, win32api
+# can't find the pywin32_system32 DLLs and placeholder-file detection in _enum_dir silently
+# turns off.  Module level so spawned worker processes get it too.
+if sys.platform == "win32":
+    import pywin32_bootstrap  # noqa: F401
+
 if __name__ == "__main__":
     freeze_support()
     from piidigger.cli.main import cli
