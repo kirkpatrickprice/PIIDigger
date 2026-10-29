@@ -384,21 +384,26 @@ def test_cloud_placeholder_check_skips_win32api_off_windows(monkeypatch: pytest.
     fake.GetFileAttributes.side_effect = lambda p: consulted.append(p) or 0x400000
     monkeypatch.setitem(sys.modules, "win32api", fake)
     monkeypatch.setattr(os, "name", "posix")
+    # Linux, not just "not Windows": macOS has its own placeholder checks.
+    monkeypatch.setattr(sys, "platform", "linux")
 
     assert _is_cloud_placeholder(tmp_path) is False
     assert consulted == []
 
 
 class _StatStub:
-    def __init__(self, flags: int | None, *, size: int = 10, blocks: int = 8) -> None:
+    def __init__(self, flags: int | None, *, size: int = 10, blocks: int = 8, mode: int = stat.S_IFREG) -> None:
         self._flags = flags
         self._size = size
         self._blocks = blocks
+        self._mode = mode
 
     def stat(self, *, follow_symlinks: bool = True) -> object:
         if self._flags is None:
             raise OSError("gone")
-        return types.SimpleNamespace(st_flags=self._flags, st_size=self._size, st_blocks=self._blocks)
+        return types.SimpleNamespace(
+            st_flags=self._flags, st_size=self._size, st_blocks=self._blocks, st_mode=self._mode
+        )
 
 
 @pytest.mark.unit
@@ -434,6 +439,17 @@ def test_cloud_placeholder_on_macos_treats_unallocated_files_as_placeholders(
     monkeypatch.setattr(sys, "platform", "darwin")
 
     assert _is_cloud_placeholder(_StatStub(flags, size=size, blocks=blocks)) is expected  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_cloud_placeholder_on_macos_ignores_directories(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An APFS directory reports a size but no blocks; it is not a sparse placeholder."""
+    from piidigger.orchestration.worker._enum_dir import _is_cloud_placeholder
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    directory = _StatStub(0, size=64, blocks=0, mode=stat.S_IFDIR)
+
+    assert _is_cloud_placeholder(directory) is False  # type: ignore[arg-type]
 
 
 @pytest.mark.unit

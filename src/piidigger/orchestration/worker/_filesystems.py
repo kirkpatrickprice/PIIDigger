@@ -100,6 +100,10 @@ def _darwin_is_remote(path: str) -> bool:
 
 def _linux_fstype(st_dev: int) -> str:
     """fstype of the mount whose device is st_dev, from /proc/self/mountinfo, or ''."""
+    # Only ever called on Linux.  The check tells mypy so: os.major and
+    # os.minor do not exist on Windows, and mypy checks the body on every platform.
+    if sys.platform == "win32":
+        return ""
     wanted = f"{os.major(st_dev)}:{os.minor(st_dev)}"
     with open("/proc/self/mountinfo", encoding="utf-8", errors="replace") as fh:
         for line in fh:

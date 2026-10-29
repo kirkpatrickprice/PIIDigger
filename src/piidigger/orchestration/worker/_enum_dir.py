@@ -129,6 +129,10 @@ def _is_cloud_placeholder(path: Path) -> bool:
             st = path.stat(follow_symlinks=False)
         except OSError:
             return False
+        # Regular files only.  An APFS directory reports a size but no blocks,
+        # so the sparse-file rule below would call it a placeholder.
+        if not stat.S_ISREG(st.st_mode):
+            return False
         if st.st_flags & stat.SF_DATALESS:
             return True
         return st.st_size > 0 and st.st_blocks == 0 and not (st.st_flags & stat.UF_COMPRESSED)
