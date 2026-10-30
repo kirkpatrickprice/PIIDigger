@@ -123,7 +123,8 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             on_progress=reporter.alive,
         )
     except ArchiveReadError as exc:
-        logger.error("error reading archive %s: %s", payload.archive_path, exc)
+        # The coordinator logs the failure; this line only adds the traceback.
+        logger.debug("error reading archive %s: %s", payload.archive_path, exc, exc_info=True)
         return TaskResult(
             task_id=task.task_id,
             task_type=task.task_type,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import logging
 import sys
 import time
 from dataclasses import dataclass
@@ -81,8 +82,7 @@ class IncompleteWork:
 def describe_incomplete(work: IncompleteWork) -> str | None:
     """What was not scanned and why, in plain language, or None if nothing.
 
-    Shared by the on-screen summary and the coordinator's log line, so the two
-    always agree.
+    Used by ProgressDisplay.summary_lines() for the "Not fully scanned" line.
     """
     if not work.total:
         return None
@@ -98,11 +98,11 @@ def describe_incomplete(work: IncompleteWork) -> str | None:
     return f"{work.total:,} {noun} skipped — {detail}"
 
 
-def _incomplete_summary(work: IncompleteWork) -> str | None:
-    """One plain-language line naming what was not scanned, or None if nothing."""
-    if (description := describe_incomplete(work)) is None:
-        return None
-    return f"Not fully scanned: {description}. See the log for details."
+def _fmt_duration(seconds: float) -> str:
+    """Format a duration in seconds as H:MM:SS, for the end-of-scan summary."""
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}"
 
 
 def _fmt_eta(seconds: float) -> str:
@@ -157,6 +157,9 @@ class ProgressDisplay:
         # Results files that stopped receiving findings, as (label, error).
         self._output_failures: list[tuple[str, str]] = []
         self._scan_start: float = time.monotonic()
+        # Set by the first summary_lines() call, so the log and the screen
+        # report the same run time.
+        self._scan_end: float | None = None
 
         self._bars: Progress | None = None
         self._text: Progress | None = None
@@ -406,21 +409,21 @@ class ProgressDisplay:
             unfinished=self._unfinished,
         )
 
-    def stop(self, *, summary: bool = True) -> None:
-        """Close the rich.Live display and print a plain-text summary to stdout.
+    def summary_lines(self, *, for_log: bool = False) -> list[tuple[int, str]]:
+        """The end-of-scan summary, as (logging level, text) pairs.
 
-        The first line gives the totals.  A second line appears only when some
-        work did not complete, so a partial scan cannot be mistaken for a full
-        one.
+        stop() prints these, and the coordinator logs them before the log
+        listener stops, so the screen and the log cannot drift apart.
 
-        Pass summary=False when the scan failed before it began.  Any summary
-        would then claim a scan that never ran.
+        The first line gives the totals and the run time.  A second line
+        appears only when some work did not complete, so a partial scan cannot
+        be mistaken for a full one.  Then one line per results file that failed.
+
+        for_log leaves out the screen's "See the log for details." pointers.
         """
-        live = self._live
-        if self._is_tty and live is not None:
-            live.stop()
-        if not summary:
-            return
+        if self._scan_end is None:
+            self._scan_end = time.monotonic()
+        see_log = "" if for_log else " See the log for details."
 
         parts = []
         for k, v in self._counters.items():
@@ -437,15 +440,31 @@ class ProgressDisplay:
             heading = "Scan stopped early."
         else:
             heading = "Scan complete."
-        lines = [f"{heading} " + ("  ".join(parts) if parts else "No results.")]
-        if (detail := _incomplete_summary(incomplete)) is not None:
-            lines.append(detail)
+        totals = "  ".join(parts) if parts else "No results."
+        run_time = _fmt_duration(self._scan_end - self._scan_start)
+        level = logging.INFO if heading == "Scan complete." else logging.WARNING
+        lines = [(level, f"{heading} {totals}  run_time={run_time}")]
+        if (detail := describe_incomplete(incomplete)) is not None:
+            lines.append((logging.WARNING, f"Not fully scanned: {detail}.{see_log}"))
         lines.extend(
-            f"Results incomplete: {label} stopped after an error ({error}). See the log for details."
+            (logging.WARNING, f"Results incomplete: {label} stopped after an error ({error}).{see_log}")
             for label, error in self._output_failures
         )
+        return lines
 
-        for line in lines:
+    def stop(self, *, summary: bool = True) -> None:
+        """Close the rich.Live display and print the summary_lines() to stdout.
+
+        Pass summary=False when the scan failed before it began.  Any summary
+        would then claim a scan that never ran.
+        """
+        live = self._live
+        if self._is_tty and live is not None:
+            live.stop()
+        if not summary:
+            return
+
+        for _, line in self.summary_lines():
             if self._is_tty:
                 self._console.print(line)
             else:

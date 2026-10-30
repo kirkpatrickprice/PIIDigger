@@ -13,6 +13,7 @@ from piidigger.models.payloads import EnumDirPayload
 from piidigger.models.tasks import Task, TaskResult, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.worker._filesystems import is_remote_filesystem
+from piidigger.orchestration.worker._removed import was_removed
 from piidigger.orchestration.worker._reporter import ProgressReporter
 
 # Attempts at listing a directory when a signal interrupts the read (EINTR).
@@ -189,7 +190,33 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
             counters={"dirs_scanned": 1},
             worker_pid=os.getpid(),
         )
-    except (OSError, FileNotFoundError) as exc:
+    except FileNotFoundError as exc:
+        # A start directory that does not exist is a configuration error, and
+        # one that cannot be reached (a path too long on Windows) is a failure.
+        # Only a folder that really was removed after it was listed is not.
+        # payload.depth cannot tell a start directory apart: it is the archive
+        # nesting depth, 0 for everything on disk.
+        if path in ctx.config.start_dirs or not was_removed(path):
+            logger.debug("cannot list %s: %s", path, exc)
+            return TaskResult(
+                task_id=task.task_id,
+                task_type=task.task_type,
+                status="error",
+                error_message=str(exc),
+                counters={"dirs_scanned": 1},
+                worker_pid=os.getpid(),
+            )
+        # Removed after its parent was listed, e.g. by a software update: there
+        # is nothing to scan, and it is not a failure.
+        logger.info("skipping %s: folder no longer exists (removed after it was listed)", path)
+        return TaskResult(
+            task_id=task.task_id,
+            task_type=task.task_type,
+            status="ok",
+            counters={"dirs_scanned": 1},
+            worker_pid=os.getpid(),
+        )
+    except OSError as exc:
         logger.debug("cannot list %s: %s", path, exc)
         return TaskResult(
             task_id=task.task_id,

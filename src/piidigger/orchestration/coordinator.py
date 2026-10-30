@@ -18,7 +18,7 @@ from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.feeder import TaskFeeder
 from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
 from piidigger.orchestration.pool import WorkerPool, spawn_worker
-from piidigger.orchestration.progress import ProgressDisplay, describe_incomplete
+from piidigger.orchestration.progress import ProgressDisplay
 from piidigger.orchestration.registry import AbandonReason, TaskRecord, TaskRegistry
 from piidigger.orchestration.sinks import GuardedSink
 from piidigger.orchestration.worker import broadcast_shutdown
@@ -533,8 +533,6 @@ def run_coordinator(
         )
         # Logged before teardown, which stops the listener: a record put on
         # the log queue after that never reaches the log file.
-        if (skipped := describe_incomplete(progress.incomplete)) is not None:
-            logger.warning("Not fully scanned: %s", skipped)
         unfinished = len(registry)
         if unfinished and not interrupted:
             logger.error("coordinator exited with %d task(s) still outstanding", unfinished)
@@ -659,13 +657,7 @@ def _requeue_failed_batch(
         return False
     member = f"{path}::{culprit}"
     msg = result.error_message or "(no message)"
-    logger.error(
-        "[%s] %r failed: %s; re-queuing the %d member(s) left in the batch",
-        result.task_type.value,
-        member,
-        msg,
-        len(record.remaining),
-    )
+    logger.error("[%s] %r failed: %s%s", result.task_type.value, member, msg, _requeue_clause(record))
     progress.log_event("ERROR", f"Error: {_truncate_path(member)} — {_short_error(msg)}")
     update = {"files_scanned": 1, "tasks_failed": 1, "tasks_pending": len(registry)}
     if result.task_id not in registry:
@@ -765,6 +757,12 @@ def _handle_result(
     progress.update(update)
 
 
+def _requeue_clause(record: TaskRecord) -> str:
+    """The "re-queuing" tail of a batch log line, or nothing when no members are left."""
+    remaining = len(record.remaining)
+    return f"; re-queuing the {remaining:,} member(s) left in the batch" if remaining else ""
+
+
 def _report_sweep(
     sweep: SweepResult,
     registry: TaskRegistry,
@@ -777,19 +775,22 @@ def _report_sweep(
 
     for record in sweep.timed_out:
         task_type = record.task.task_type.value
-        timeout = record.task.timeout_seconds
-        elapsed = sweep.now - record.started_at if record.started_at is not None else 0.0
+        last_sign_of_life = record.last_sign_of_life
+        quiet = sweep.now - last_sign_of_life if last_sign_of_life is not None else 0.0
         logger.warning(
-            "deadline exceeded: type=%s path=%r pid=%s elapsed=%.1fs timeout=%ds; stopping and replacing the worker",
+            "deadline exceeded: type=%s path=%r pid=%s no progress for %.1fs (deadline %ds = %d×%ds timeout); "
+            "stopping and replacing the worker",
             task_type,
             _task_path(record.task),
             record.worker_pid,
-            elapsed,
-            timeout,
+            quiet,
+            record.deadline_span,
+            record.deadline_span // record.task.timeout_seconds,
+            record.task.timeout_seconds,
         )
         progress.log_event(
             "WARNING",
-            f"Timeout [{task_type}] {_label(record)} — pid={record.worker_pid}, {elapsed:.0f}s/{timeout}s",
+            f"Timeout [{task_type}] {_label(record)} — pid={record.worker_pid}, no progress for {quiet:.0f}s",
         )
 
     limit_mb = (sweep.memory_limit_bytes or 0) // _MB
@@ -821,12 +822,12 @@ def _report_sweep(
         what = _SKIP_REASON_TEXT[skip.reason]
         member = f"{_task_path(skip.record.task)}::{skip.item}"
         logger.warning(
-            "[%s] skipping %r: its worker (pid=%s) %s on it; re-queuing the %d member(s) left in the batch",
+            "[%s] skipping %r: its worker (pid=%s) %s on it%s",
             skip.record.task.task_type.value,
             member,
             skip.worker_pid,
             what,
-            len(skip.record.remaining),
+            _requeue_clause(skip.record),
         )
         progress.log_event("WARNING", f"Skipped {_truncate_path(member)} — worker {_SKIP_EVENT_TEXT[skip.reason]}")
 
@@ -964,6 +965,10 @@ def _teardown(
         if interrupted:
             progress.log_event("INFO", "Saving results to output files…")
         _flush_sinks(sinks, logger)
+        # After the flush, so a results file that fails while closing is in
+        # the summary; before the listener stops, so the summary reaches the log.
+        for level, line in progress.summary_lines(for_log=True):
+            logger.log(level, line)
         listener_stopped = stop_listener(listener)
 
     except KeyboardInterrupt:

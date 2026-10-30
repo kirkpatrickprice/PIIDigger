@@ -10,6 +10,7 @@ from piidigger.models.results import ResultRecord
 from piidigger.models.tasks import Task, TaskResult
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.sources import FilesystemItem
+from piidigger.orchestration.worker._removed import was_removed
 from piidigger.orchestration.worker._reporter import ProgressReporter
 
 
@@ -70,6 +71,18 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
             worker_pid=os.getpid(),
         )
     except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, FileNotFoundError) and was_removed(payload.file_path):
+            # Removed after its folder was listed, e.g. by a software update:
+            # there is nothing to scan, and it is not a failure.  Counted like
+            # the encoding skip above, so the progress totals still add up.
+            logger.info("skipping %s: file no longer exists (removed after it was listed)", payload.display_path)
+            return TaskResult(
+                task_id=task.task_id,
+                task_type=task.task_type,
+                status="ok",
+                counters={"files_scanned": 1, "bytes_scanned": payload.size},
+                worker_pid=os.getpid(),
+            )
         # The coordinator logs the failure; this line only adds the traceback.
         logger.debug("error reading %s", payload.display_path, exc_info=True)
         return TaskResult(

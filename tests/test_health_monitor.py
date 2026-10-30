@@ -115,6 +115,42 @@ def test_expired_task_is_abandoned_and_its_worker_replaced() -> None:
 
 
 @pytest.mark.unit
+def test_deadline_log_line_reports_the_quiet_time_and_the_real_deadline(caplog: pytest.LogCaptureFixture) -> None:
+    """Measured from the last sign of life, not the start, and the 2× factor is spelled out."""
+    from piidigger.orchestration.coordinator import _report_sweep
+    from piidigger.orchestration.progress import ProgressDisplay
+
+    h = Harness()
+    worker = h.worker(0)
+    assert worker.pid is not None
+    task = h.run(worker, timeout=30)
+    h.clock.advance(28.0)
+    h.registry.record_progress(task.task_id, worker.pid, "alive", None)
+    h.clock.advance(60.5)
+
+    sweep = h.monitor.tick()
+    with caplog.at_level(logging.WARNING, logger=_LOG.name):
+        _report_sweep(sweep, h.registry, ProgressDisplay(), _LOG)
+
+    [line] = [r.getMessage() for r in caplog.records if "deadline exceeded" in r.getMessage()]
+    assert "no progress for 60.5s (deadline 60s = 2×30s timeout)" in line
+    assert "elapsed" not in line
+
+
+@pytest.mark.unit
+def test_requeue_clause_is_left_out_when_no_members_remain() -> None:
+    from piidigger.orchestration.coordinator import _requeue_clause
+    from piidigger.orchestration.registry import TaskRecord
+
+    task = Task(task_type=TaskType.SCAN_ARCHIVE_MEMBERS, items=["a.txt", "b.txt"])
+    record = TaskRecord(task=task, enqueued_at=0.0, remaining={"a.txt": None, "b.txt": None})
+
+    assert _requeue_clause(record) == "; re-queuing the 2 member(s) left in the batch"
+    record.remaining.clear()
+    assert _requeue_clause(record) == "", "never 're-queuing the 0 member(s)'"
+
+
+@pytest.mark.unit
 def test_timeouts_are_not_retried() -> None:
     """A task that hung once will most likely hang again, so it is not re-queued."""
     h = Harness()

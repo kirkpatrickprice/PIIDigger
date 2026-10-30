@@ -103,10 +103,21 @@ class TaskRecord:
         batch that keeps finishing members never times out, while one that goes
         quiet times out exactly as a single-file task does.
         """
+        if (last_sign_of_life := self.last_sign_of_life) is None:
+            return None
+        return last_sign_of_life + self.deadline_span
+
+    @property
+    def last_sign_of_life(self) -> float | None:
+        """Monotonic time of the task's start or its last TaskProgress, whichever is later; None if QUEUED."""
         if self.started_at is None:
             return None
-        last_sign_of_life = max(self.started_at, self.last_progress_at or self.started_at)
-        return last_sign_of_life + _DEADLINE_FACTOR * self.task.timeout_seconds
+        return max(self.started_at, self.last_progress_at or self.started_at)
+
+    @property
+    def deadline_span(self) -> int:
+        """Seconds a running task may go without a sign of life before it counts as hung."""
+        return _DEADLINE_FACTOR * self.task.timeout_seconds
 
     @property
     def units(self) -> int:

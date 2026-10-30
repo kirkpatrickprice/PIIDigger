@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
-from piidigger.orchestration.progress import IncompleteWork, ProgressDisplay, _incomplete_summary
+from piidigger.orchestration.progress import IncompleteWork, ProgressDisplay, _fmt_duration, describe_incomplete
 
 
 @pytest.mark.unit
@@ -160,9 +162,13 @@ def test_unfinished_work_without_interrupt_says_stopped_early(
 
 
 @pytest.mark.unit
-def test_incomplete_summary_uses_singular_for_one_item() -> None:
-    assert _incomplete_summary(IncompleteWork(timed_out=1)) == (
-        "Not fully scanned: 1 file or folder was skipped — 1 timed out. See the log for details."
+def test_incomplete_summary_uses_singular_for_one_item(monkeypatch: pytest.MonkeyPatch) -> None:
+    display = _non_tty(monkeypatch)
+    display.report_incomplete(timed_out=1, abandoned=0, unfinished=0, interrupted=False)
+
+    assert display.summary_lines()[1] == (
+        logging.WARNING,
+        "Not fully scanned: 1 file or folder was skipped — 1 timed out. See the log for details.",
     )
 
 
@@ -183,8 +189,63 @@ def test_files_over_the_memory_limit_are_reported_as_not_scanned(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("seconds", "expected"), [(0, "0:00:00"), (59.9, "0:00:59"), (3725, "1:02:05"), (90061, "25:01:01")]
+)
+def test_fmt_duration(seconds: float, expected: str) -> None:
+    assert _fmt_duration(seconds) == expected
+
+
+@pytest.mark.unit
+def test_summary_reports_the_run_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    import piidigger.orchestration.progress as progress_mod
+
+    clock = iter([100.0, 100.0 + 3725.0, 999_999.0])
+    monkeypatch.setattr(progress_mod.time, "monotonic", lambda: next(clock))
+    display = _non_tty(monkeypatch)
+    display.update({"files_scanned": 3})
+
+    first = display.summary_lines()
+    again = display.summary_lines()
+
+    assert first == [(logging.INFO, "Scan complete. files_scanned=3  run_time=1:02:05")]
+    assert again == first, "the run time is fixed at the first call, so the log and the screen agree"
+
+
+@pytest.mark.unit
+def test_summary_lines_for_the_log_drop_the_pointer_to_the_log(monkeypatch: pytest.MonkeyPatch) -> None:
+    display = _non_tty(monkeypatch)
+    display.update({"tasks_failed": 1})
+    display.report_incomplete(timed_out=0, abandoned=0, over_memory=0, unfinished=0, interrupted=False)
+    display.report_output_failure("results.csv", "disk full")
+
+    screen = display.summary_lines()
+    log = display.summary_lines(for_log=True)
+
+    assert [text for _, text in screen][1:] == [
+        "Not fully scanned: 1 file or folder was skipped — 1 failed with an error. See the log for details.",
+        "Results incomplete: results.csv stopped after an error (disk full). See the log for details.",
+    ]
+    assert log[1:] == [
+        (logging.WARNING, "Not fully scanned: 1 file or folder was skipped — 1 failed with an error."),
+        (logging.WARNING, "Results incomplete: results.csv stopped after an error (disk full)."),
+    ]
+
+
+@pytest.mark.unit
+def test_summary_heading_is_a_warning_when_the_scan_did_not_finish(monkeypatch: pytest.MonkeyPatch) -> None:
+    display = _non_tty(monkeypatch)
+    display.report_incomplete(timed_out=0, abandoned=0, unfinished=4, interrupted=True)
+
+    level, text = display.summary_lines()[0]
+
+    assert level == logging.WARNING
+    assert text.startswith("Scan interrupted. No results.  run_time=")
+
+
+@pytest.mark.unit
 def test_incomplete_summary_is_none_when_everything_finished() -> None:
-    assert _incomplete_summary(IncompleteWork()) is None
+    assert describe_incomplete(IncompleteWork()) is None
 
 
 @pytest.mark.unit

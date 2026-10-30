@@ -1323,8 +1323,9 @@ def test_cleanup_temp_workspace_logs_a_locked_file_instead_of_raising(
     (task_temp / "locked.txt").write_bytes(b"secret")
     _lock_on_unlink(monkeypatch, "locked.txt")
 
-    with caplog.at_level(logging.WARNING, logger="test"):
-        _cleanup_temp_workspace(task_temp, logging.getLogger("test"))
+    # Its own logger name: another test makes "test" a worker logger, which does not propagate to caplog.
+    with caplog.at_level(logging.WARNING, logger="tests.archives.cleanup"):
+        _cleanup_temp_workspace(task_temp, logging.getLogger("tests.archives.cleanup"))
 
     assert "could not remove temp file" in caplog.text
     assert "locked.txt" in caplog.text
@@ -1752,11 +1753,48 @@ def test_7z_crc_failure_raises_and_leaves_no_open_file(tmp_path: Path) -> None:
 
     dest = tmp_path / "out"
     got: list[str] = []
-    with pytest.raises(ArchiveReadError):
+    with pytest.raises(ArchiveReadError) as raised:
         _archive_handler("7z").extract_members(archive, ["a.txt"], dest, on_extracted=lambda m, p: got.append(m))
+
+    # A sentence, not py7zr's bare args: "(1469417445, 3892258996, 'a.txt')".
+    assert str(raised.value) == "CrcError: CRC mismatch for member 'a.txt'"
 
     assert got == [], "a member that failed its CRC is never handed over"
     shutil.rmtree(dest)  # fails on Windows if a handle was left open
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("a.txt", "CrcError: CRC mismatch for member 'a.txt'"),
+        (None, "CrcError: CRC mismatch in the archive's compressed data"),  # py7zr's folder-level check
+    ],
+)
+def test_7z_crc_error_message_names_the_member_only_when_there_is_one(filename: str | None, expected: str) -> None:
+    from py7zr.exceptions import CrcError
+
+    from piidigger.archivehandlers._7z import _describe_error
+
+    assert _describe_error(CrcError(1469417445, 3892258996, filename)) == expected
+
+
+@pytest.mark.unit
+def test_scan_batch_leaves_the_archive_read_error_to_the_coordinator(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The coordinator logs the failed batch at ERROR; a worker ERROR line would say it twice."""
+    archive = tmp_path / "broken.7z"
+    archive.write_bytes(b"not a 7z file at all")
+    logger = logging.getLogger("tests.archives.readerror")
+
+    with caplog.at_level(logging.DEBUG, logger=logger.name):
+        task = _scan_archive_task(archive, "a.txt", archive_type="7z")
+        result = handle_scan_archive_members(task, _make_ctx(tmp_path), logger)
+
+    assert result.status == "error"
+    assert result.error_message == "Bad7zFile: not a 7z file"
+    assert [r.levelno for r in caplog.records if "error reading archive" in r.getMessage()] == [logging.DEBUG]
 
 
 @pytest.mark.unit

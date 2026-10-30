@@ -628,7 +628,7 @@ def test_clean_run_reports_no_unfinished_work(tmp_path: Path) -> None:
 
     ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [scan_root])
     log_file = tmp_path / "clean.log"
-    listener = start_listener(log_queue, log_file, "WARNING")
+    listener = start_listener(log_queue, log_file, "INFO")
     pool = _start_pool(ctx, 2)
     progress = _non_tty_progress()
 
@@ -636,7 +636,14 @@ def test_clean_run_reports_no_unfinished_work(tmp_path: Path) -> None:
 
     assert outcome.interrupted is False
     assert outcome.unfinished == 0
-    assert "Not fully scanned" not in log_file.read_text(encoding="utf-8")
+    log_text = log_file.read_text(encoding="utf-8")
+    assert "Not fully scanned" not in log_text
+    # The end-of-scan totals reach the log, at INFO, with the run time.
+    summary = [line for line in log_text.splitlines() if "Scan complete." in line]
+    assert len(summary) == 1
+    assert " INFO Scan complete. " in summary[0]
+    assert "files_scanned=1" in summary[0]
+    assert "run_time=0:00:" in summary[0]
 
 
 @pytest.mark.integration
@@ -650,13 +657,14 @@ def test_failed_task_is_reported_as_not_scanned(tmp_path: Path, capsys: pytest.C
     result_queue: mp.Queue[object] = mp.Queue()
     log_queue: mp.Queue[object] = mp.Queue()
     stop_event = mp.Event()
-    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [])
+    missing_dir = tmp_path / "does-not-exist"
+    ctx = _make_ctx(task_queue, result_queue, log_queue, stop_event, [missing_dir])
     log_file = tmp_path / "failed.log"
     listener = start_listener(log_queue, log_file, "WARNING")
     pool = _start_pool(ctx, 1)
     progress = _non_tty_progress()
 
-    missing = Task(task_type=TaskType.ENUM_DIR, payload={"path": str(tmp_path / "does-not-exist"), "depth": 0})
+    missing = Task(task_type=TaskType.ENUM_DIR, payload={"path": str(missing_dir), "depth": 0})
     outcome = run_coordinator(ctx, pool, listener, [], progress, seed_tasks=[missing])
 
     assert outcome == CoordinatorResult(interrupted=False, unfinished=0)
@@ -665,7 +673,9 @@ def test_failed_task_is_reported_as_not_scanned(tmp_path: Path, capsys: pytest.C
     # The same line reaches the log, so a log-only review sees what was skipped.
     # The log is UTF-8 on every platform; read_text() alone would use cp1252 on Windows.
     log_text = log_file.read_text(encoding="utf-8")
-    assert "Not fully scanned: 1 file or folder was skipped — 1 failed with an error" in log_text
+    assert "Not fully scanned: 1 file or folder was skipped — 1 failed with an error." in log_text
+    assert log_text.count("Not fully scanned") == 1
+    assert "See the log for details" not in log_text
 
 
 # ---------------------------------------------------------------------------

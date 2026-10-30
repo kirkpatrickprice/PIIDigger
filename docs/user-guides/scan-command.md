@@ -97,7 +97,9 @@ While attached to an interactive terminal, `scan` shows a live three-panel displ
 - **Progress** — three bars (Dirs, Files, Bytes: scanned vs. found, with percentage and elapsed time), a running "Results Found" counter, and an ETA once at least 200 tasks have completed. The ETA reads `--:--` before that threshold — that's expected on short scans, not a stall.
 - **Events** — the most recent warnings and errors (timeouts, unreadable files, skipped archive members), newest additions at the bottom.
 
-When `scan`'s output isn't a terminal — e.g. piped to a file, redirected in CI, etc. — the live display is skipped entirely, and a single plain-text summary line is printed at the end instead (e.g. `Scan complete.  dirs_scanned=1,204  files_scanned=38,502  ...`).
+When `scan`'s output isn't a terminal — e.g. piped to a file, redirected in CI, etc. — the live display is skipped entirely, and a single plain-text summary line is printed at the end instead (e.g. `Scan complete. dirs_scanned=1,204  files_scanned=38,502  ...  run_time=0:31:28`).
+
+The same summary is written to the end of the log file. Its totals line is logged at INFO. A "Not fully scanned" line, or a line for a results file that stopped after an error, is logged at WARNING.
 
 ### Output Files
 

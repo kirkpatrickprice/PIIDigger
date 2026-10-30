@@ -31,7 +31,7 @@ _LOG_QUEUE: mp.Queue = mp.Queue()  # type: ignore[type-arg]
 
 def _make_ctx(tmp_path: Path, **config_kwargs: object) -> WorkerContext:
     return WorkerContext(
-        config=Config(start_dirs=[], **config_kwargs),  # type: ignore[arg-type]
+        config=Config(**{"start_dirs": [], **config_kwargs}),  # type: ignore[arg-type]
         task_queue=mp.Queue(),
         result_queue=mp.Queue(),
         log_queue=_LOG_QUEUE,
@@ -212,8 +212,9 @@ def test_resolve_exclude_dirs_bare_drive_means_whole_drive(tmp_path: Path) -> No
 
 @pytest.mark.unit
 def test_enum_dir_nonexistent_path_returns_error(tmp_path: Path) -> None:
-    ctx = _make_ctx(tmp_path)
-    result = handle_enum_dir(_enum_dir_task(tmp_path / "no_such_dir"), ctx, _logger())
+    missing = tmp_path / "no_such_dir"
+    ctx = _make_ctx(tmp_path, start_dirs=[missing])  # only a start directory is listed without a parent listing it
+    result = handle_enum_dir(_enum_dir_task(missing), ctx, _logger())
     assert result.status == "error"
     assert result.counters.get("dirs_scanned") == 1
 
@@ -367,6 +368,110 @@ def test_scan_file_undetectable_encoding_is_logged_and_counted(
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (logging.INFO, f"skipping {f}: text encoding could not be detected")
     ]
+
+
+@pytest.mark.unit
+def test_scan_file_that_vanished_after_listing_is_skipped_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A file removed between the directory listing and its scan is not a failure."""
+    import logging
+
+    f = tmp_path / "gone.txt"
+    f.write_text("listed, then deleted")
+    task = _scan_file_task(f)
+    f.unlink()
+    logger = logging.getLogger("tests.scan_file.vanished")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = handle_scan_file(task, _make_ctx(tmp_path), logger)
+
+    assert result.status == "ok"
+    assert result.counters == {"files_scanned": 1, "bytes_scanned": len("listed, then deleted")}
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.INFO, f"skipping {f}: file no longer exists (removed after it was listed)")
+    ]
+
+
+@pytest.mark.unit
+def test_scan_file_not_found_for_a_file_that_still_exists_is_an_error(tmp_path: Path) -> None:
+    """Only a file that is really gone counts as vanished; any other FileNotFoundError is a failure."""
+    f = tmp_path / "present.txt"
+    f.write_text("still here")
+
+    with unittest.mock.patch(
+        "piidigger.getencoding.open", side_effect=FileNotFoundError("some other path"), create=True
+    ):
+        result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path), _logger())
+
+    assert result.status == "error"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("removed", ["sub", "whole tree"])
+def test_enum_dir_subfolder_that_vanished_after_listing_is_skipped_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, removed: str
+) -> None:
+    """Built at depth 0, as production builds every ENUM_DIR task on disk."""
+    import logging
+    import shutil
+
+    root = tmp_path / "root"
+    gone = root / "app" / "sub"
+    gone.mkdir(parents=True)
+    task = _enum_dir_task(gone, depth=0)
+    shutil.rmtree(gone if removed == "sub" else root / "app")  # a software update removes whole trees
+    logger = logging.getLogger("tests.enum_dir.vanished")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = handle_enum_dir(task, _make_ctx(tmp_path, start_dirs=[root]), logger)
+
+    assert result.status == "ok"
+    assert result.counters == {"dirs_scanned": 1}
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.INFO, f"skipping {gone}: folder no longer exists (removed after it was listed)")
+    ]
+
+
+@pytest.mark.unit
+def test_enum_dir_missing_start_directory_is_still_an_error(tmp_path: Path) -> None:
+    """A start directory that does not exist is a configuration mistake, not a vanished folder."""
+    start = tmp_path / "no-such-start"
+
+    result = handle_enum_dir(_enum_dir_task(start, depth=0), _make_ctx(tmp_path, start_dirs=[start]), _logger())
+
+    assert result.status == "error"
+
+
+@pytest.mark.unit
+def test_enum_dir_not_found_for_a_folder_that_is_still_listed_is_an_error(tmp_path: Path) -> None:
+    """A path too long on Windows fails like a missing one; the folder is still there, so it is a failure."""
+    root = tmp_path / "root"
+    present = root / "deep"
+    present.mkdir(parents=True)
+
+    with unittest.mock.patch(
+        "piidigger.orchestration.worker._enum_dir._list_dir", side_effect=FileNotFoundError("[WinError 3]")
+    ):
+        result = handle_enum_dir(_enum_dir_task(present, depth=0), _make_ctx(tmp_path, start_dirs=[root]), _logger())
+
+    assert result.status == "error"
+
+
+@pytest.mark.unit
+def test_scan_file_in_a_removed_folder_is_skipped(tmp_path: Path) -> None:
+    import shutil
+
+    folder = tmp_path / "app"
+    folder.mkdir()
+    f = folder / "index.js"
+    f.write_text("listed, then its folder was deleted")
+    task = _scan_file_task(f, ext=".js")
+    shutil.rmtree(folder)
+
+    result = handle_scan_file(task, _make_ctx(tmp_path), _logger())
+
+    assert result.status == "ok"
 
 
 # ---------------------------------------------------------------------------

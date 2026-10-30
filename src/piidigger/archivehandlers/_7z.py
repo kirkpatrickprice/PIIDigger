@@ -22,6 +22,23 @@ def _is_symlink(info: Any) -> bool:
     return bool(info.is_symlink)
 
 
+def _describe_error(exc: Exception) -> str:
+    """A readable message for a py7zr failure, with its type name in front.
+
+    str() of a py7zr exception is often only its args.  A CRC failure would
+    read "(1469417445, 3892258996, 'a.txt')", so it gets a sentence instead.
+    py7zr raises a folder's own CRC check with no filename: a solid folder is
+    one compressed stream, so no single member is to blame.
+    """
+    from py7zr.exceptions import CrcError  # py7zr is already loaded wherever this runs
+
+    if isinstance(exc, CrcError):
+        if exc.filename is None:
+            return "CrcError: CRC mismatch in the archive's compressed data"
+        return f"CrcError: CRC mismatch for member {exc.filename!r}"
+    return f"{type(exc).__name__}: {exc}"
+
+
 class SevenZArchiveHandler:
     def list_members(self, archive_path: Path, on_progress: Callable[[], None] | None = None) -> list[MemberInfo]:
         """List members in stored order, with each member's offset inside its folder.
@@ -60,7 +77,7 @@ class SevenZArchiveHandler:
         except ImportError as exc:
             raise ArchiveReadError(f"py7zr is required for .7z archives: {exc}") from exc
         except Exception as exc:  # noqa: BLE001 — py7zr exception hierarchy varies by version
-            raise ArchiveReadError(str(exc)) from exc
+            raise ArchiveReadError(_describe_error(exc)) from exc
 
     def extract_members(
         self,
@@ -109,7 +126,7 @@ class SevenZArchiveHandler:
         except ArchiveReadError:
             raise
         except Exception as exc:  # noqa: BLE001
-            raise ArchiveReadError(str(exc)) from exc
+            raise ArchiveReadError(_describe_error(exc)) from exc
 
 
 class _ScanWriterFactory:
