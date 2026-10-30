@@ -38,7 +38,7 @@ from piidigger.outputhandlers import HANDLER_REGISTRY, CsvSink, JsonSink, TextSi
 
 _ALL_FORMATS: frozenset[str] = frozenset(HANDLER_REGISTRY)
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
-_ADMIN_PROMPT_TIMEOUT: int = 10
+_PROMPT_TIMEOUT: int = 10
 # A temp file another process holds open (antivirus, the Windows indexer)
 # usually frees up within a second or two, so the final cleanup retries.
 _TEMP_REMOVE_ATTEMPTS: int = 3
@@ -62,18 +62,14 @@ def _is_admin() -> bool:
         return ctypes.windll.shell32.IsUserAnAdmin() != 0  # type: ignore[attr-defined]
 
 
-def _prompt_admin_continue(timeout: int = _ADMIN_PROMPT_TIMEOUT) -> bool:
-    """Prompt the user to continue when PIIDigger is not running as administrator.
+def _prompt_continue(question: str, timeout: int = _PROMPT_TIMEOUT) -> bool:
+    """Ask the user whether to continue the scan, printing *question* first.
 
     Reads from stdin with a timeout.  Defaults to continuing (Y) if no input
     arrives within *timeout* seconds — non-interactive callers are not blocked.
     Returns True to proceed, False to abort.
     """
-    print(
-        f"Admin user not detected.  A full disk scan may not be possible.  Continue (Y/n) [{timeout}s]: ",
-        end="",
-        flush=True,
-    )
+    print(f"{question}  Continue (Y/n) [{timeout}s]: ", end="", flush=True)
     result: list[str] = [""]
     ev = threading.Event()
 
@@ -112,7 +108,54 @@ def _check_admin(config: Config, logger: logging.Logger) -> bool:
         logger.info("admin check: non-interactive mode — continuing without admin confirmation")
         return True
 
-    return _prompt_admin_continue()
+    return _prompt_continue("Admin user not detected.  A full disk scan may not be possible.")
+
+
+# Prompt at startup when the workers' memory limits add up to more than this
+# share of the machine's RAM.  Nothing is resized: the user decides.
+_MEMORY_WARN_SHARE: float = 0.5
+
+
+def _memory_budget(limit_mb: int, worker_count: int, total_ram_bytes: int) -> tuple[str, str | None]:
+    """Describe the scan's memory ceiling; return (description, warning or None).
+
+    The ceiling is simply workers x max_worker_memory_mb, which is what a user
+    tunes against.  The coordinator is left out: it stays small.
+    """
+    budget_gb = limit_mb * worker_count / 1024
+    plural = "s" if worker_count != 1 else ""
+    description = f"{limit_mb:,} MB per worker (up to ~{budget_gb:.1f} GB for {worker_count} worker{plural})"
+    total_gb = total_ram_bytes / (1024**3)
+    if limit_mb * 1024 * 1024 * worker_count <= _MEMORY_WARN_SHARE * total_ram_bytes:
+        return description, None
+    warning = (
+        f"PIIDigger may use up to {budget_gb:.1f} GB of this machine's {total_gb:.1f} GB RAM; "
+        'consider performance = "slow" or a lower max_worker_memory_mb'
+    )
+    return description, warning
+
+
+def _check_memory(config: Config, worker_count: int, logger: logging.Logger) -> bool:
+    """Ask before scanning when the workers could use more than half the machine's RAM.
+
+    A scan of a production server should not take over its memory unnoticed,
+    so this prompts the same way the admin check does, and likewise continues
+    on its own after the timeout.  Not interactive: log the warning and
+    continue.  Returns True to proceed, False to abort.
+    """
+    _, warning = _memory_budget(config.max_worker_memory_mb, worker_count, psutil.virtual_memory().total)
+    if warning is None:
+        return True
+
+    logger.warning("memory check: %s", warning)
+    if not sys.stdin.isatty():
+        logger.info("memory check: non-interactive mode — continuing without confirmation")
+        return True
+
+    if _prompt_continue(f"{warning}."):
+        return True
+    logger.warning("memory check: scan cancelled by the user")
+    return False
 
 
 def _emit_startup_info(
@@ -128,15 +171,20 @@ def _emit_startup_info(
     sleep_status = "Active" if sleep_active else "Unavailable on this platform"
     sleep_markup = "[green]Active[/green]" if sleep_active else "[yellow]Unavailable on this platform[/yellow]"
     dirs = ", ".join(str(d) for d in config.start_dirs)
+    memory_limit, memory_warning = _memory_budget(
+        config.max_worker_memory_mb, worker_count, psutil.virtual_memory().total
+    )
 
     log_entries = [
         f"Performance: {config.performance} — {worker_count} worker process{plural}",
+        f"Memory limit: {memory_limit}",
         f"Scan directories: {dirs}",
         f"Sleep prevention: {sleep_status}",
         "Press CTRL-C to terminate the scan",
     ]
     display_entries = [
         f"[bold white]Performance:[/bold white] [cyan]{config.performance} — {worker_count} worker process{plural}[/cyan]",
+        f"[bold white]Memory limit:[/bold white] [cyan]{memory_limit}[/cyan]",
         # Escaped: a path ending in a backslash (C:\) would otherwise escape
         # the closing tag, and a "[" in a path would be read as markup.
         f"[bold white]Scan directories:[/bold white] [cyan]{escape(dirs)}[/cyan]",
@@ -147,6 +195,10 @@ def _emit_startup_info(
     progress.set_startup_info(display_entries)
     for msg in log_entries:
         logger.info(msg)
+    # Already logged and confirmed by _check_memory(); shown again here so it
+    # stays on screen for the length of the scan.
+    if memory_warning is not None:
+        progress.log_event("WARNING", memory_warning)
 
 
 def _resolve_workers(performance: str, physical_cores: int, logical_cores: int) -> int:
@@ -321,7 +373,9 @@ def run_scan(config: Config) -> int:
 
     Wiring order:
       1. Start logging listener; create run-level logger; route library logs
-      2. Admin privilege check (prompts user if not elevated and admin_check=True)
+      2. Admin privilege check (prompts user if not elevated and admin_check=True),
+         then the memory check (prompts if workers x max_worker_memory_mb is
+         more than half the RAM)
       3. Build and open output sinks (create parent dirs as needed).  Any
          failure aborts the run: there would be nowhere to put the results.
       4. Build WorkerContext; start worker pool
@@ -348,9 +402,15 @@ def run_scan(config: Config) -> int:
     route_library_logs(log_queue)
     run_logger = build_worker_logger(log_queue, "run")
 
-    # Admin check and sink opening both happen before progress.start() takes
-    # over the terminal, so their prompts and errors print cleanly.
-    sinks = _open_sinks(config, run_logger) if _check_admin(config, run_logger) else None
+    logical_cores = os.cpu_count() or 1
+    physical_cores = psutil.cpu_count(logical=False) or logical_cores
+    worker_count = _resolve_workers(config.performance, physical_cores, logical_cores)
+
+    # The admin and memory checks and sink opening all happen before
+    # progress.start() takes over the terminal, so their prompts and errors
+    # print cleanly.
+    proceed = _check_admin(config, run_logger) and _check_memory(config, worker_count, run_logger)
+    sinks = _open_sinks(config, run_logger) if proceed else None
     if sinks is None:
         stop_listener(listener)
         stop_library_log_routing()
@@ -386,9 +446,6 @@ def run_scan(config: Config) -> int:
                 run_logger.debug("exclude_dirs: %s resolves to %s", raw, resolved)
         runtime_config = config.model_copy(update={"exclude_dirs": exclude_dirs})
 
-        logical_cores = os.cpu_count() or 1
-        physical_cores = psutil.cpu_count(logical=False) or logical_cores
-        worker_count = _resolve_workers(config.performance, physical_cores, logical_cores)
         worker_ctx = WorkerContext(
             config=runtime_config,
             task_queue=task_queue,

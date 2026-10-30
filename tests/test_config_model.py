@@ -333,3 +333,51 @@ def test_config_drops_blank_exclude_dirs(blank: str) -> None:
     """An empty pattern or a bare '*' would match every folder and silently exclude them all."""
     c = Config(start_dirs=[], exclude_dirs=[blank, "/usr", "*/.git"])
     assert c.exclude_dirs == ["/usr", "*/.git"]
+
+
+# ---------------------------------------------------------------------------
+# max_worker_memory_mb
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_max_worker_memory_mb_defaults_to_1024() -> None:
+    assert Config(start_dirs=[]).max_worker_memory_mb == 1024
+
+
+@pytest.mark.unit
+def test_max_worker_memory_mb_is_read_from_toml(tmp_path: Path) -> None:
+    toml = tmp_path / "cfg.toml"
+    toml.write_text(f'start_dirs = ["{tmp_path.as_posix()}"]\nmax_worker_memory_mb = 2048\n', encoding="utf-8")
+
+    assert Config.from_toml(toml).max_worker_memory_mb == 2048
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", [255, 65537])
+def test_max_worker_memory_mb_out_of_range_is_rejected(value: int) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="max_worker_memory_mb"):
+        Config(start_dirs=[], max_worker_memory_mb=value)
+
+
+@pytest.mark.unit
+def test_generate_toml_template_includes_max_worker_memory_mb(tmp_path: Path) -> None:
+    """A root-level key: written before any [table], or TOML would file it under that table."""
+    import tomllib
+
+    text = generate_toml_template()
+    assert tomllib.loads(text)["max_worker_memory_mb"] == 1024
+    toml = tmp_path / "cfg.toml"
+    toml.write_text(text, encoding="utf-8")
+    assert Config.from_toml(toml).max_worker_memory_mb == 1024
+
+
+@pytest.mark.unit
+def test_misspelled_max_worker_memory_mb_gets_a_suggestion(tmp_path: Path) -> None:
+    bad = tmp_path / "typo.toml"
+    bad.write_text(f'start_dirs = ["{tmp_path.as_posix()}"]\nmax_worker_memory = 2048\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Did you mean 'max_worker_memory_mb'\\?"):
+        Config.from_toml(bad)

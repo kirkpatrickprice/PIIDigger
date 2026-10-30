@@ -6,6 +6,7 @@ import logging
 import logging.handlers
 import math
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -22,9 +23,12 @@ from piidigger.run import (
     EXIT_INTERRUPTED,
     EXIT_OK,
     _build_sinks,
+    _check_memory,
     _emit_startup_info,
     _is_broad_folder,
+    _memory_budget,
     _output_exclusions,
+    _prompt_continue,
     _remove_temp_workspace,
     _resolve_workers,
     run_scan,
@@ -634,3 +638,143 @@ def test_startup_panel_shows_windows_drive_roots_intact() -> None:
         console.print(progress._build_config_panel())
     assert "Scan directories: C:\\, D:\\ " in captured.get()
     assert "[/cyan]" not in captured.get()
+
+
+# ---------------------------------------------------------------------------
+# Memory limit at startup
+# ---------------------------------------------------------------------------
+
+_GB = 1024**3
+
+
+@pytest.mark.unit
+def test_memory_budget_states_the_total_ceiling() -> None:
+    description, warning = _memory_budget(1024, 3, 32 * _GB)
+
+    assert description == "1,024 MB per worker (up to ~3.0 GB for 3 workers)"
+    assert warning is None
+
+
+@pytest.mark.unit
+def test_memory_budget_warns_when_workers_could_use_over_half_the_ram() -> None:
+    description, warning = _memory_budget(1024, 3, 4 * _GB)
+
+    assert description == "1,024 MB per worker (up to ~3.0 GB for 3 workers)"
+    assert warning == (
+        "PIIDigger may use up to 3.0 GB of this machine's 4.0 GB RAM; "
+        'consider performance = "slow" or a lower max_worker_memory_mb'
+    )
+
+
+@pytest.mark.unit
+def test_memory_budget_at_exactly_half_the_ram_does_not_warn() -> None:
+    assert _memory_budget(1024, 2, 4 * _GB)[1] is None
+
+
+def _small_ram(monkeypatch: pytest.MonkeyPatch, total: int = 2 * _GB) -> None:
+    """Make psutil report a machine with *total* bytes of RAM."""
+    import types
+
+    import piidigger.run as run_mod
+
+    monkeypatch.setattr(run_mod.psutil, "virtual_memory", lambda: types.SimpleNamespace(total=total))
+
+
+@pytest.mark.unit
+def test_startup_info_logs_the_memory_limit_and_shows_its_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The warning is logged once, by _check_memory(); the display still shows it."""
+    _small_ram(monkeypatch)
+    logger = logging.getLogger("tests.startup.memory")
+    progress = ProgressDisplay()
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        _emit_startup_info(progress, logger, Config(start_dirs=[]), 3, wake_mode=None)
+
+    messages = [(r.levelno, r.getMessage()) for r in caplog.records]
+    assert (logging.INFO, "Memory limit: 1,024 MB per worker (up to ~3.0 GB for 3 workers)") in messages
+    assert not any(level == logging.WARNING for level, _ in messages)
+    assert any(level == "WARNING" and "of this machine's 2.0 GB RAM" in msg for level, msg in progress._events)
+
+
+@pytest.mark.unit
+def test_memory_check_passes_without_asking_when_within_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    import piidigger.run as run_mod
+
+    _small_ram(monkeypatch, 32 * _GB)
+    monkeypatch.setattr(run_mod, "_prompt_continue", lambda question: pytest.fail("must not prompt"))
+
+    assert _check_memory(Config(start_dirs=[]), 3, logging.getLogger("tests.memcheck")) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("answer", [True, False])
+def test_memory_check_prompts_on_a_terminal_and_follows_the_answer(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, answer: bool
+) -> None:
+    import piidigger.run as run_mod
+
+    _small_ram(monkeypatch)
+    monkeypatch.setattr(run_mod.sys.stdin, "isatty", lambda: True, raising=False)
+    questions: list[str] = []
+    monkeypatch.setattr(run_mod, "_prompt_continue", lambda question: questions.append(question) or answer)
+    logger = logging.getLogger("tests.memcheck")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        assert _check_memory(Config(start_dirs=[]), 3, logger) is answer
+
+    assert len(questions) == 1
+    assert "of this machine's 2.0 GB RAM" in questions[0]
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("memory check: PIIDigger may use up to 3.0 GB" in m for m in messages)
+    assert ("memory check: scan cancelled by the user" in messages) is not answer
+
+
+@pytest.mark.unit
+def test_memory_check_continues_without_asking_when_not_interactive(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import piidigger.run as run_mod
+
+    _small_ram(monkeypatch)
+    monkeypatch.setattr(run_mod.sys.stdin, "isatty", lambda: False, raising=False)
+    monkeypatch.setattr(run_mod, "_prompt_continue", lambda question: pytest.fail("must not prompt"))
+    logger = logging.getLogger("tests.memcheck")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        assert _check_memory(Config(start_dirs=[]), 3, logger) is True
+
+    assert any("non-interactive mode" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_prompt_continue_defaults_to_continue_after_the_timeout(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import io
+
+    import piidigger.run as run_mod
+
+    class _NeverAnswers(io.StringIO):
+        def readline(self, size: int | None = -1) -> str:
+            threading.Event().wait()  # blocks the daemon reader thread forever
+            return ""
+
+    monkeypatch.setattr(run_mod.sys, "stdin", _NeverAnswers())
+
+    assert _prompt_continue("Memory is tight.", timeout=0) is True
+    out = capsys.readouterr().out
+    assert "Memory is tight.  Continue (Y/n) [0s]: " in out
+    assert "continuing scan" in out
+
+
+@pytest.mark.unit
+def test_run_scan_aborts_when_the_memory_check_is_declined(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import piidigger.run as run_mod
+
+    monkeypatch.setattr(run_mod, "_check_memory", lambda config, worker_count, logger: False)
+    config = _startup_config(tmp_path)
+
+    assert run_scan(config) == EXIT_ABORTED
+    assert not config.results.path.exists(), "no results files are opened for a declined scan"

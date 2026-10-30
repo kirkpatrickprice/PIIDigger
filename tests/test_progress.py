@@ -167,6 +167,22 @@ def test_incomplete_summary_uses_singular_for_one_item() -> None:
 
 
 @pytest.mark.unit
+def test_files_over_the_memory_limit_are_reported_as_not_scanned(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    display = _non_tty(monkeypatch)
+    display.report_incomplete(timed_out=0, abandoned=0, over_memory=2, unfinished=0, interrupted=False)
+    display.stop()
+
+    first, second = capsys.readouterr().out.splitlines()
+    assert first.startswith("Scan complete.")
+    assert second == (
+        "Not fully scanned: 2 files or folders were skipped — 2 exceeded the memory limit. See the log for details."
+    )
+
+
+@pytest.mark.unit
 def test_incomplete_summary_is_none_when_everything_finished() -> None:
     assert _incomplete_summary(IncompleteWork()) is None
 

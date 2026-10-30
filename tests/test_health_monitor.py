@@ -26,14 +26,19 @@ _LOG = logging.getLogger("tests.health_monitor")
 class Harness:
     """A registry, a pool of fake workers, and a monitor, all on one fake clock."""
 
-    def __init__(self, workers: int = 3, max_retries: int = MAX_RETRIES) -> None:
+    def __init__(self, workers: int = 3, max_retries: int = MAX_RETRIES, memory_limit_bytes: int | None = None) -> None:
         self.clock = FakeClock()
         self.dispatched: list[Task] = []
         self.registry = TaskRegistry(self.dispatched.append, clock=self.clock, max_retries=max_retries)
         self.spawner = Spawner()
         self.pool = WorkerPool(self.spawner, logger=_LOG, grace=0.0)
         self.pool.start(workers)
-        self.monitor = HealthMonitor(self.registry, self.pool, clock=self.clock)
+        # Each worker's RSS, by pid, as the memory sweep reads it.  A pid not
+        # listed reads as None: memory unknown.
+        self.rss: dict[int, int] = {}
+        self.monitor = HealthMonitor(
+            self.registry, self.pool, clock=self.clock, memory_limit_bytes=memory_limit_bytes, rss_of=self.rss.get
+        )
 
     def worker(self, index: int = 0) -> FakeProcess:
         return self.spawner.spawned[index]
@@ -533,3 +538,127 @@ def test_lost_task_sweep_skips_tasks_still_waiting_in_the_feeder() -> None:
     assert [r.task_id for r in sweep.abandoned] == [sent.task_id]
     assert waiting.task_id in h.registry
     assert h.dispatched == [sent, waiting], "abandoning the lost task frees its slot for the next one"
+
+
+# ---------------------------------------------------------------------------
+# Memory sweep
+# ---------------------------------------------------------------------------
+
+_MB = 1024 * 1024
+_LIMIT = 1024 * _MB
+
+
+@pytest.mark.unit
+def test_task_over_the_memory_limit_is_abandoned_and_its_worker_replaced() -> None:
+    h = Harness(memory_limit_bytes=_LIMIT)
+    worker = h.worker(1)
+    assert worker.pid is not None
+    task = h.run(worker)
+    h.rss[worker.pid] = _LIMIT + 1
+
+    sweep = h.monitor.tick()
+
+    assert [(r.task_id, rss) for r, rss in sweep.over_memory] == [(task.task_id, _LIMIT + 1)]
+    assert sweep.memory_limit_bytes == _LIMIT
+    assert worker.terminate_calls == 1
+    assert worker.pid not in h.pool.pids()
+    assert h.pool.size == 3
+    assert h.registry.count_abandoned("over_memory") == 1
+    assert sweep.redispatched == [], "a file that overran the limit once would do so again"
+    assert sweep.crashed == [], "the crash sweep does not count the replaced worker a second time"
+    assert h.dispatched == [task]
+
+
+@pytest.mark.unit
+def test_memory_at_or_under_the_limit_is_left_alone() -> None:
+    h = Harness(memory_limit_bytes=_LIMIT)
+    worker = h.worker(0)
+    assert worker.pid is not None
+    task = h.run(worker)
+    h.rss[worker.pid] = _LIMIT
+
+    sweep = h.monitor.tick()
+
+    assert not sweep
+    assert task.task_id in h.registry
+    assert worker.terminate_calls == 0
+
+
+@pytest.mark.unit
+def test_unreadable_memory_is_left_alone() -> None:
+    """A worker whose RSS cannot be read (exited, or access denied) is the crash sweep's business."""
+    h = Harness(memory_limit_bytes=_LIMIT)
+    task = h.run(h.worker(0))
+
+    sweep = h.monitor.tick()
+
+    assert not sweep
+    assert task.task_id in h.registry
+
+
+@pytest.mark.unit
+def test_no_memory_limit_disables_the_sweep() -> None:
+    h = Harness(memory_limit_bytes=None)
+    worker = h.worker(0)
+    assert worker.pid is not None
+    task = h.run(worker)
+    h.rss[worker.pid] = 64 * 1024 * _MB
+
+    sweep = h.monitor.tick()
+
+    assert not sweep
+    assert task.task_id in h.registry
+
+
+@pytest.mark.unit
+def test_idle_worker_over_the_limit_is_recycled_without_losing_work() -> None:
+    """CPython keeps freed memory, so a worker can stay large after a big file."""
+    h = Harness(memory_limit_bytes=_LIMIT)
+    idle = h.worker(2)
+    assert idle.pid is not None
+    h.rss[idle.pid] = 2 * _LIMIT
+
+    sweep = h.monitor.tick()
+
+    assert sweep.recycled == [(idle.pid, 2 * _LIMIT)]
+    assert sweep.over_memory == []
+    assert idle.terminate_calls == 1
+    assert h.pool.size == 3
+    assert h.registry.count_abandoned("over_memory") == 0
+
+
+@pytest.mark.unit
+def test_batch_member_over_the_limit_is_skipped_and_the_rest_requeued() -> None:
+    h = Harness(memory_limit_bytes=_LIMIT)
+    worker = h.worker(0)
+    assert worker.pid is not None
+    task = _run_batch(h, worker, "a", "b", "c")
+    h.registry.record_progress(task.task_id, worker.pid, "item_done", "a")
+    h.registry.record_progress(task.task_id, worker.pid, "item_started", "b")
+    h.rss[worker.pid] = _LIMIT + 1
+
+    sweep = h.monitor.tick()
+
+    assert sweep.over_memory == [], "the batch itself was not given up on"
+    assert [(s.item, s.reason, s.worker_pid) for s in sweep.skipped] == [("b", "over_memory", worker.pid)]
+    assert worker.terminate_calls == 1
+    assert h.dispatched[-1].items == ("c",)
+    assert task.task_id in h.registry
+    assert h.registry.count_abandoned("over_memory") == 1
+
+
+@pytest.mark.unit
+def test_worker_replaced_for_a_timeout_is_not_replaced_again_for_memory() -> None:
+    h = Harness(memory_limit_bytes=_LIMIT)
+    worker = h.worker(0)
+    assert worker.pid is not None
+    task = h.run(worker, timeout=10)
+    h.rss[worker.pid] = 2 * _LIMIT
+    h.clock.advance(21.0)
+
+    sweep = h.monitor.tick()
+
+    assert [r.task_id for r in sweep.timed_out] == [task.task_id]
+    assert sweep.over_memory == [] and sweep.recycled == []
+    assert worker.terminate_calls == 1
+    assert len(h.spawner.spawned) == 4, "one replacement, not two"

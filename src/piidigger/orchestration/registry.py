@@ -29,7 +29,8 @@ MAX_RETRIES: int = 3
 
 # Why the coordinator stopped waiting for a task.  "timed_out": it ran past its
 # deadline.  "crashed": its worker died on every attempt the retry budget allowed.
-type AbandonReason = Literal["timed_out", "crashed"]
+# "over_memory": its worker grew past max_worker_memory_mb.
+type AbandonReason = Literal["timed_out", "crashed", "over_memory"]
 
 # A task's wall-clock deadline is this multiple of its declared timeout, counted
 # from its start or from its last TaskProgress, whichever is later.  The slack
@@ -157,10 +158,11 @@ class TaskRegistry:
         # accepted.  See abandon().  Only timeouts and exhausted retry budgets land
         # here, so it stays small.
         self._abandoned: dict[str, tuple[TaskRecord, AbandonReason]] = {}
-        # Items dropped from a batch because they hung or crashed their worker,
-        # keyed by (task_id, item).  Kept apart from the records because the
-        # batch carries on and is eventually retired, but the skipped item still
-        # belongs in the end-of-scan summary.  See requeue_remaining().
+        # Items dropped from a batch because they hung their worker, crashed it,
+        # or pushed it past the memory limit, keyed by (task_id, item).  Kept
+        # apart from the records because the batch carries on and is eventually
+        # retired, but the skipped item still belongs in the end-of-scan
+        # summary.  See requeue_remaining().
         self._skipped: dict[tuple[str, str], AbandonReason] = {}
 
     # -- size / termination -------------------------------------------------
@@ -255,11 +257,12 @@ class TaskRegistry:
     def requeue_remaining(self, task_id: str, reason: AbandonReason | None) -> str | None:
         """Drop the item a batch was working on when it failed; re-queue the rest.
 
-        reason says how the batch failed.  "timed_out" and "crashed" come from
-        the health sweeps: the worker is gone, so the registry remembers the
-        dropped item for the end-of-scan summary.  None means the worker itself
-        reported an error result while on that item; the caller counts the item
-        as failed, and the registry keeps no note of it.
+        reason says how the batch failed.  "timed_out", "crashed" and
+        "over_memory" come from the health sweeps: the worker is gone, so the
+        registry remembers the dropped item for the end-of-scan summary.  None
+        means the worker itself reported an error result while on that item;
+        the caller counts the item as failed, and the registry keeps no note of
+        it.
 
         Returns the dropped item, or None when the task is untracked or no item
         was in progress — then there is nothing to blame, and the caller falls

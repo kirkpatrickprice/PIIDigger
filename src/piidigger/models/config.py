@@ -66,6 +66,10 @@ _LINUX_EXCLUDE_DIRS: list[str] = [
 # generate_toml_template().  Changing a value here updates both automatically.
 _DEFAULT_PERFORMANCE: Literal["balanced"] = "balanced"
 _DEFAULT_TIMEOUT_SECONDS: int = 30
+# Per-worker memory ceiling.  A profile of 1,713 real documents peaked at 541 MB
+# for any normal file; runaway PDFs grew past 4 GB.  1 GB clears the first with
+# room to spare and stops the second within seconds.
+_DEFAULT_MAX_WORKER_MEMORY_MB: int = 1024
 _DEFAULT_LOG_FILE: str = "logs/piidigger.log"
 _DEFAULT_LOG_LEVEL: str = "INFO"
 _DEFAULT_RESULTS_PATH: str = "piidigger-results"
@@ -88,6 +92,7 @@ _KNOWN_CONFIG_KEYS: tuple[str, ...] = (
     "data_handlers",
     "performance",
     "default_timeout_seconds",
+    "max_worker_memory_mb",
     "local_files_only",
     "admin_check",
     "log_file",
@@ -189,6 +194,7 @@ def generate_toml_template() -> str:
         'data_handlers = ["all"]',
         f'performance = "{_DEFAULT_PERFORMANCE}"',
         f"default_timeout_seconds = {_DEFAULT_TIMEOUT_SECONDS}",
+        f"max_worker_memory_mb = {_DEFAULT_MAX_WORKER_MEMORY_MB}",
         "local_files_only = true",
         "admin_check = true",
         f'log_file = "{_DEFAULT_LOG_FILE}"',
@@ -374,6 +380,9 @@ class Config(PiiDiggerModel):
     data_handlers: list[str] = Field(default_factory=lambda: ["all"])
     performance: Literal["fast", "balanced", "slow"] = _DEFAULT_PERFORMANCE
     default_timeout_seconds: int = Field(default=_DEFAULT_TIMEOUT_SECONDS, ge=1, le=600)
+    # Floor of 256: about four times an idle worker, so a typo cannot make every
+    # worker restart the moment it starts.
+    max_worker_memory_mb: int = Field(default=_DEFAULT_MAX_WORKER_MEMORY_MB, ge=256, le=65536)
     local_files_only: bool = True
     admin_check: bool = True
     log_file: Path = Path(_DEFAULT_LOG_FILE)

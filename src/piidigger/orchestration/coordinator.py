@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+import psutil
 from pydantic import ValidationError
 
 from piidigger.models.config import Config
@@ -17,7 +18,7 @@ from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.feeder import TaskFeeder
 from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
 from piidigger.orchestration.pool import WorkerPool, spawn_worker
-from piidigger.orchestration.progress import ProgressDisplay
+from piidigger.orchestration.progress import ProgressDisplay, describe_incomplete
 from piidigger.orchestration.registry import AbandonReason, TaskRecord, TaskRegistry
 from piidigger.orchestration.sinks import GuardedSink
 from piidigger.orchestration.worker import broadcast_shutdown
@@ -43,6 +44,21 @@ _INTERRUPT_JOIN_TIMEOUT: float = 2.0
 # Tasks per worker the feeder keeps on the task queue.  The rest wait in the
 # coordinator's memory, so the queue never nears macOS's 32,767-item cap.
 DISPATCH_WINDOW_PER_WORKER: int = 4
+
+_MB: int = 1024 * 1024
+
+# How a skipped batch member's worker failed, as "its worker <text> on it" in
+# the log and "worker <text>" in the events panel.
+_SKIP_REASON_TEXT: dict[AbandonReason, str] = {
+    "timed_out": "hung",
+    "crashed": "crashed",
+    "over_memory": "went over max_worker_memory_mb",
+}
+_SKIP_EVENT_TEXT: dict[AbandonReason, str] = {
+    "timed_out": "hung",
+    "crashed": "crashed",
+    "over_memory": "over memory limit",
+}
 
 _ACCESS_DENIED_PHRASES: tuple[str, ...] = ("Access is denied", "Permission denied", "WinError 5", "Errno 13")
 
@@ -80,7 +96,7 @@ class CoordinatorResult:
 
 @dataclass(frozen=True, slots=True)
 class SkippedItem:
-    """One member dropped from a batch because it hung or crashed its worker.
+    """One member dropped from a batch because it hung its worker, crashed it, or overran its memory.
 
     A dataclass rather than a Pydantic model: every field comes from our own
     registry and pool.  worker_pid is captured separately because re-queuing
@@ -112,12 +128,22 @@ class SweepResult:
     lost: list[TaskRecord] = field(default_factory=list)
     abandoned: list[TaskRecord] = field(default_factory=list)
     skipped: list[SkippedItem] = field(default_factory=list)
+    # (record, rss in bytes): tasks stopped because their worker overran
+    # max_worker_memory_mb.
+    over_memory: list[tuple[TaskRecord, int]] = field(default_factory=list)
+    # (pid, rss in bytes): idle workers replaced because they stayed over the
+    # limit after finishing a task.  Nothing was lost.
+    recycled: list[tuple[int, int]] = field(default_factory=list)
+    # The limit over_memory and recycled were judged against, for the report.
+    memory_limit_bytes: int | None = None
     stopped_replacing: bool = False
 
     def __bool__(self) -> bool:
         """True when the sweep has anything to report."""
         return bool(
             self.timed_out
+            or self.over_memory
+            or self.recycled
             or self.crashed
             or self.redispatched
             or self.lost
@@ -127,24 +153,44 @@ class SweepResult:
         )
 
 
+def _worker_rss(pid: int) -> int | None:
+    """Resident memory of a worker, in bytes, or None if it cannot be read.
+
+    None covers a worker that exited between the pool listing it and this
+    read, and one the OS will not let us inspect.  Either way the memory sweep
+    skips it; the crash sweep deals with a dead worker.
+    """
+    try:
+        return int(psutil.Process(pid).memory_info().rss)
+    except psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess:
+        return None
+
+
 class HealthMonitor:
     """The coordinator's periodic health sweep.
 
     Kept apart from the drain loop, with its collaborators injected, so it can be
-    unit-tested without spawning a process.  tick() runs three checks, and the
+    unit-tested without spawning a process.  tick() runs four checks, and the
     order matters:
 
     1. Deadline sweep.  A RUNNING task past its deadline is abandoned and its
        worker replaced.  Timeouts are not retried: a task that hung once will
        most likely hang again.
-    2. Crash sweep.  Workers that died unprompted are replaced.  Then every
+    2. Memory sweep.  A worker whose RSS is over memory_limit_bytes is replaced.
+       The task it holds is abandoned and, like a timeout, not retried: a file
+       that blew past the limit once will do so again.  A worker over the limit
+       with no task is replaced too, abandoning nothing.  CPython seldom hands
+       freed memory back to the OS, so a worker can stay large after a big file.
+       The deadline cannot catch this: a file that keeps reading keeps its task
+       alive while its memory grows without bound.
+    3. Crash sweep.  Workers that died unprompted are replaced.  Then every
        RUNNING task whose worker is no longer in the pool is re-dispatched, or
        abandoned once its retry budget is spent.  Matching on "not in the pool"
        rather than "died this tick" also catches a heartbeat that arrived after
        its worker had already been reaped.
 
-    3. Lost-task sweep.  A task lost before its heartbeat is invisible to the
-       first two checks, because no worker is recorded as holding it.  It is
+    4. Lost-task sweep.  A task lost before its heartbeat is invisible to the
+       first three checks, because no worker is recorded as holding it.  It is
        found instead by elimination.  A worker that has checked in and is not
        running a task can only be waiting in task_queue.get(), and it would
        take a queued task at once.  So if nothing is running, every live worker
@@ -155,20 +201,22 @@ class HealthMonitor:
        introspection is involved: qsize() is unimplemented on macOS and
        empty() is only approximate.
 
-    Because the deadline sweep runs first, a worker replaced for a timeout has
-    already left the pool, so the crash sweep cannot replace it a second time.
+    Because the deadline and memory sweeps run first, a worker they replaced
+    has already left the pool, so the crash sweep cannot replace it a second
+    time.  The memory sweep reads the pool after the deadline sweep, so it never
+    sees a worker the deadline sweep has just replaced.
 
-    Archive batches (tasks with items) get one refinement in steps 1 and 2.
+    Archive batches (tasks with items) get one refinement in steps 1 to 3.
     When the batch's worker had said which member it was working on, only that
     member is dropped, and the rest of the batch is re-queued.  That uses no
     retry budget, because every such re-queue removes a member.  Without a
     member in progress, a batch follows the same rules as any other task.
 
-    With a feeder, step 3 skips tasks still in the feeder's backlog.  They were
+    With a feeder, step 4 skips tasks still in the feeder's backlog.  They were
     never put on the queue, so they cannot be lost, and re-dispatching them
     would spend retry budget on work that never ran.
 
-    A false positive in step 3 is harmless.  A task re-dispatched while its
+    A false positive in step 4 is harmless.  A task re-dispatched while its
     original was still pending keeps its task_id, so whichever copy finishes
     second is dropped as a duplicate.
     """
@@ -182,11 +230,17 @@ class HealthMonitor:
         clock: Callable[[], float] = time.monotonic,
         lost_task_confirm_sweeps: int = LOST_TASK_CONFIRM_SWEEPS,
         lost_task_min_age: float = LOST_TASK_MIN_AGE,
+        memory_limit_bytes: int | None = None,
+        rss_of: Callable[[int], int | None] | None = None,
     ) -> None:
         self._registry = registry
         self._pool = pool
         self._feeder = feeder
         self._clock = clock
+        # None skips the memory sweep.  rss_of is injected so tests need no
+        # real processes.
+        self._memory_limit_bytes = memory_limit_bytes
+        self._rss_of = rss_of or _worker_rss
         self._lost_task_confirm_sweeps = lost_task_confirm_sweeps
         self._lost_task_min_age = lost_task_min_age
         self._quiet_sweeps = 0
@@ -219,6 +273,8 @@ class HealthMonitor:
             if pid is not None:
                 self._pool.replace(pid)
 
+        over_memory, recycled = self._memory_sweep(skipped)
+
         was_replacing = self._pool.replacing
         crashed = self._pool.reap_dead()
         stopped_replacing = was_replacing and not self._pool.replacing
@@ -239,7 +295,7 @@ class HealthMonitor:
                 abandoned.append(record)
 
         lost: list[TaskRecord] = []
-        if timed_out or crashed or redispatched or abandoned or skipped:
+        if timed_out or over_memory or recycled or crashed or redispatched or abandoned or skipped:
             # Something just changed, so quiet has to be observed afresh.
             self._quiet_sweeps = 0
         elif self._work_looks_lost(now):
@@ -270,8 +326,40 @@ class HealthMonitor:
             lost=lost,
             abandoned=abandoned,
             skipped=skipped,
+            over_memory=over_memory,
+            recycled=recycled,
+            memory_limit_bytes=self._memory_limit_bytes,
             stopped_replacing=stopped_replacing,
         )
+
+    def _memory_sweep(self, skipped: list[SkippedItem]) -> tuple[list[tuple[TaskRecord, int]], list[tuple[int, int]]]:
+        """Replace every worker over the memory limit; return (over_memory, recycled).
+
+        A batch member in progress is appended to skipped, as the deadline
+        sweep does, and the rest of its batch is re-queued.
+        """
+        limit = self._memory_limit_bytes
+        if limit is None:
+            return [], []
+        held = {r.worker_pid: r for r in self._registry.running()}
+        over_memory: list[tuple[TaskRecord, int]] = []
+        recycled: list[tuple[int, int]] = []
+        for pid in sorted(self._pool.pids()):
+            rss = self._rss_of(pid)
+            if rss is None or rss <= limit:
+                continue
+            record = held.get(pid)
+            if record is None:
+                recycled.append((pid, rss))
+            else:
+                culprit = self._registry.requeue_remaining(record.task_id, reason="over_memory")
+                if culprit is not None:
+                    skipped.append(SkippedItem(record, culprit, "over_memory", pid))
+                else:
+                    self._registry.abandon(record.task_id, reason="over_memory")
+                    over_memory.append((record, rss))
+            self._pool.replace(pid)
+        return over_memory, recycled
 
     def _work_looks_lost(self, now: float) -> bool:
         """True when no process could be holding any outstanding task."""
@@ -398,7 +486,7 @@ def run_coordinator(
     logger = build_worker_logger(ctx.log_queue, "coordinator")
     feeder = TaskFeeder(ctx.task_queue.put, window=DISPATCH_WINDOW_PER_WORKER * pool.size)
     registry = TaskRegistry(feeder.submit)
-    monitor = HealthMonitor(registry, pool, feeder=feeder)
+    monitor = HealthMonitor(registry, pool, feeder=feeder, memory_limit_bytes=ctx.config.max_worker_memory_mb * _MB)
     guarded = [GuardedSink(sink, logger, progress) for sink in sinks]
 
     interrupted = False
@@ -438,12 +526,15 @@ def run_coordinator(
         progress.report_incomplete(
             timed_out=registry.count_abandoned("timed_out"),
             abandoned=registry.count_abandoned("crashed"),
+            over_memory=registry.count_abandoned("over_memory"),
             unfinished=registry.count_unfinished(),
             interrupted=interrupted,
             workers_failed=workers_failed,
         )
         # Logged before teardown, which stops the listener: a record put on
         # the log queue after that never reaches the log file.
+        if (skipped := describe_incomplete(progress.incomplete)) is not None:
+            logger.warning("Not fully scanned: %s", skipped)
         unfinished = len(registry)
         if unfinished and not interrupted:
             logger.error("coordinator exited with %d task(s) still outstanding", unfinished)
@@ -701,8 +792,33 @@ def _report_sweep(
             f"Timeout [{task_type}] {_label(record)} — pid={record.worker_pid}, {elapsed:.0f}s/{timeout}s",
         )
 
+    limit_mb = (sweep.memory_limit_bytes or 0) // _MB
+    for record, rss in sweep.over_memory:
+        task_type = record.task.task_type.value
+        logger.warning(
+            "memory limit exceeded: type=%s path=%r pid=%s rss=%s MB limit=%s MB (max_worker_memory_mb); "
+            "stopping and replacing the worker",
+            task_type,
+            _task_path(record.task),
+            record.worker_pid,
+            f"{rss // _MB:,}",
+            f"{limit_mb:,}",
+        )
+        progress.log_event(
+            "WARNING",
+            f"Memory limit [{task_type}] {_label(record)} — pid={record.worker_pid}, {rss // _MB:,} MB/{limit_mb:,} MB",
+        )
+
+    for pid, rss in sweep.recycled:
+        logger.info(
+            "worker pid=%d idle at %s MB, above max_worker_memory_mb=%s; recycling it",
+            pid,
+            f"{rss // _MB:,}",
+            f"{limit_mb:,}",
+        )
+
     for skip in sweep.skipped:
-        what = "hung" if skip.reason == "timed_out" else "crashed"
+        what = _SKIP_REASON_TEXT[skip.reason]
         member = f"{_task_path(skip.record.task)}::{skip.item}"
         logger.warning(
             "[%s] skipping %r: its worker (pid=%s) %s on it; re-queuing the %d member(s) left in the batch",
@@ -712,7 +828,7 @@ def _report_sweep(
             what,
             len(skip.record.remaining),
         )
-        progress.log_event("WARNING", f"Skipped {_truncate_path(member)} — worker {what}")
+        progress.log_event("WARNING", f"Skipped {_truncate_path(member)} — worker {_SKIP_EVENT_TEXT[skip.reason]}")
 
     for pid, exitcode in sweep.crashed:
         logger.warning("worker pid=%d died unexpectedly (exit code %s); replacing it", pid, exitcode)

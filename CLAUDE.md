@@ -147,7 +147,7 @@ One coordinator (main process) feeds N identical workers through a single task q
 
 Termination is a property of the work set — no SENTINEL chains. Adding a task type adds one entry to the `DISPATCH` dict and one handler function; the coordinator and worker are unchanged.
 
-The coordinator also owns the `rich.Live` progress display and a `HealthMonitor` that runs three sweeps every second regardless of queue traffic: a deadline sweep (terminates and replaces a worker that has exceeded its task's deadline), a crash sweep (replaces a worker that died unprompted and redispatches its task), and a lost-task sweep (recovers a task whose worker died before it could send a heartbeat at all — see [coordinator-worker-pipeline.md](docs/architecture/orchestration/coordinator-worker-pipeline.md) for the full mechanics). Worker processes and their lifecycle are owned by `WorkerPool` (`orchestration/pool.py`).
+The coordinator also owns the `rich.Live` progress display and a `HealthMonitor` that runs four sweeps every second regardless of queue traffic: a deadline sweep (terminates and replaces a worker that has exceeded its task's deadline), a memory sweep (replaces a worker over `max_worker_memory_mb`), a crash sweep (replaces a worker that died unprompted and redispatches its task), and a lost-task sweep (recovers a task whose worker died before it could send a heartbeat at all — see [coordinator-worker-pipeline.md](docs/architecture/orchestration/coordinator-worker-pipeline.md) for the full mechanics). Worker processes and their lifecycle are owned by `WorkerPool` (`orchestration/pool.py`).
 
 ---
 

@@ -58,6 +58,8 @@ class IncompleteWork:
     * abandoned: crashed its worker.  A file or folder is abandoned after
       crashing on every attempt the retry budget allowed.  An archive member is
       dropped after crashing once, so the rest of its batch can carry on.
+    * over_memory: pushed its worker past max_worker_memory_mb, so the worker
+      was stopped.  Not retried, like a timeout.
     * unfinished: still outstanding when the scan stopped, usually because it
       was interrupted.
 
@@ -68,26 +70,39 @@ class IncompleteWork:
     failed: int = 0
     timed_out: int = 0
     abandoned: int = 0
+    over_memory: int = 0
     unfinished: int = 0
 
     @property
     def total(self) -> int:
-        return self.failed + self.timed_out + self.abandoned + self.unfinished
+        return self.failed + self.timed_out + self.abandoned + self.over_memory + self.unfinished
 
 
-def _incomplete_summary(work: IncompleteWork) -> str | None:
-    """One plain-language line naming what was not scanned, or None if nothing."""
+def describe_incomplete(work: IncompleteWork) -> str | None:
+    """What was not scanned and why, in plain language, or None if nothing.
+
+    Shared by the on-screen summary and the coordinator's log line, so the two
+    always agree.
+    """
     if not work.total:
         return None
     reasons = [
         (work.failed, "failed with an error"),
         (work.timed_out, "timed out"),
         (work.abandoned, "abandoned after crashing a worker"),
+        (work.over_memory, "exceeded the memory limit"),
         (work.unfinished, "unfinished when the scan stopped"),
     ]
     detail = ", ".join(f"{n:,} {why}" for n, why in reasons if n)
     noun = "file or folder was" if work.total == 1 else "files or folders were"
-    return f"Not fully scanned: {work.total:,} {noun} skipped — {detail}. See the log for details."
+    return f"{work.total:,} {noun} skipped — {detail}"
+
+
+def _incomplete_summary(work: IncompleteWork) -> str | None:
+    """One plain-language line naming what was not scanned, or None if nothing."""
+    if (description := describe_incomplete(work)) is None:
+        return None
+    return f"Not fully scanned: {description}. See the log for details."
 
 
 def _fmt_eta(seconds: float) -> str:
@@ -135,6 +150,7 @@ class ProgressDisplay:
         self._tasks_failed: int = 0
         self._timed_out: int = 0
         self._abandoned: int = 0
+        self._over_memory: int = 0
         self._unfinished: int = 0
         self._interrupted: bool = False
         self._workers_failed: bool = False
@@ -357,6 +373,7 @@ class ProgressDisplay:
         unfinished: int,
         interrupted: bool,
         workers_failed: bool = False,
+        over_memory: int = 0,
     ) -> None:
         """Record the work the run could not finish, for the summary stop() prints.
 
@@ -365,6 +382,7 @@ class ProgressDisplay:
         """
         self._timed_out = timed_out
         self._abandoned = abandoned
+        self._over_memory = over_memory
         self._unfinished = unfinished
         self._interrupted = interrupted
         self._workers_failed = workers_failed
@@ -384,6 +402,7 @@ class ProgressDisplay:
             failed=self._tasks_failed,
             timed_out=self._timed_out,
             abandoned=self._abandoned,
+            over_memory=self._over_memory,
             unfinished=self._unfinished,
         )
 
