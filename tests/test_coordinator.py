@@ -636,7 +636,7 @@ def test_clean_run_reports_no_unfinished_work(tmp_path: Path) -> None:
 
     assert outcome.interrupted is False
     assert outcome.unfinished == 0
-    assert "Not fully scanned" not in log_file.read_text()
+    assert "Not fully scanned" not in log_file.read_text(encoding="utf-8")
 
 
 @pytest.mark.integration
@@ -663,7 +663,9 @@ def test_failed_task_is_reported_as_not_scanned(tmp_path: Path, capsys: pytest.C
     assert progress.incomplete.failed == 1
     assert "1 failed with an error" in capsys.readouterr().out
     # The same line reaches the log, so a log-only review sees what was skipped.
-    assert "Not fully scanned: 1 file or folder was skipped — 1 failed with an error" in log_file.read_text()
+    # The log is UTF-8 on every platform; read_text() alone would use cp1252 on Windows.
+    log_text = log_file.read_text(encoding="utf-8")
+    assert "Not fully scanned: 1 file or folder was skipped — 1 failed with an error" in log_text
 
 
 # ---------------------------------------------------------------------------
