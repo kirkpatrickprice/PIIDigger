@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import shutil
 import stat
+import struct
 import zlib
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import IO
 from zipfile import BadZipFile, ZipFile, ZipInfo
 
 from piidigger._progress_io import open_with_progress
@@ -25,6 +27,63 @@ _UNIX_CREATE_SYSTEM = 3
 # an encrypted entry, or an OS refusal to write this member's file (a reserved
 # name such as aux.txt on Windows, a path too long, a full disk).
 _MEMBER_ERRORS = (BadZipFile, zlib.error, NotImplementedError, RuntimeError, EOFError, OSError)
+
+# Compression method 9, Deflate64.  Windows Explorer writes it for large files,
+# and zipfile cannot read it (it has no constant for it either), so these
+# members are decoded with inflate64 by _copy_deflate64().
+_DEFLATE64 = 9
+
+# The local file header: a fixed 30-byte part, then the name and extra field.
+# Their lengths are the two unsigned shorts at offset 26.
+_LOCAL_HEADER_SIZE = 30
+_LOCAL_HEADER_SIGNATURE = b"PK\x03\x04"
+_COPY_CHUNK = 64 * 1024
+
+
+def _copy_deflate64(raw: IO[bytes], info: ZipInfo, out: IO[bytes]) -> None:
+    """Decode one Deflate64 member from the archive stream into out.
+
+    Reads only this member's bytes: from its local header at header_offset,
+    compress_size bytes of data.  Zip compresses every member on its own, so
+    random access is kept.  The sizes and CRC come from the central directory,
+    which zipfile has already parsed, ZIP64 fields included.
+
+    Raises BadZipFile for a bad header, corrupt or truncated data, or a size
+    or CRC mismatch, so one bad member spoils only itself.
+    """
+    import inflate64  # lazy: only loaded when a Deflate64 member is read
+
+    if info.flag_bits & 0x1:
+        raise NotImplementedError("encrypted Deflate64 member")
+    raw.seek(info.header_offset)
+    header = raw.read(_LOCAL_HEADER_SIZE)
+    if len(header) != _LOCAL_HEADER_SIZE or not header.startswith(_LOCAL_HEADER_SIGNATURE):
+        raise BadZipFile(f"bad local file header for {info.filename!r}")
+    name_len, extra_len = struct.unpack("<HH", header[26:30])
+    raw.seek(name_len + extra_len, 1)
+
+    inflater = inflate64.Inflater()
+    remaining = info.compress_size
+    size = 0
+    crc = 0
+    while remaining:
+        chunk = raw.read(min(_COPY_CHUNK, remaining))
+        if not chunk:
+            raise BadZipFile(f"truncated Deflate64 data for {info.filename!r}")
+        remaining -= len(chunk)
+        try:
+            data = inflater.inflate(chunk)
+        except ValueError as exc:  # inflate64 reports corrupt data as ValueError
+            raise BadZipFile(f"corrupt Deflate64 data for {info.filename!r}: {exc}") from exc
+        out.write(data)
+        size += len(data)
+        crc = zlib.crc32(data, crc)
+    if not inflater.eof:
+        raise BadZipFile(f"truncated Deflate64 data for {info.filename!r}")
+    if size != info.file_size:
+        raise BadZipFile(f"size mismatch for {info.filename!r}: {size} != {info.file_size}")
+    if crc != info.CRC:
+        raise BadZipFile(f"Bad CRC-32 for file {info.filename!r}")
 
 
 def _is_symlink(info: ZipInfo) -> bool:
@@ -99,8 +158,13 @@ class ZipArchiveHandler:
                             on_failed(member, "member name escapes the extraction folder")
                         continue
                     try:
-                        with zf.open(entry) as src, dest.open("wb") as out:
-                            shutil.copyfileobj(src, out)
+                        if entry.compress_type == _DEFLATE64:
+                            # Safe alongside zf: each zf.open() seeks to its own offset.
+                            with dest.open("wb") as out:
+                                _copy_deflate64(raw, entry, out)
+                        else:
+                            with zf.open(entry) as src, dest.open("wb") as out:
+                                shutil.copyfileobj(src, out)
                     except _MEMBER_ERRORS as exc:
                         if on_failed is not None:
                             on_failed(member, str(exc))

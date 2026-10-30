@@ -19,7 +19,9 @@ import multiprocessing as mp
 import os
 import queue
 import stat
+import struct
 import zipfile
+import zlib
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -782,6 +784,119 @@ def test_zip_handler_extract_members(tmp_path: Path) -> None:
     ziphandler.extract_members(zp, ["data.txt"], dest_dir, on_extracted=lambda member, path: got.update({member: path}))
     assert got["data.txt"].read_bytes() == payload
     assert got["data.txt"].parent == dest_dir
+
+
+def _write_raw_zip(path: Path, members: list[tuple[str, bytes, int]], *, bad_crc: str | None = None) -> None:
+    """Write a zip by hand, so members can use Deflate64, which zipfile cannot write.
+
+    Each member is (name, data, method): method 0 stores the data, 9 compresses
+    it with inflate64.  The member named by bad_crc gets a wrong CRC.
+    """
+    import inflate64
+
+    local = bytearray()
+    central = bytearray()
+    for name, data, method in members:
+        if method == 9:
+            deflater = inflate64.Deflater()
+            stored = deflater.deflate(data) + deflater.flush()
+        else:
+            stored = data
+        crc = zlib.crc32(data) ^ (0xFFFFFFFF if name == bad_crc else 0)
+        encoded = name.encode()
+        offset = len(local)
+        # version, flags, method, time, date (1980-01-01), crc, sizes, name and extra lengths
+        fields = (20, 0, method, 0, 0x21, crc, len(stored), len(data), len(encoded), 0)
+        local += struct.pack("<4sHHHHHIIIHH", b"PK\x03\x04", *fields) + encoded + stored
+        central += struct.pack("<4sHHHHHHIIIHHHHHII", b"PK\x01\x02", 20, *fields, 0, 0, 0, 0, offset) + encoded
+    end = struct.pack("<4sHHHHIIH", b"PK\x05\x06", 0, 0, len(members), len(members), len(central), len(local), 0)
+    path.write_bytes(bytes(local + central + end))
+
+
+def _extract_all(zp: Path, members: list[str], dest_dir: Path) -> tuple[dict[str, bytes], dict[str, str]]:
+    """Extract members with the zip handler; return (extracted bytes, failure reasons) by member."""
+    from piidigger.archivehandlers._zip import handler as ziphandler
+
+    got: dict[str, bytes] = {}
+    failed: dict[str, str] = {}
+    ziphandler.extract_members(
+        zp,
+        members,
+        dest_dir,
+        on_extracted=lambda member, path: got.update({member: path.read_bytes()}),
+        on_failed=lambda member, reason: failed.update({member: reason}),
+    )
+    return got, failed
+
+
+@pytest.mark.unit
+def test_zip_handler_extracts_deflate64_members_alongside_stored_ones(tmp_path: Path) -> None:
+    """Deflate64 (method 9, written by Windows Explorer) is decoded; stored members still extract."""
+    big = b"Deflate64 member content, repeated to span several read chunks. " * 4000
+    zp = tmp_path / "d64.zip"
+    _write_raw_zip(zp, [("big.txt", big, 9), ("plain.txt", b"stored member", 0), ("small.txt", b"tiny", 9)])
+
+    got, failed = _extract_all(zp, ["big.txt", "plain.txt", "small.txt"], tmp_path / "out")
+
+    assert failed == {}
+    assert got == {"big.txt": big, "plain.txt": b"stored member", "small.txt": b"tiny"}
+
+
+@pytest.mark.unit
+def test_zip_handler_deflate64_bad_crc_spoils_only_that_member(tmp_path: Path) -> None:
+    zp = tmp_path / "badcrc.zip"
+    _write_raw_zip(zp, [("bad.txt", b"corrupted by its CRC", 9), ("good.txt", b"still fine", 9)], bad_crc="bad.txt")
+
+    got, failed = _extract_all(zp, ["bad.txt", "good.txt"], tmp_path / "out")
+
+    assert "CRC" in failed["bad.txt"]
+    assert got == {"good.txt": b"still fine"}
+
+
+@pytest.mark.unit
+def test_zip_handler_deflate64_corrupt_data_spoils_only_that_member(tmp_path: Path) -> None:
+    """inflate64 reports corrupt data as ValueError; it must not escape as anything but a member failure."""
+    zp = tmp_path / "corrupt.zip"
+    _write_raw_zip(zp, [("bad.txt", os.urandom(5000), 9), ("good.txt", b"fine", 0)])
+    raw = bytearray(zp.read_bytes())
+    raw[30 + len("bad.txt")] = 0xFF  # the first block header now names block type 3, which is invalid
+    zp.write_bytes(bytes(raw))
+
+    got, failed = _extract_all(zp, ["bad.txt", "good.txt"], tmp_path / "out")
+
+    assert "corrupt Deflate64 data" in failed["bad.txt"]
+    assert got == {"good.txt": b"fine"}
+
+
+@pytest.mark.unit
+def test_zip_handler_deflate64_truncated_member_fails_instead_of_hanging(tmp_path: Path) -> None:
+    """A compress_size that runs past the end of the file is a failure, not an endless read."""
+    data = b"truncated member " * 2000
+    zp = tmp_path / "trunc.zip"
+    _write_raw_zip(zp, [("t.txt", data, 9)])
+    raw = bytearray(zp.read_bytes())
+    # Point the central directory's compressed size far past the end of the file.
+    cd = raw.rindex(b"PK\x01\x02")
+    struct.pack_into("<I", raw, cd + 20, 10 * len(raw))
+    zp.write_bytes(bytes(raw))
+
+    got, failed = _extract_all(zp, ["t.txt"], tmp_path / "out")
+
+    assert got == {}
+    assert failed["t.txt"] == "truncated Deflate64 data for 't.txt'"
+
+
+@pytest.mark.unit
+def test_scan_archive_members_finds_pii_in_a_deflate64_member(tmp_path: Path) -> None:
+    zp = tmp_path / "pii64.zip"
+    _write_raw_zip(zp, [("card.txt", b"card number: 4111111111111111", 9)])
+
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+    result = _scan(_scan_archive_task(zp, "card.txt"), ctx)
+
+    assert result.status == "ok"
+    assert result.counters.get("tasks_failed", 0) == 0
+    assert result.findings[0]["source_member_path"] == "card.txt"
 
 
 @pytest.mark.unit
