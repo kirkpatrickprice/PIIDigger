@@ -23,6 +23,7 @@ import struct
 import zipfile
 import zlib
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from typing import Any
 import pytest
 
 import piidigger.orchestration.secure_delete as secure_delete_mod
+from piidigger.models.archive import MemberInfo
 from piidigger.models.config import ArchiveConfig, Config
 from piidigger.models.tasks import Task, TaskProgress, TaskResult, TaskType
 from piidigger.orchestration.context import WorkerContext
@@ -1837,15 +1839,7 @@ def test_enum_archive_skips_members_too_deep_to_reach(tmp_path: Path, archive_ty
 
 @pytest.mark.unit
 def test_enum_archive_scans_a_repeated_path_once(tmp_path: Path) -> None:
-    import io
-    import tarfile
-
-    archive = tmp_path / "dupe.tar"
-    with tarfile.open(archive, "w") as tf:
-        for data in (b"first", b"second"):
-            info = tarfile.TarInfo("same.txt")
-            info.size = len(data)
-            tf.addfile(info, io.BytesIO(data))
+    archive = _plain_tar(tmp_path, [("same.txt", b"first"), ("same.txt", b"second")])
     ctx = _make_ctx(tmp_path)
 
     result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="tar"), ctx, _logger())
@@ -1948,13 +1942,17 @@ def test_tar_gz_batches_read_the_archive_a_bounded_number_of_times(
 # ---------------------------------------------------------------------------
 
 
-def _plain_tar(tmp_path: Path, members: dict[str, bytes], name: str = "plain") -> Path:
+def _plain_tar(tmp_path: Path, members: dict[str, bytes] | Iterable[tuple[str, bytes]], name: str = "plain") -> Path:
+    """Write members, in order and with names kept exactly, to an uncompressed tar.
+
+    Pass (name, data) pairs rather than a dict to repeat a name.
+    """
     import io
     import tarfile
 
     path = tmp_path / f"{name}.tar"
     with tarfile.open(path, "w") as tf:
-        for member, data in members.items():
+        for member, data in members.items() if isinstance(members, dict) else members:
             info = tarfile.TarInfo(member)
             info.size = len(data)
             tf.addfile(info, io.BytesIO(data))
@@ -2218,6 +2216,173 @@ def test_enum_dir_follows_the_same_rule(
     result = handle_enum_dir(_enum_dir_task(root), ctx, _logger())
 
     assert [Path(t["payload"]["file_path"]).name for t in result.new_tasks] == ([name] if scanned else [])
+
+
+# ---------------------------------------------------------------------------
+# Unscannable members are filtered out before the limits
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_enum_archive_unscannable_members_do_not_use_up_the_size_budget(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A large video ahead of a small text file used to fill the total-size budget and crowd it out."""
+    archive = _build_archive(tmp_path, "zip", {"video.mp4": b"\0" * (2 * 1024 * 1024), "after.txt": b"notes"})
+    ctx = _make_ctx(tmp_path, archives={"max_total_uncompressed_size_mb": 1})
+    logger = logging.getLogger("tests.archives.budget")
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        result = handle_enum_archive_members(_enum_archive_task(archive), ctx, logger)
+
+    assert _member_paths(result) == ["after.txt"]
+    assert result.counters["archive_members_skipped"] == 1
+    assert not any("max_total_uncompressed_size_mb" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_enum_archive_unscannable_members_still_count_toward_the_depth_limit(tmp_path: Path) -> None:
+    """In a compressed tar, reaching a member means decompressing whatever precedes it, scannable or not."""
+    archive = _build_archive(tmp_path, "tar", {"video.mp4": b"\0" * (2 * 1024 * 1024), "after.txt": b"notes"})
+    ctx = _make_ctx(tmp_path, archives={"max_total_uncompressed_size_mb": 1})
+
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="tar"), ctx, _logger())
+
+    assert result.status == "ok"
+    assert archive.name.endswith(".tar.gz")
+    assert _member_paths(result) == []
+    assert result.counters["archive_members_skipped"] == 2
+
+
+@pytest.mark.unit
+def test_enum_archive_member_count_limit_counts_only_scannable_members(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    members = {f"clip{i}.mp4": b"x" for i in range(3)} | {"x.txt": b"x", "y.txt": b"y", "z.txt": b"z"}
+    archive = _build_archive(tmp_path, "zip", members)
+    ctx = _make_ctx(tmp_path, archives={"max_members": 2})
+    logger = logging.getLogger("tests.archives.count")
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        result = handle_enum_archive_members(_enum_archive_task(archive), ctx, logger)
+
+    assert _member_paths(result) == ["x.txt", "y.txt"]
+    assert result.counters["archive_members_skipped"] == 4  # 3 videos, then z.txt over the limit
+    limit_warnings = [r.getMessage() for r in caplog.records if "max_members" in r.getMessage()]
+    assert limit_warnings == [f"archive {archive}: 1 member(s) not scanned: max_members (2) reached ('z.txt')"]
+
+
+@pytest.mark.unit
+def test_enum_archive_does_not_warn_about_repeated_unscannable_members(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    archive = _plain_tar(tmp_path, [("img.png", b"a"), ("img.png", b"b"), ("a.txt", b"t")])
+    logger = logging.getLogger("tests.archives.dupes")
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        result = handle_enum_archive_members(
+            _enum_archive_task(archive, archive_type="tar"), _make_ctx(tmp_path), logger
+        )
+
+    assert _member_paths(result) == ["a.txt"]
+    assert not any("appears earlier in the archive" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_enum_archive_rejects_traversal_whatever_the_member_type(tmp_path: Path) -> None:
+    """Path traversal is a sign of a hostile archive, so it is counted even for a type that is never scanned."""
+    archive = _plain_tar(tmp_path, {"../evil.mp4": b"x", "ok.txt": b"t"})
+
+    result = handle_enum_archive_members(
+        _enum_archive_task(archive, archive_type="tar"), _make_ctx(tmp_path), _logger()
+    )
+
+    assert _member_paths(result) == ["ok.txt"]
+    assert result.counters["archive_errors"] == 1
+
+
+def _member(name: str, size: int = 10, *, encrypted: bool = False) -> MemberInfo:
+    return MemberInfo(name=name, uncompressed_size=size, compressed_size=size, is_dir=False, is_encrypted=encrypted)
+
+
+def _enum_listed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    members: list[MemberInfo],
+    logger: logging.Logger,
+    archives: dict[str, Any] | None = None,
+) -> TaskResult:
+    """Enumerate a stand-in archive whose handler lists exactly these members."""
+    from piidigger.orchestration.worker import _enum_archive as enum_mod
+
+    class _Listed:
+        def list_members(self, archive_path: Path, on_progress: object = None) -> list[MemberInfo]:
+            return members
+
+    monkeypatch.setattr(enum_mod, "get_handler", lambda archive_type: _Listed())
+    return handle_enum_archive_members(
+        _enum_archive_task(tmp_path / "listed.zip"), _make_ctx(tmp_path, archives=archives), logger
+    )
+
+
+@pytest.mark.unit
+def test_enum_archive_logs_each_skip_reason_once_per_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A hostile archive's thousands of bad entries cost one log line per reason, not one per entry."""
+    members = (
+        [_member(n) for n in ("a.txt", "b.txt", "c.txt")]
+        + [_member(f"../x{i}.txt") for i in range(50)]
+        + [_member("a.txt") for _ in range(50)]
+    )
+    logger = logging.getLogger("tests.archives.flood")
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        result = _enum_listed(monkeypatch, tmp_path, members, logger, {"max_members": 2})
+
+    assert _member_paths(result) == ["a.txt", "b.txt"]
+    assert result.counters["archive_errors"] == 50
+    assert result.counters["archive_members_skipped"] == 101
+    messages = [r.getMessage().split(": ", 1)[1] for r in caplog.records]
+    assert messages == [
+        "50 member(s) not scanned: path traversal rejected ('../x0.txt', '../x1.txt', '../x2.txt' and 47 more)",
+        "50 member(s) not scanned: path appears earlier in the archive; only its first copy is considered "
+        "('a.txt', 'a.txt', 'a.txt' and 47 more)",
+        "1 member(s) not scanned: max_members (2) reached ('c.txt')",
+    ]
+
+
+@pytest.mark.unit
+def test_enum_archive_skips_a_repeat_whose_first_copy_was_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Extraction takes the first entry for a name, so a later copy is never scanned in its place."""
+    members = [_member(n) for n in ("a.txt", "b.txt", "c.txt", "c.txt")]
+    logger = logging.getLogger("tests.archives.repeat")
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        result = _enum_listed(monkeypatch, tmp_path, members, logger, {"max_members": 2})
+
+    assert _member_paths(result) == ["a.txt", "b.txt"]
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("1 member(s) not scanned: max_members (2) reached ('c.txt')" in m for m in messages)
+    assert any("1 member(s) not scanned: path appears earlier in the archive" in m for m in messages)
+
+
+@pytest.mark.unit
+def test_enum_archive_member_count_limit_is_checked_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Members skipped for another reason are reported for that reason, not blamed on the count limit."""
+    members = [_member("a.txt")] + [_member(f"secret{i}.txt", encrypted=True) for i in range(5)]
+    logger = logging.getLogger("tests.archives.countlast")
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        result = _enum_listed(monkeypatch, tmp_path, members, logger, {"max_members": 1})
+
+    assert _member_paths(result) == ["a.txt"]
+    messages = [r.getMessage().split(": ", 1)[1] for r in caplog.records]
+    assert messages == ["5 member(s) not scanned: encrypted ('secret0.txt', 'secret1.txt', 'secret2.txt' and 2 more)"]
 
 
 # ---------------------------------------------------------------------------

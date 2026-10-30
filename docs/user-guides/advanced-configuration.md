@@ -176,7 +176,7 @@ See [Archive Handling](archive-handling.md) for additional details on how PIIDig
 | `enabled` | `true` | Whether to look inside archive files at all. |
 | `formats` | `["all"]` | Archive types to open. Valid values: `"zip"`, `"7z"`, `"tar"` (covers `.tar`, `.tgz`, `.tar.gz`, `.tbz2`, `.tar.bz2`, `.txz`, `.tar.xz`), or `["all"]`. |
 | `max_depth` | `1` | Reserved for future nested-archive support (an archive inside an archive). **Currently has no effect** — a `.zip`/`.7z`/`.tar` found inside another archive is always skipped, regardless of this value. |
-| `max_members` | `10000` | Stop enumerating an archive after this many members. Helps prevent against some archive-based denial of service attacks |
+| `max_members` | `10000` | Scan at most this many members from one archive. Only members PIIDigger would otherwise scan count toward it; unreadable types (videos, images) don't. Helps prevent against some archive-based denial of service attacks |
 | `max_member_uncompressed_size_mb` | `512` | Skip any single archive member larger than this uncompressed. Also used as part of a 1000:1 compression-ratio check that rejects likely zip bombs. |
 | `max_total_uncompressed_size_mb` | `8192` | Stop pulling more members from one archive once their combined uncompressed size passes this limit. For compressed `.tar` and `.7z` archives, also skip any member that sits behind more than this much data in the archive. |
 | `max_batch_mb` | `1024` | Each archive is split into at least one scan batch per worker. This adds more batches only for archives larger than workers × this value. Each extra batch re-reads the part of the archive before it, so a higher value saves CPU on very large compressed `.tar` and `.7z` archives. Most users never need to change it. |
