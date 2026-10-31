@@ -94,10 +94,13 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
 
     # Count individual match values, not ResultRecord objects, to match CSV row count.
     results_count = sum(len(v) for f in findings for v in f.get("matches", {}).values())
+    # Part of the file was not read: an error, so the scan summary says so, that
+    # still carries the findings from the part that was.
     return TaskResult(
         task_id=task.task_id,
         task_type=task.task_type,
-        status="ok",
+        status="error" if item.unread_reason else "ok",
+        error_message=item.unread_reason,
         findings=findings,
         counters={"files_scanned": 1, "bytes_scanned": payload.size, "results_found": results_count},
         worker_pid=os.getpid(),

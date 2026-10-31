@@ -39,6 +39,12 @@ class ScannableItem(Protocol):
     # content is chunked for the data handlers.
     def report_progress(self) -> None: ...
 
+    # A file handler calls this when it yields what it could read but had to
+    # leave part of the file unread.  The caller keeps the findings and reports
+    # the file as not fully scanned; raising would lose both the findings and
+    # the content still to come.
+    def report_unread(self, reason: str) -> None: ...
+
 
 @runtime_checkable
 class FileHandler(Protocol):

@@ -30,6 +30,14 @@ class TestFilesystemItem:
         FilesystemItem(f, on_progress=lambda: calls.append(1)).report_progress()
         assert calls == [1]
 
+    def test_report_unread_is_read_back_from_unread_reason(self, tmp_path):
+        f = tmp_path / "a.pdf"
+        f.write_bytes(b"x")
+        item = FilesystemItem(f)
+        assert item.unread_reason is None
+        item.report_unread("1 of 2 pages")
+        assert item.unread_reason == "1 of 2 pages"
+
     def test_report_progress_without_on_progress_does_nothing(self, tmp_path):
         f = tmp_path / "doc.pdf"
         f.write_bytes(b"x")

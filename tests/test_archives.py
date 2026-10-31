@@ -2550,6 +2550,33 @@ def test_scan_archive_member_with_undetectable_encoding_is_counted_not_failed(tm
 
 
 @pytest.mark.unit
+def test_scan_member_partly_read_keeps_findings_and_counts_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As for a file on disk: not fully scanned, but what was found still reaches the output."""
+    import piidigger.filehandlers as filehandlers
+
+    class _PartialReader:
+        def read(self, source: ScannableItem, config: Config) -> Iterable[str]:
+            yield "card 4893013335386137"
+            source.report_unread("1 of 2 PDF pages could not be read")
+
+    real = filehandlers.get_handler_for
+    monkeypatch.setattr(
+        filehandlers, "get_handler_for", lambda ext, mime: _PartialReader() if ext == ".txt" else real(ext, mime)
+    )
+    archive = _build_archive(tmp_path, "zip", {"partly.txt": b"x", "whole.csv": b"card 5105105105105100"})
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+
+    outcome = _scan(_scan_archive_task(archive, "partly.txt", "whole.csv"), ctx)
+
+    assert outcome.result.status == "ok", "one partly read member must not fail the batch"
+    assert len(outcome.findings) == 2
+    assert outcome.counters["tasks_failed"] == 1
+    assert outcome.counters["files_scanned"] == 2
+
+
+@pytest.mark.unit
 def test_scan_member_reports_progress_while_reading(tmp_path: Path) -> None:
     """An extracted member keeps its batch alive by being read, as a file on disk does."""
     from piidigger.models.payloads import ScanArchiveMembersPayload

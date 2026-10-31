@@ -17,7 +17,7 @@ Known gaps we chose not to fix yet. Each entry says what is wrong, why it was de
   - **Scripts and full results:** [docs/architecture/orchestration/measurements/queue-lock-hangs/](docs/architecture/orchestration/measurements/queue-lock-hangs/README.md). Rerun them after the fix.
 - **Why deferred:** Accepted for now; to be fixed in the next release.
   - Exposure requires a worker death on Linux/macOS. Deadline kills are low-risk, because a worker silent for 2× its timeout has long since flushed its messages.
-  - **The memory sweep adds a routine kill source**, about 9 kills in a full OneDrive scan. It stops a worker mid-task, so the read lock and the late-result race are avoided by design: idle workers retire themselves, and the coordinator drains waiting results before each sweep. The write-lock risk remains. A runaway file's worker sends one small message a second, so its own feeder holds the lock far less often than the busy small-file workers behind the measured ~4%. Its rate is unmeasured; per-worker pipes remove it.
+  - **The memory sweep adds a kill source**, measured at about 9 kills in a full OneDrive scan before the PDF font cache removed the known runaway cause. The rate after that fix is unmeasured. It stops a worker mid-task, so the read lock and the late-result race are avoided by design: idle workers retire themselves, and the coordinator drains waiting results before each sweep. The write-lock risk remains. A runaway file's worker sends one small message a second, so its own feeder holds the lock far less often than the busy small-file workers behind the measured ~4%. Its rate is unmeasured; per-worker pipes remove it.
   - The realistic trigger is a native crash on a poison file. Only a few mature libraries can crash that way: `lxml`, py7zr's codecs (`pyppmd`, `inflate64`, `bcj`, `brotli`, `pycryptodomex`), stdlib `zlib`/`lzma`/`bz2`, and `charset-normalizer`. `pypdf` is pure Python.
   - Slower storage, such as network shares, lowers coordinator saturation and the rate. That case is unmeasured.
 - **Where:** `orchestration/context.py` (the shared queues and event), `orchestration/worker/_loop.py`, `orchestration/coordinator.py` (`_drain`, `_teardown`), `run.py` (queue creation).
@@ -97,7 +97,7 @@ Known gaps we chose not to fix yet. Each entry says what is wrong, why it was de
 ## Tooling
 
 ### Files that `ruff format` would still change
-- **What:** `src/piidigger/run.py` (Python 3.14 `except A, B:` style), `src/piidigger/archivehandlers/__init__.py`, `src/piidigger/filehandlers/pdf.py` and `tests/test_archives.py` were already unformatted before the archive-batching work.
+- **What:** `src/piidigger/run.py` (Python 3.14 `except A, B:` style), `src/piidigger/archivehandlers/__init__.py` and `tests/test_archives.py` were already unformatted before the archive-batching work.
 - **Suggested fix:** Run `uv run ruff format src/ tests/` in a commit of its own.
 
 ### `mkdocs build --strict` fails on links to source files

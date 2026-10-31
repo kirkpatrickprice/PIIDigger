@@ -97,7 +97,9 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             failed(member, f"extracted path {path} is outside the task folder")
             return
         try:
-            findings, counters = _scan_member(member, path, payload, ctx.config, enabled_handlers, reporter.alive)
+            findings, counters, unread_reason = _scan_member(
+                member, path, payload, ctx.config, enabled_handlers, reporter.alive
+            )
         except UndetectableEncodingError as exc:
             # As in handle_scan_file: logged, counted as scanned, not a failure.
             discard(member, path)
@@ -111,6 +113,10 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             return
         discard(member, path)
         reported.add(member)
+        if unread_reason is not None:
+            # As in handle_scan_file: not fully scanned, but keep what was found.
+            logger.error("error scanning archive member %s::%s: %s", payload.archive_path, member, unread_reason)
+            counters["tasks_failed"] = 1
         reporter.item_done(member, findings, counters)
 
     try:
@@ -154,7 +160,7 @@ def _scan_member(
     config: Config,
     enabled_handlers: list[DataHandler],
     on_progress: Callable[[], None],
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
+) -> tuple[list[dict[str, Any]], dict[str, int], str | None]:
     """Run the file handler and data handlers over one extracted member.
 
     on_progress is called on every read of the extracted file and after each
@@ -162,8 +168,8 @@ def _scan_member(
     batch alive.
 
     Returns the member's findings (one ResultRecord dict per data handler that
-    matched) and its counters.  Raises on any reader error; the caller reports
-    the member as failed.
+    matched), its counters, and why part of it was not read, if so.  Raises on
+    any other reader error; the caller reports the member as failed.
     """
     from piidigger.filehandlers import get_handler_for  # lazy: xlrd import triggers SyntaxWarning
 
@@ -192,4 +198,4 @@ def _scan_member(
         for handler_name, match_dict in per_handler.items()
     ]
     results_found = sum(len(values) for f in findings for values in f.get("matches", {}).values())
-    return findings, {"files_scanned": 1, "bytes_scanned": size, "results_found": results_found}
+    return findings, {"files_scanned": 1, "bytes_scanned": size, "results_found": results_found}, item.unread_reason

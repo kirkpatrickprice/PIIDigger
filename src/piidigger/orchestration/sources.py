@@ -28,6 +28,8 @@ class FilesystemItem:
     path, which avoids loading large files fully into memory.
     report_progress() passes a file handler's own progress (a finished PDF page)
     to on_progress, for work that neither reads new bytes nor yields content.
+    report_unread() records why part of the file was not read, for the worker
+    to read back from unread_reason once the handler has finished.
     """
 
     def __init__(
@@ -44,6 +46,7 @@ class FilesystemItem:
         self._archive_path = archive_path
         self._member_path = member_path
         self._on_progress = on_progress
+        self._unread_reason: str | None = None
 
     @property
     def display_path(self) -> str:
@@ -85,3 +88,10 @@ class FilesystemItem:
     def report_progress(self) -> None:
         if self._on_progress is not None:
             self._on_progress()
+
+    def report_unread(self, reason: str) -> None:
+        self._unread_reason = reason
+
+    @property
+    def unread_reason(self) -> str | None:
+        return self._unread_reason

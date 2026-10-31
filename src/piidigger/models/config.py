@@ -67,8 +67,9 @@ _LINUX_EXCLUDE_DIRS: list[str] = [
 _DEFAULT_PERFORMANCE: Literal["balanced"] = "balanced"
 _DEFAULT_TIMEOUT_SECONDS: int = 30
 # Per-worker memory ceiling.  A profile of 1,713 real documents peaked at 541 MB
-# for any normal file; runaway PDFs grew past 4 GB.  1 GB clears the first with
-# room to spare and stops the second within seconds.
+# for any normal file; runaway PDFs grew past 4 GB before the PDF handler's font
+# cache removed that cause.  1 GB clears normal files with room to spare and
+# stops the next unknown runaway within seconds.
 _DEFAULT_MAX_WORKER_MEMORY_MB: int = 1024
 _DEFAULT_LOG_FILE: str = "logs/piidigger.log"
 _DEFAULT_LOG_LEVEL: str = "INFO"

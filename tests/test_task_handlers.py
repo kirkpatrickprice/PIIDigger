@@ -649,6 +649,28 @@ def test_scan_file_error_message_names_the_exception_type(tmp_path: Path) -> Non
     assert result.error_message == "KeyError: '7'"
 
 
+@pytest.mark.unit
+def test_scan_file_partly_read_keeps_findings_and_reports_an_error(tmp_path: Path) -> None:
+    """A handler that skipped part of a file must not make it look fully scanned, or lose what it found."""
+
+    class _PartialReader:
+        def read(self, source, config):  # noqa: ANN001, ANN202
+            yield "card 4893013335386137"
+            source.report_unread("1 of 2 PDF pages could not be read")
+
+    f = tmp_path / "partly.pdf"
+    f.write_bytes(b"x")
+
+    with unittest.mock.patch("piidigger.filehandlers.get_handler_for", return_value=_PartialReader()):
+        result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path, data_handlers=["pan"]), _logger())
+
+    assert result.status == "error"
+    assert result.error_message == "1 of 2 PDF pages could not be read"
+    assert result.findings, "the findings from the part that was read were lost"
+    assert result.counters["files_scanned"] == 1
+    assert result.counters["results_found"] == 1
+
+
 # ---------------------------------------------------------------------------
 # handle_scan_file: progress keeps a long scan alive
 # ---------------------------------------------------------------------------
