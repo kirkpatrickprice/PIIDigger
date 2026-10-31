@@ -631,7 +631,7 @@ def test_startup_panel_shows_windows_drive_roots_intact() -> None:
     progress = ProgressDisplay()
     config = Config(start_dirs=["C:\\", "D:\\"])
 
-    _emit_startup_info(progress, logging.getLogger("tests.startup"), config, 4, wake_mode=None)
+    _emit_startup_info(progress, logging.getLogger("tests.startup"), config, 4, None, "1,024 MB per worker", None)
 
     console = Console(width=200, color_system=None)
     with console.capture() as captured:
@@ -671,26 +671,18 @@ def test_memory_budget_at_exactly_half_the_ram_does_not_warn() -> None:
     assert _memory_budget(1024, 2, 4 * _GB)[1] is None
 
 
-def _small_ram(monkeypatch: pytest.MonkeyPatch, total: int = 2 * _GB) -> None:
-    """Make psutil report a machine with *total* bytes of RAM."""
-    import types
-
-    import piidigger.run as run_mod
-
-    monkeypatch.setattr(run_mod.psutil, "virtual_memory", lambda: types.SimpleNamespace(total=total))
+_WARNING = _memory_budget(1024, 3, 2 * _GB)[1]
 
 
 @pytest.mark.unit
-def test_startup_info_logs_the_memory_limit_and_shows_its_warning(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_startup_info_logs_the_memory_limit_and_shows_its_warning(caplog: pytest.LogCaptureFixture) -> None:
     """The warning is logged once, by _check_memory(); the display still shows it."""
-    _small_ram(monkeypatch)
+    description, warning = _memory_budget(1024, 3, 2 * _GB)
     logger = logging.getLogger("tests.startup.memory")
     progress = ProgressDisplay()
 
     with caplog.at_level(logging.INFO, logger=logger.name):
-        _emit_startup_info(progress, logger, Config(start_dirs=[]), 3, wake_mode=None)
+        _emit_startup_info(progress, logger, Config(start_dirs=[]), 3, None, description, warning)
 
     messages = [(r.levelno, r.getMessage()) for r in caplog.records]
     assert (logging.INFO, "Memory limit: 1,024 MB per worker (up to ~3.0 GB for 3 workers)") in messages
@@ -702,10 +694,9 @@ def test_startup_info_logs_the_memory_limit_and_shows_its_warning(
 def test_memory_check_passes_without_asking_when_within_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     import piidigger.run as run_mod
 
-    _small_ram(monkeypatch, 32 * _GB)
     monkeypatch.setattr(run_mod, "_prompt_continue", lambda question: pytest.fail("must not prompt"))
 
-    assert _check_memory(Config(start_dirs=[]), 3, logging.getLogger("tests.memcheck")) is True
+    assert _check_memory(None, logging.getLogger("tests.memcheck")) is True
 
 
 @pytest.mark.unit
@@ -715,14 +706,13 @@ def test_memory_check_prompts_on_a_terminal_and_follows_the_answer(
 ) -> None:
     import piidigger.run as run_mod
 
-    _small_ram(monkeypatch)
     monkeypatch.setattr(run_mod.sys.stdin, "isatty", lambda: True, raising=False)
     questions: list[str] = []
     monkeypatch.setattr(run_mod, "_prompt_continue", lambda question: questions.append(question) or answer)
     logger = logging.getLogger("tests.memcheck")
 
     with caplog.at_level(logging.INFO, logger=logger.name):
-        assert _check_memory(Config(start_dirs=[]), 3, logger) is answer
+        assert _check_memory(_WARNING, logger) is answer
 
     assert len(questions) == 1
     assert "of this machine's 2.0 GB RAM" in questions[0]
@@ -737,13 +727,12 @@ def test_memory_check_continues_without_asking_when_not_interactive(
 ) -> None:
     import piidigger.run as run_mod
 
-    _small_ram(monkeypatch)
     monkeypatch.setattr(run_mod.sys.stdin, "isatty", lambda: False, raising=False)
     monkeypatch.setattr(run_mod, "_prompt_continue", lambda question: pytest.fail("must not prompt"))
     logger = logging.getLogger("tests.memcheck")
 
     with caplog.at_level(logging.INFO, logger=logger.name):
-        assert _check_memory(Config(start_dirs=[]), 3, logger) is True
+        assert _check_memory(_WARNING, logger) is True
 
     assert any("non-interactive mode" in r.getMessage() for r in caplog.records)
 
@@ -770,10 +759,54 @@ def test_prompt_continue_defaults_to_continue_after_the_timeout(
 
 
 @pytest.mark.unit
+def test_an_answer_after_a_timed_out_prompt_reaches_the_next_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The admin prompt timing out must not leave a reader behind that swallows the memory prompt's "n"."""
+    import io
+
+    import piidigger.run as run_mod
+
+    class _LateStdin(io.StringIO):
+        """Like a terminal: each typed line is read once, and only after the user types it."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.typed = threading.Event()
+            self._lines = ["n\n"]
+            self._lock = threading.Lock()
+
+        def readline(self, size: int | None = -1) -> str:
+            self.typed.wait()
+            with self._lock:
+                if self._lines:
+                    return self._lines.pop(0)
+            threading.Event().wait()
+            return ""
+
+    stdin = _LateStdin()
+    monkeypatch.setattr(run_mod.sys, "stdin", stdin)
+
+    assert _prompt_continue("Admin user not detected.", timeout=0) is True
+    threading.Timer(0.2, stdin.typed.set).start()
+    assert _prompt_continue("Memory is tight.", timeout=5) is False
+
+
+@pytest.mark.unit
+def test_prompt_continue_treats_closed_stdin_as_continue_for_every_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+
+    import piidigger.run as run_mod
+
+    monkeypatch.setattr(run_mod.sys, "stdin", io.StringIO(""))
+
+    assert _prompt_continue("first", timeout=5) is True
+    assert _prompt_continue("second", timeout=5) is True, "end of input is not used up by the first prompt"
+
+
+@pytest.mark.unit
 def test_run_scan_aborts_when_the_memory_check_is_declined(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import piidigger.run as run_mod
 
-    monkeypatch.setattr(run_mod, "_check_memory", lambda config, worker_count, logger: False)
+    monkeypatch.setattr(run_mod, "_check_memory", lambda warning, logger: False)
     config = _startup_config(tmp_path)
 
     assert run_scan(config) == EXIT_ABORTED

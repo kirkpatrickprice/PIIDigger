@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from collections.abc import Callable
 from pathlib import Path
 from typing import IO
@@ -21,10 +22,12 @@ class FilesystemItem:
     materialize() returns the path itself — no temp copy needed for on-disk files.
     open_stream() returns a buffered, seekable binary file handle; the caller is
     responsible for closing it.  When on_progress is given, every read from disk
-    that returns data calls it, so a handler that reads a large file slowly
-    keeps its task alive without knowing about progress at all.
+    of bytes not read before calls it, so a handler that reads a large file
+    slowly keeps its task alive without knowing about progress at all.
     open_bytes() returns None — signals binary handlers to use the materialize()
     path, which avoids loading large files fully into memory.
+    report_progress() passes a file handler's own progress (a finished PDF page)
+    to on_progress, for work that neither reads new bytes nor yields content.
     """
 
     def __init__(
@@ -65,10 +68,20 @@ class FilesystemItem:
         return 0
 
     def open_stream(self) -> IO[bytes]:
-        return open_with_progress(self._path, self._on_progress)  # caller owns the close
+        # Python's default buffer, not the archive readers' 1 MiB: pypdf and
+        # openpyxl seek around, and every seek outside the buffer refills it.
+        # Only reads of new bytes count, so a parser looping over the same
+        # region cannot keep its task alive.
+        return open_with_progress(  # caller owns the close
+            self._path, self._on_progress, buffer_size=io.DEFAULT_BUFFER_SIZE, new_bytes_only=True
+        )
 
     def open_bytes(self) -> bytes | None:
         return None
 
     def materialize(self) -> Path:
         return self._path
+
+    def report_progress(self) -> None:
+        if self._on_progress is not None:
+            self._on_progress()

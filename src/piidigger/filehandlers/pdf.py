@@ -44,6 +44,11 @@ class PdfHandler:
                     page_content = page.extract_text()
                 except _PAGE_ERRORS:
                     continue
+                finally:
+                    # A finished page is real progress.  Text is still chunked
+                    # by the content buffer, so a match is never split at a
+                    # page break; pypdf stuck inside one page reports nothing.
+                    source.report_progress()
                 for line in page_content.split("\n"):
                     content_buffer.append_content(line)
                     if content_buffer.content_buffer_full():

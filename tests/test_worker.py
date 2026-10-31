@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from piidigger.models.config import Config
-from piidigger.models.tasks import SHUTDOWN, Task, TaskResult, TaskStarted, TaskType, WorkerReady
+from piidigger.models.tasks import SHUTDOWN, Task, TaskResult, TaskStarted, TaskType, WorkerReady, WorkerRetiring
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
 from piidigger.orchestration.pool import WorkerPool, spawn_worker
@@ -263,6 +263,51 @@ def test_worker_loop_in_thread_dispatches_task() -> None:
     assert task_results[0].status == "ok"
     assert task_results[0].task_type is TaskType.NOOP
     assert len(heartbeats) == 1
+
+
+@pytest.mark.unit
+def test_worker_loop_retires_between_tasks_when_its_memory_is_high(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It exits after the task, before taking the next one, so it is never stopped while waiting on the queue."""
+    from piidigger.orchestration.worker import _loop
+
+    monkeypatch.setattr(_loop, "_rss_if_retiring", lambda process, ctx: 2_000 * 1024 * 1024)
+    task_queue: mp.Queue[object] = mp.Queue()
+    result_queue: mp.Queue[object] = mp.Queue()
+    ctx = WorkerContext(
+        config=Config(),
+        task_queue=task_queue,
+        result_queue=result_queue,
+        log_queue=mp.Queue(),
+        stop_event=mp.Event(),
+    )
+    task_queue.put(Task(task_type=TaskType.NOOP))
+    left_queued = Task(task_type=TaskType.NOOP)
+    task_queue.put(left_queued)
+
+    t = threading.Thread(target=worker_loop, args=(ctx,), daemon=True)
+    t.start()
+    t.join(timeout=10.0)
+    assert not t.is_alive(), "worker_loop did not exit after retiring"
+
+    msgs = [result_queue.get(timeout=10) for _ in range(4)]
+    assert [type(m) for m in msgs] == [WorkerReady, TaskStarted, TaskResult, WorkerRetiring]
+    assert msgs[3].rss == 2_000 * 1024 * 1024
+    assert task_queue.get(timeout=10).task_id == left_queued.task_id, "the next task is left for another worker"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("rss_mb", "retires"), [(900, False), (972, False), (973, True), (2_000, True)])
+def test_worker_retires_above_95_percent_of_the_limit(rss_mb: int, retires: bool) -> None:
+    """The margin keeps a waiting worker below the limit at which the coordinator stops workers."""
+    import types
+
+    from piidigger.orchestration.worker._loop import _rss_if_retiring
+
+    rss = rss_mb * 1024 * 1024
+    process = types.SimpleNamespace(memory_info=lambda: types.SimpleNamespace(rss=rss))
+    ctx = _make_minimal_ctx()  # max_worker_memory_mb defaults to 1024; 95% is 972.8 MB
+
+    assert (_rss_if_retiring(process, ctx) is not None) is retires  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

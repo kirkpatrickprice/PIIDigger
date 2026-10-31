@@ -73,6 +73,43 @@ def test_replace_stops_old_worker_and_starts_one() -> None:
 
 
 @pytest.mark.unit
+def test_retire_waits_for_a_worker_that_exits_and_starts_one() -> None:
+    """A retiring worker is between tasks and exits on its own, so it is never terminated."""
+    pool, spawner = _pool(3)
+    retiring = spawner.spawned[0]
+    assert retiring.pid is not None
+    retiring.exit_cleanly()
+
+    replacement = pool.retire(retiring.pid)
+
+    assert replacement is not None
+    assert retiring.terminate_calls == 0
+    assert retiring.pid not in pool.pids()
+    assert pool.size == 3
+
+
+@pytest.mark.unit
+def test_retire_stops_a_worker_that_does_not_exit() -> None:
+    pool, spawner = _pool(3)
+    stuck = spawner.spawned[0]
+    assert stuck.pid is not None
+
+    pool.retire(stuck.pid)
+
+    assert stuck.terminate_calls == 1
+    assert stuck.pid not in pool.pids()
+    assert pool.size == 3
+
+
+@pytest.mark.unit
+def test_retire_unknown_pid_starts_nothing() -> None:
+    pool, spawner = _pool(2)
+
+    assert pool.retire(999_999) is None
+    assert len(spawner.spawned) == 2
+
+
+@pytest.mark.unit
 def test_replace_unknown_pid_starts_nothing() -> None:
     """The defect 3 guard: an already-replaced pid must not spawn a second worker."""
     pool, spawner = _pool(2)

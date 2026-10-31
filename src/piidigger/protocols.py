@@ -33,6 +33,12 @@ class ScannableItem(Protocol):
     def open_bytes(self) -> bytes | None: ...
     def materialize(self) -> Path: ...
 
+    # A file handler calls this after each unit of real work (a PDF page, say)
+    # that does not end in a yield.  It keeps a long scan's task alive without
+    # the handler knowing about workers or queues, and without changing how
+    # content is chunked for the data handlers.
+    def report_progress(self) -> None: ...
+
 
 @runtime_checkable
 class FileHandler(Protocol):

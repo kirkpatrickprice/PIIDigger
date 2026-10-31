@@ -44,7 +44,7 @@ flowchart TB
         ZIP["_zip.py"]:::component
         SEVENZ["_7z.py"]:::component
         TAR["_tar.py"]:::component
-        PIO["_progress_io.py\nopen_with_progress()"]:::component
+        PIO["piidigger/_progress_io.py (shared)\nopen_with_progress()"]:::component
     end
 
     subgraph protocol_group["📐 Protocol"]
@@ -115,7 +115,7 @@ Two lookup structures are built once, from each module's self-declared data:
 - `_EXT_REGISTRY` / `detect_archive_type(filename)` — a tuple of `(extension, archive_type)` pairs sorted longest-first, matched by `endswith()`. This exists because tar's compound suffixes (`.tar.gz`, `.tgz`) don't fit a `Path.suffix` lookup: `Path("data.tar.gz").suffix` is `".gz"`. Longest-first ordering means `"tar.gz"` is tried before any shorter suffix. There is no bare `"gz"` entry, so a plain `.gz` log file is never misdetected as tar.
 
 ### Format modules
-Each module in `archivehandlers/` declares `ARCHIVE_TYPE: str` and `HANDLES = {"ext": [...]}`, then implements the two protocol methods. All three read the archive through `open_with_progress()` ([_progress_io.py](../../../src/piidigger/archivehandlers/_progress_io.py)), a buffered file whose every disk read calls `on_progress`.
+Each module in `archivehandlers/` declares `ARCHIVE_TYPE: str` and `HANDLES = {"ext": [...]}`, then implements the two protocol methods. All three read the archive through `open_with_progress()` ([_progress_io.py](../../../src/piidigger/_progress_io.py)), a buffered file whose every disk read calls `on_progress`. It lives at the package root because file scans use it too, through `FilesystemItem.open_stream()`, and `archivehandlers` must not import orchestration.
 
 | Module | Library | Notes |
 |---|---|---|

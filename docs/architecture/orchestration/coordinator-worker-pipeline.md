@@ -167,22 +167,41 @@ The pool also tracks, per worker, whether it has checked in (`WorkerReady` or `T
 `HealthMonitor.tick()` runs four checks, in order:
 
 1. **Deadline sweep**: a RUNNING task past its deadline (`2 × timeout_seconds` of silence) is abandoned and its worker replaced. Timeouts are not retried — a task that hung once will most likely hang again. For a task with items and a `current_item`, only that item is dropped; the rest of the task is requeued.
-2. **Memory sweep**: reads each worker's resident memory (RSS) with `psutil`. A worker over `max_worker_memory_mb` is replaced. The task it holds is abandoned, and like a timeout it is not retried: a file that went over the limit once will do so again. For a task with items and a `current_item`, only that item is dropped, and the rest of the task is requeued. A worker over the limit with no task is replaced too, and nothing is abandoned. CPython seldom returns freed memory to the OS, so a worker can stay large after a big file. The deadline cannot catch a runaway file: one that keeps reading keeps its task alive while its memory grows. The coordinator is not measured.
+2. **Memory sweep**: reads each worker's resident memory (RSS) with `psutil`. A worker over `max_worker_memory_mb` is replaced. The task it holds is abandoned, and like a timeout it is not retried: a file that went over the limit once will do so again. For a task with items and a `current_item`, only that item is dropped, and the rest of the task is requeued. The deadline cannot catch a runaway file: one that keeps reading keeps its task alive while its memory grows. The coordinator is not measured.
+
+   Only a worker holding a RUNNING task is stopped. A worker with no task may be waiting in `task_queue.get()`, which holds the queue's read lock, and killing it there would leave every other worker unable to take a task. CPython seldom returns freed memory to the OS, so a worker can stay large after a big file. That worker **retires itself** instead:
+   - After each task, the worker checks its own RSS. Above 95% of `max_worker_memory_mb`, it sends `WorkerRetiring` and exits before taking another task.
+   - `HealthMonitor.observe()` has `WorkerPool.retire()` join it and start a replacement. It isn't terminated unless it fails to exit within the grace period.
+   - The 5% margin keeps a waiting worker below the point at which this sweep acts.
+
+   Before each sweep, `_drain()` reads up to 1,000 messages already waiting on `result_queue`. So a task whose result is queued but unread no longer looks RUNNING, and the sweep doesn't stop a worker that has finished it. If that read stops short, the crash sweep can find a retired worker before its `WorkerRetiring` arrives. That worker's clean exit (code 0) is then logged at INFO as a retirement, not as a crash, and the crash sweep starts its replacement.
 3. **Crash sweep**: `pool.reap_dead()` replaces any worker that died unprompted. Every RUNNING task whose worker pid is no longer in the pool — whether it died this tick or was already reaped when its heartbeat arrived late — is redispatched under the *same* `task_id`, or abandoned once `MAX_RETRIES` is spent. A task with items and a `current_item` drops that item and requeues the rest instead. That uses no retry budget, because each such requeue removes an item. Because the deadline and memory sweeps run first, a worker they already replaced cannot be replaced again here.
 4. **Lost-task sweep**: catches a task whose worker died *before* sending its `TaskStarted` heartbeat, which is invisible to the first three checks since no worker is recorded as holding it. If nothing is RUNNING, every live worker has checked in, and that holds for `LOST_TASK_CONFIRM_SWEEPS` (2) consecutive sweeps with no message arriving in between — and every outstanding task is at least `LOST_TASK_MIN_AGE` (2s) old — then whatever is still in the registry cannot be held by any process: it is redispatched or abandoned. No queue introspection is involved (`qsize()` is unimplemented on macOS; `empty()` is only approximate). Reusing the `task_id` on redispatch means a false-positive firing is harmless: whichever copy of the task finishes first retires it, and the other is dropped as a duplicate.
 
 ### `TaskProgress` — keeping a long task alive
-A batch of archive members can run far longer than `timeout_seconds`. It sends `TaskProgress` messages on `result_queue` between its `TaskStarted` and its `TaskResult`:
+A batch of archive members, or one large file, can run far longer than `timeout_seconds`. Both send `TaskProgress` messages on `result_queue` between their `TaskStarted` and their `TaskResult`. A `scan_file` task sends only `alive`:
 
 | Event | When | Carries |
 |---|---|---|
-| `item_started` | Just before an item is extracted | The item |
-| `item_done` | After the item is scanned and securely deleted | The item, its findings, its counters |
-| `alive` | While compressed bytes are read, at most once a second | Nothing |
+| `item_started` | Just before an archive member is extracted | The item |
+| `item_done` | After the member is scanned and securely deleted | The item, its findings, its counters |
+| `alive` | While new bytes are read from disk, after each non-empty piece of content a file handler yields, and after each unit of work a handler reports (a PDF page); at most once a second | Nothing |
 
 Findings reach the sinks as each item finishes, so a later hang or crash cannot lose them. `TaskProgress` is a Pydantic model, unlike `TaskStarted`, because its findings come from file content.
 
-Progress is **event-driven, never clock-driven**. `ProgressReporter` ([worker/_reporter.py](../../../src/piidigger/orchestration/worker/_reporter.py)) sends a message only when the handler reports that something happened. There is no timer thread. A timer would keep sending while the worker's main thread was stuck, and hide exactly the hang the deadline exists to catch. `alive` comes from a wrapper on the archive file's `read()`. So it fires only while bytes actually move, and the one-second cap only limits queue traffic. A worker stuck in a parser or a C decoder sends nothing, and its deadline fires after `2 × timeout_seconds`, as for any other task.
+Progress is **event-driven, never clock-driven**. `ProgressReporter` ([worker/_reporter.py](../../../src/piidigger/orchestration/worker/_reporter.py)) sends a message only when the handler reports that something happened. There is no timer thread. A timer would keep sending while the worker's main thread was stuck, and hide exactly the hang the deadline exists to catch. `alive` has three sources, and all fire only on real progress. The one-second cap only limits queue traffic. A worker stuck in a parser or a C decoder sends nothing, and its deadline fires after `2 × timeout_seconds`, as for any other task.
+
+- **Reads from disk.** `open_with_progress()` ([_progress_io.py](../../../src/piidigger/_progress_io.py)) wraps the file's `read()`. Archive readers use it for the archive itself. File handlers that read through `FilesystemItem.open_stream()` (pypdf, and openpyxl for files on disk) use it too. A read that returns no data never counts.
+  - For `open_stream()`, only a read of **bytes not read before** counts, tracked as a bitmap of 64 KiB blocks. A parser looping over a region it has already read cannot keep its task alive.
+  - Archive readers skip that bookkeeping, because they read front to back and every read is new.
+  - `open_stream()` also uses Python's default buffer (128 KiB), not the archive readers' 1 MiB. pypdf and openpyxl seek around, and every seek outside the buffer refills all of it.
+- **Content.** `scan_content()` ([worker/_content.py](../../../src/piidigger/orchestration/worker/_content.py)) runs the file handler for both `scan_file` and archive members. It sends `alive` after each non-empty piece of content. An empty piece doesn't count, by the same rule as an empty read.
+- **Handler-reported work.** A file handler calls `source.report_progress()` after a unit of real work that neither reads new bytes nor yields content. The PDF handler calls it after each page.
+  - pypdf often reads the whole file in its first second, then extracts text for 40 s or more, while the content buffer yields once at the end.
+  - Reporting per page keeps that alive without shrinking the content buffer, so a match is never split at a page break.
+  - pypdf stuck inside one page reports nothing.
+
+**Coverage gap:** the docx and xls handlers pass a path to their parser (`docx2python`, `xlrd`) and parse the whole file before their first yield. They send nothing while parsing, so one that parses for longer than `2 × timeout_seconds` is still stopped. The plaintext handler also reads by path, but it yields a piece per buffer, so it stays alive.
 
 How `TaskProgress` meets each sweep:
 

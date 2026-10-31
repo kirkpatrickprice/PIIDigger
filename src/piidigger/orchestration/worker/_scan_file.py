@@ -10,6 +10,7 @@ from piidigger.models.results import ResultRecord
 from piidigger.models.tasks import Task, TaskResult
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.sources import FilesystemItem
+from piidigger.orchestration.worker._content import scan_content
 from piidigger.orchestration.worker._removed import was_removed
 from piidigger.orchestration.worker._reporter import ProgressReporter
 
@@ -39,26 +40,13 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
 
     # A large file can take longer than the task deadline.  Two signals keep it
     # alive without any file handler knowing: reads from disk through
-    # open_stream(), and each piece of content the handler yields (for handlers
-    # that read via materialize()).  A handler stuck with neither still times out.
+    # open_stream(), and each non-empty piece of content the handler yields (see
+    # scan_content).  A handler stuck with neither still times out.
     reporter = ProgressReporter(ctx.result_queue.put, task.task_id)
     item = FilesystemItem(payload.file_path, mime=payload.mime, on_progress=reporter.alive)
 
-    # Aggregate matches per data-handler across all content pieces to produce one
-    # ResultRecord per (file, handler) pair.
-    per_handler: dict[str, dict[str, set[str]]] = {}
-
     try:
-        for content in file_handler.read(item, ctx.config):
-            reporter.alive()
-            if not content:
-                continue
-            for dh in enabled_handlers:
-                matches = dh.find_matches(content)
-                for match_type, values in matches.items():
-                    if values:
-                        bucket = per_handler.setdefault(dh.name, {})
-                        bucket.setdefault(match_type, set()).update(values)
+        per_handler = scan_content(file_handler, item, ctx.config, enabled_handlers, reporter.alive)
     except UndetectableEncodingError as exc:
         # Usually binary content behind a text extension: not a failure, but
         # logged so an operator can see which files were never read.

@@ -33,6 +33,7 @@ The log queue has the same 2a and 2b exposure. There the damage is smaller: logg
 | **B. Native crash** | A segfault or abort in a C extension on a poison file. Each poison file gets up to 4 attempts (1 + `MAX_RETRIES`). | Inside a handler, often early in the file. The feeder may still be sending earlier messages. |
 | **C. OOM or outside kill** | The Linux OOM killer, a user, or EDR/antivirus. | Anywhere. The OOM killer prefers the largest process, usually one in the middle of a big file. |
 | **D. Teardown escalation** | `pool.join()` → `terminate()`/`kill()` at the end of a run. | After `stop_event.set()`, when results no longer matter. Harmless. |
+| **E. Memory kill** | `HealthMonitor`'s memory sweep calls `pool.replace()` for a worker holding a RUNNING task whose RSS is over `max_worker_memory_mb`. Workers with no task are never killed; they retire themselves between tasks. | Inside a handler, usually pypdf on a runaway file. It sends one small `alive` message a second, so its feeder is rarely mid-send. Not measured. |
 
 `KeyboardInterrupt` is not a kill: workers catch it and exit cleanly.
 

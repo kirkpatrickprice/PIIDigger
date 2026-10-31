@@ -13,7 +13,7 @@ import psutil
 from pydantic import ValidationError
 
 from piidigger.models.config import Config
-from piidigger.models.tasks import Task, TaskProgress, TaskResult, TaskStarted, TaskType, WorkerReady
+from piidigger.models.tasks import Task, TaskProgress, TaskResult, TaskStarted, TaskType, WorkerReady, WorkerRetiring
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.feeder import TaskFeeder
 from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
@@ -131,10 +131,7 @@ class SweepResult:
     # (record, rss in bytes): tasks stopped because their worker overran
     # max_worker_memory_mb.
     over_memory: list[tuple[TaskRecord, int]] = field(default_factory=list)
-    # (pid, rss in bytes): idle workers replaced because they stayed over the
-    # limit after finishing a task.  Nothing was lost.
-    recycled: list[tuple[int, int]] = field(default_factory=list)
-    # The limit over_memory and recycled were judged against, for the report.
+    # The limit over_memory was judged against, for the report.
     memory_limit_bytes: int | None = None
     stopped_replacing: bool = False
 
@@ -143,7 +140,6 @@ class SweepResult:
         return bool(
             self.timed_out
             or self.over_memory
-            or self.recycled
             or self.crashed
             or self.redispatched
             or self.lost
@@ -176,13 +172,14 @@ class HealthMonitor:
     1. Deadline sweep.  A RUNNING task past its deadline is abandoned and its
        worker replaced.  Timeouts are not retried: a task that hung once will
        most likely hang again.
-    2. Memory sweep.  A worker whose RSS is over memory_limit_bytes is replaced.
-       The task it holds is abandoned and, like a timeout, not retried: a file
-       that blew past the limit once will do so again.  A worker over the limit
-       with no task is replaced too, abandoning nothing.  CPython seldom hands
-       freed memory back to the OS, so a worker can stay large after a big file.
-       The deadline cannot catch this: a file that keeps reading keeps its task
-       alive while its memory grows without bound.
+    2. Memory sweep.  A worker holding a RUNNING task whose RSS is over
+       memory_limit_bytes is replaced.  The task is abandoned and, like a
+       timeout, not retried: a file that blew past the limit once will do so
+       again.  The deadline cannot catch this: a file that keeps reading keeps
+       its task alive while its memory grows without bound.  A worker with no
+       task is never stopped here, because it may be waiting in
+       task_queue.get(); a large idle worker retires itself between tasks
+       instead (WorkerRetiring).
     3. Crash sweep.  Workers that died unprompted are replaced.  Then every
        RUNNING task whose worker is no longer in the pool is re-dispatched, or
        abandoned once its retry budget is spent.  Matching on "not in the pool"
@@ -250,11 +247,14 @@ class HealthMonitor:
 
         Any message at all means the system is not quiet, so the lost-task
         sweep's quiet count restarts.  WorkerReady and TaskStarted also check
-        the sending worker in with the pool.
+        the sending worker in with the pool.  WorkerRetiring has the pool
+        replace the worker, which is exiting on its own between tasks.
         """
         self._quiet_sweeps = 0
         if isinstance(message, WorkerReady | TaskStarted):
             self._pool.check_in(message.worker_pid)
+        elif isinstance(message, WorkerRetiring):
+            self._pool.retire(message.worker_pid)
 
     def tick(self) -> SweepResult:
         """Run one sweep and report what it did."""
@@ -273,7 +273,7 @@ class HealthMonitor:
             if pid is not None:
                 self._pool.replace(pid)
 
-        over_memory, recycled = self._memory_sweep(skipped)
+        over_memory = self._memory_sweep(skipped)
 
         was_replacing = self._pool.replacing
         crashed = self._pool.reap_dead()
@@ -295,7 +295,7 @@ class HealthMonitor:
                 abandoned.append(record)
 
         lost: list[TaskRecord] = []
-        if timed_out or over_memory or recycled or crashed or redispatched or abandoned or skipped:
+        if timed_out or over_memory or crashed or redispatched or abandoned or skipped:
             # Something just changed, so quiet has to be observed afresh.
             self._quiet_sweeps = 0
         elif self._work_looks_lost(now):
@@ -327,39 +327,41 @@ class HealthMonitor:
             abandoned=abandoned,
             skipped=skipped,
             over_memory=over_memory,
-            recycled=recycled,
             memory_limit_bytes=self._memory_limit_bytes,
             stopped_replacing=stopped_replacing,
         )
 
-    def _memory_sweep(self, skipped: list[SkippedItem]) -> tuple[list[tuple[TaskRecord, int]], list[tuple[int, int]]]:
-        """Replace every worker over the memory limit; return (over_memory, recycled).
+    def _memory_sweep(self, skipped: list[SkippedItem]) -> list[tuple[TaskRecord, int]]:
+        """Stop and replace every worker over the memory limit mid-task; return (record, rss) pairs.
 
         A batch member in progress is appended to skipped, as the deadline
         sweep does, and the rest of its batch is re-queued.
+
+        Only a worker holding a RUNNING task is stopped.  One with no task may
+        be waiting in task_queue.get(), and a process killed there leaves the
+        queue's read lock held, which stalls every other worker for good.  A
+        worker that is large but idle retires itself instead (WorkerRetiring).
         """
         limit = self._memory_limit_bytes
         if limit is None:
-            return [], []
+            return []
         held = {r.worker_pid: r for r in self._registry.running()}
         over_memory: list[tuple[TaskRecord, int]] = []
-        recycled: list[tuple[int, int]] = []
         for pid in sorted(self._pool.pids()):
+            record = held.get(pid)
+            if record is None:
+                continue
             rss = self._rss_of(pid)
             if rss is None or rss <= limit:
                 continue
-            record = held.get(pid)
-            if record is None:
-                recycled.append((pid, rss))
+            culprit = self._registry.requeue_remaining(record.task_id, reason="over_memory")
+            if culprit is not None:
+                skipped.append(SkippedItem(record, culprit, "over_memory", pid))
             else:
-                culprit = self._registry.requeue_remaining(record.task_id, reason="over_memory")
-                if culprit is not None:
-                    skipped.append(SkippedItem(record, culprit, "over_memory", pid))
-                else:
-                    self._registry.abandon(record.task_id, reason="over_memory")
-                    over_memory.append((record, rss))
+                self._registry.abandon(record.task_id, reason="over_memory")
+                over_memory.append((record, rss))
             self._pool.replace(pid)
-        return over_memory, recycled
+        return over_memory
 
     def _work_looks_lost(self, now: float) -> bool:
         """True when no process could be holding any outstanding task."""
@@ -547,6 +549,10 @@ def run_coordinator(
     )
 
 
+# Most messages read from result_queue right before a sweep; see _drain().
+_PRE_SWEEP_DRAIN_MAX: int = 1000
+
+
 def _drain(
     ctx: WorkerContext,
     registry: TaskRegistry,
@@ -563,6 +569,14 @@ def _drain(
     interval.  When the sweep waited for an idle queue, a hung or crashed worker
     went undetected for as long as the scan stayed busy.
     """
+
+    def take(message: Any) -> None:
+        monitor.observe(message)
+        _handle_message(message, registry, sinks, progress, logger)
+        # Each TaskStarted frees one slot in the feeder's window.
+        if isinstance(message, TaskStarted):
+            feeder.started(message.task_id)
+
     next_sweep = time.monotonic() + HEARTBEAT_CHECK_INTERVAL
     while registry:
         try:
@@ -570,12 +584,18 @@ def _drain(
         except queue.Empty:
             pass
         else:
-            monitor.observe(message)
-            _handle_message(message, registry, sinks, progress, logger)
-            # Each TaskStarted frees one slot in the feeder's window.
-            if isinstance(message, TaskStarted):
-                feeder.started(message.task_id)
+            take(message)
         if time.monotonic() >= next_sweep:
+            # Read what is already waiting first, so the sweeps judge a current
+            # registry.  Otherwise a task whose result is still queued looks
+            # RUNNING, and the memory sweep would stop a worker that has
+            # finished it.  Bounded, so a flood of messages cannot hold off the
+            # sweep.
+            for _ in range(_PRE_SWEEP_DRAIN_MAX):
+                try:
+                    take(ctx.result_queue.get_nowait())
+                except queue.Empty:
+                    break
             _report_sweep(monitor.tick(), registry, progress, logger)
             next_sweep = time.monotonic() + HEARTBEAT_CHECK_INTERVAL
 
@@ -590,6 +610,16 @@ def _handle_message(
     """Dispatch one result-queue message by type."""
     if isinstance(message, WorkerReady):
         return  # pool bookkeeping only; HealthMonitor.observe() has recorded it
+    if isinstance(message, WorkerRetiring):
+        # HealthMonitor.observe() has already had the pool replace it, unless
+        # the crash sweep reaped it first and logged that replacement itself.
+        # So this line reports the retirement, not a replacement.
+        logger.info(
+            "worker pid=%d retired between tasks at %s MB, near max_worker_memory_mb",
+            message.worker_pid,
+            f"{message.rss // _MB:,}",
+        )
+        return
     if isinstance(message, TaskStarted):
         if not registry.record_start(message.task_id, message.worker_pid):
             # Expected, not an error: with task ids reused across retries, a
@@ -810,14 +840,6 @@ def _report_sweep(
             f"Memory limit [{task_type}] {_label(record)} — pid={record.worker_pid}, {rss // _MB:,} MB/{limit_mb:,} MB",
         )
 
-    for pid, rss in sweep.recycled:
-        logger.info(
-            "worker pid=%d idle at %s MB, above max_worker_memory_mb=%s; recycling it",
-            pid,
-            f"{rss // _MB:,}",
-            f"{limit_mb:,}",
-        )
-
     for skip in sweep.skipped:
         what = _SKIP_REASON_TEXT[skip.reason]
         member = f"{_task_path(skip.record.task)}::{skip.item}"
@@ -832,6 +854,13 @@ def _report_sweep(
         progress.log_event("WARNING", f"Skipped {_truncate_path(member)} — worker {_SKIP_EVENT_TEXT[skip.reason]}")
 
     for pid, exitcode in sweep.crashed:
+        if exitcode == 0:
+            # Mid-scan, a worker exits cleanly only to retire for memory.  Its
+            # WorkerRetiring was not read yet: the pre-sweep read stops at
+            # _PRE_SWEEP_DRAIN_MAX messages.  Any task it held is still
+            # redispatched like a crash's; only the report differs.
+            logger.info("worker pid=%d exited cleanly between tasks (likely retiring for memory); replaced it", pid)
+            continue
         logger.warning("worker pid=%d died unexpectedly (exit code %s); replacing it", pid, exitcode)
         progress.log_event("WARNING", f"Worker pid={pid} crashed unexpectedly (exit code {exitcode})")
 

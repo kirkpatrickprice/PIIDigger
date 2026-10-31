@@ -707,4 +707,16 @@ def test_scan_file_each_content_piece_reports_progress(tmp_path: Path, monkeypat
             yield from ["one", "", "three"]
 
     ctx = _scan_with_handler(tmp_path, _Yielder(), monkeypatch)
-    assert _alive_count(ctx) == 3, "every piece counts, empty ones included"
+    assert _alive_count(ctx) == 2, "every non-empty piece counts"
+
+
+@pytest.mark.unit
+def test_scan_file_empty_content_is_not_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A handler stuck yielding "" must still trip the deadline, like a read that returns no data."""
+
+    class _Blank:
+        def read(self, source, config):  # noqa: ANN001, ANN202
+            yield from [""] * 50
+
+    ctx = _scan_with_handler(tmp_path, _Blank(), monkeypatch)
+    assert _alive_count(ctx) == 0

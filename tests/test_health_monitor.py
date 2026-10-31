@@ -138,6 +138,36 @@ def test_deadline_log_line_reports_the_quiet_time_and_the_real_deadline(caplog: 
 
 
 @pytest.mark.unit
+def test_clean_exit_reaped_before_its_retirement_message_is_not_reported_as_a_crash(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Under a backlog, the crash sweep can find a retired worker before its WorkerRetiring is read."""
+    from piidigger.orchestration.coordinator import _report_sweep
+    from piidigger.orchestration.progress import ProgressDisplay
+
+    h = Harness()
+    retired, crashed = h.worker(0), h.worker(1)
+    retired.exit_cleanly()
+    crashed.crash(-11)
+
+    sweep = h.monitor.tick()
+    progress = ProgressDisplay()
+    with caplog.at_level(logging.INFO, logger=_LOG.name):
+        _report_sweep(sweep, h.registry, progress, _LOG)
+
+    assert h.pool.size == 3, "both are still replaced"
+    lines = [(r.levelno, r.getMessage()) for r in caplog.records]
+    assert (
+        logging.INFO,
+        f"worker pid={retired.pid} exited cleanly between tasks (likely retiring for memory); replaced it",
+    ) in lines
+    assert [m for level, m in lines if level == logging.WARNING] == [
+        f"worker pid={crashed.pid} died unexpectedly (exit code -11); replacing it"
+    ]
+    assert [m for _, m in progress._events] == [f"Worker pid={crashed.pid} crashed unexpectedly (exit code -11)"]
+
+
+@pytest.mark.unit
 def test_requeue_clause_is_left_out_when_no_members_remain() -> None:
     from piidigger.orchestration.coordinator import _requeue_clause
     from piidigger.orchestration.registry import TaskRecord
@@ -647,8 +677,11 @@ def test_no_memory_limit_disables_the_sweep() -> None:
 
 
 @pytest.mark.unit
-def test_idle_worker_over_the_limit_is_recycled_without_losing_work() -> None:
-    """CPython keeps freed memory, so a worker can stay large after a big file."""
+def test_idle_worker_over_the_limit_is_never_stopped_by_the_sweep() -> None:
+    """It may be waiting in task_queue.get(), and killing it there would stall the queue for every worker.
+
+    A large idle worker retires itself between tasks instead; see the WorkerRetiring test below.
+    """
     h = Harness(memory_limit_bytes=_LIMIT)
     idle = h.worker(2)
     assert idle.pid is not None
@@ -656,9 +689,24 @@ def test_idle_worker_over_the_limit_is_recycled_without_losing_work() -> None:
 
     sweep = h.monitor.tick()
 
-    assert sweep.recycled == [(idle.pid, 2 * _LIMIT)]
-    assert sweep.over_memory == []
-    assert idle.terminate_calls == 1
+    assert not sweep
+    assert idle.terminate_calls == 0
+    assert idle.pid in h.pool.pids()
+
+
+@pytest.mark.unit
+def test_worker_retiring_is_replaced_without_being_terminated() -> None:
+    from piidigger.models.tasks import WorkerRetiring
+
+    h = Harness(memory_limit_bytes=_LIMIT)
+    retiring = h.worker(1)
+    assert retiring.pid is not None
+
+    retiring.exit_cleanly()  # a real worker exits right after sending WorkerRetiring
+    h.monitor.observe(WorkerRetiring(worker_pid=retiring.pid, rss=_LIMIT))
+
+    assert retiring.terminate_calls == 0, "it exits on its own between tasks"
+    assert retiring.pid not in h.pool.pids()
     assert h.pool.size == 3
     assert h.registry.count_abandoned("over_memory") == 0
 
@@ -695,6 +743,6 @@ def test_worker_replaced_for_a_timeout_is_not_replaced_again_for_memory() -> Non
     sweep = h.monitor.tick()
 
     assert [r.task_id for r in sweep.timed_out] == [task.task_id]
-    assert sweep.over_memory == [] and sweep.recycled == []
+    assert sweep.over_memory == []
     assert worker.terminate_calls == 1
     assert len(h.spawner.spawned) == 4, "one replacement, not two"

@@ -23,6 +23,18 @@ class TestFilesystemItem:
         f.write_bytes(b"a,b")
         assert FilesystemItem(f).ext == ".csv"
 
+    def test_report_progress_calls_on_progress(self, tmp_path):
+        f = tmp_path / "doc.pdf"
+        f.write_bytes(b"x")
+        calls = []
+        FilesystemItem(f, on_progress=lambda: calls.append(1)).report_progress()
+        assert calls == [1]
+
+    def test_report_progress_without_on_progress_does_nothing(self, tmp_path):
+        f = tmp_path / "doc.pdf"
+        f.write_bytes(b"x")
+        FilesystemItem(f).report_progress()
+
     def test_ext_no_suffix(self, tmp_path):
         f = tmp_path / "Makefile"
         f.write_bytes(b"all:")

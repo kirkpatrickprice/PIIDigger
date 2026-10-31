@@ -105,6 +105,19 @@ class WorkerReady:
 
 
 @dataclass(frozen=True)
+class WorkerRetiring:
+    """Placed on result_queue by a worker that is about to exit to free its memory.
+
+    Sent between tasks, after the last task's TaskResult, when the worker's own
+    memory is near max_worker_memory_mb.  The worker then exits cleanly, and the
+    coordinator starts a replacement.  Not a crash: the worker holds no task.
+    """
+
+    worker_pid: int
+    rss: int
+
+
+@dataclass(frozen=True)
 class ShutdownSentinel:
     """Placed on task_queue once per worker to signal graceful exit.
 

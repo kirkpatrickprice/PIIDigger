@@ -165,6 +165,25 @@ class WorkerPool:
         self._stop([proc])
         return self._spawn_replacement()
 
+    def retire(self, pid: int) -> ProcessLike | None:
+        """Wait for a worker that is exiting on its own, then start one in its place.
+
+        For a worker that sent WorkerRetiring.  It is between tasks, so it holds
+        no task and is not waiting on task_queue, and it exits by itself.  So it
+        is joined rather than terminated, and only stopped if it does not exit
+        within the grace period.  Returns the replacement, or None when the pid
+        is no longer in the pool or no replacement could be started.
+        """
+        proc = self._active.get(pid)
+        if proc is None:
+            return None
+        self._forget(pid)
+        proc.join(self._grace)
+        if proc.is_alive():
+            self._log.warning("retiring worker pid=%d did not exit within %.1fs; stopping it", pid, self._grace)
+            self._stop([proc])
+        return self._spawn_replacement()
+
     def reap_dead(self) -> list[tuple[int, int | None]]:
         """Replace every active worker that has died without being asked to.
 

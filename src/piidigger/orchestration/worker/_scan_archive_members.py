@@ -14,6 +14,7 @@ from piidigger.models.tasks import Task, TaskResult
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.secure_delete import secure_delete
 from piidigger.orchestration.sources import FilesystemItem
+from piidigger.orchestration.worker._content import scan_content
 from piidigger.orchestration.worker._reporter import ProgressReporter
 from piidigger.protocols import DataHandler
 
@@ -157,8 +158,8 @@ def _scan_member(
     """Run the file handler and data handlers over one extracted member.
 
     on_progress is called on every read of the extracted file and after each
-    piece of content, as in handle_scan_file, so a large member keeps its batch
-    alive.
+    non-empty piece of content (see scan_content), so a large member keeps its
+    batch alive.
 
     Returns the member's findings (one ResultRecord dict per data handler that
     matched) and its counters.  Raises on any reader error; the caller reports
@@ -177,15 +178,7 @@ def _scan_member(
         path, mime=None, archive_path=payload.archive_path, member_path=member, on_progress=on_progress
     )
 
-    per_handler: dict[str, dict[str, set[str]]] = {}
-    for content in file_handler.read(item, config):
-        on_progress()
-        if not content:
-            continue
-        for dh in enabled_handlers:
-            for match_type, values in dh.find_matches(content).items():
-                if values:
-                    per_handler.setdefault(dh.name, {}).setdefault(match_type, set()).update(values)
+    per_handler = scan_content(file_handler, item, config, enabled_handlers, on_progress)
 
     findings = [
         ResultRecord(

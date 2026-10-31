@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import math
 import multiprocessing as mp
 import os
+import queue
 import re
 import socket
 import sys
@@ -13,7 +15,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import psutil
 from rich.markup import escape
@@ -62,6 +64,29 @@ def _is_admin() -> bool:
         return ctypes.windll.shell32.IsUserAnAdmin() != 0  # type: ignore[attr-defined]
 
 
+@functools.cache
+def _stdin_lines(stdin: TextIO) -> queue.Queue[str | None]:
+    """Lines typed on stdin, read by one daemon thread shared by every prompt.
+
+    A thread per prompt does not work.  A prompt that times out leaves its
+    thread blocked in readline(), and that thread then takes the answer typed
+    at the next prompt, so a "n" there would be lost.  None marks end of input.
+    Cached per stdin object, so a replaced sys.stdin gets a reader of its own.
+    """
+    lines: queue.Queue[str | None] = queue.Queue()
+
+    def _read() -> None:
+        try:
+            for line in iter(stdin.readline, ""):
+                lines.put(line)
+        except OSError, ValueError:
+            pass
+        lines.put(None)
+
+    threading.Thread(target=_read, daemon=True).start()
+    return lines
+
+
 def _prompt_continue(question: str, timeout: int = _PROMPT_TIMEOUT) -> bool:
     """Ask the user whether to continue the scan, printing *question* first.
 
@@ -70,22 +95,16 @@ def _prompt_continue(question: str, timeout: int = _PROMPT_TIMEOUT) -> bool:
     Returns True to proceed, False to abort.
     """
     print(f"{question}  Continue (Y/n) [{timeout}s]: ", end="", flush=True)
-    result: list[str] = [""]
-    ev = threading.Event()
-
-    def _read() -> None:
-        try:
-            result[0] = sys.stdin.readline().strip()
-        except EOFError, OSError:
-            pass
-        ev.set()
-
-    threading.Thread(target=_read, daemon=True).start()
-    if not ev.wait(timeout=float(timeout)):
+    lines = _stdin_lines(sys.stdin)
+    try:
+        line = lines.get(timeout=float(timeout))
+    except queue.Empty:
         print(f"\n(No response in {timeout}s — continuing scan)", flush=True)
         return True
-
-    return result[0].lower() not in ("n", "no")
+    if line is None:
+        lines.put(None)  # stdin is closed for every later prompt too
+        return True
+    return line.strip().lower() not in ("n", "no")
 
 
 def _check_admin(config: Config, logger: logging.Logger) -> bool:
@@ -135,15 +154,15 @@ def _memory_budget(limit_mb: int, worker_count: int, total_ram_bytes: int) -> tu
     return description, warning
 
 
-def _check_memory(config: Config, worker_count: int, logger: logging.Logger) -> bool:
+def _check_memory(warning: str | None, logger: logging.Logger) -> bool:
     """Ask before scanning when the workers could use more than half the machine's RAM.
 
+    warning is the second half of _memory_budget(), None when within budget.
     A scan of a production server should not take over its memory unnoticed,
     so this prompts the same way the admin check does, and likewise continues
     on its own after the timeout.  Not interactive: log the warning and
     continue.  Returns True to proceed, False to abort.
     """
-    _, warning = _memory_budget(config.max_worker_memory_mb, worker_count, psutil.virtual_memory().total)
     if warning is None:
         return True
 
@@ -164,16 +183,19 @@ def _emit_startup_info(
     config: Config,
     worker_count: int,
     wake_mode: Any,
+    memory_limit: str,
+    memory_warning: str | None,
 ) -> None:
-    """Emit a startup configuration summary to the event log and run logger."""
+    """Emit a startup configuration summary to the event log and run logger.
+
+    memory_limit and memory_warning are _memory_budget()'s result, worked out
+    once in run_scan() and shared with _check_memory().
+    """
     plural = "es" if worker_count != 1 else ""
     sleep_active = getattr(wake_mode, "active", False)
     sleep_status = "Active" if sleep_active else "Unavailable on this platform"
     sleep_markup = "[green]Active[/green]" if sleep_active else "[yellow]Unavailable on this platform[/yellow]"
     dirs = ", ".join(str(d) for d in config.start_dirs)
-    memory_limit, memory_warning = _memory_budget(
-        config.max_worker_memory_mb, worker_count, psutil.virtual_memory().total
-    )
 
     log_entries = [
         f"Performance: {config.performance} — {worker_count} worker process{plural}",
@@ -409,7 +431,10 @@ def run_scan(config: Config) -> int:
     # The admin and memory checks and sink opening all happen before
     # progress.start() takes over the terminal, so their prompts and errors
     # print cleanly.
-    proceed = _check_admin(config, run_logger) and _check_memory(config, worker_count, run_logger)
+    memory_limit, memory_warning = _memory_budget(
+        config.max_worker_memory_mb, worker_count, psutil.virtual_memory().total
+    )
+    proceed = _check_admin(config, run_logger) and _check_memory(memory_warning, run_logger)
     sinks = _open_sinks(config, run_logger) if proceed else None
     if sinks is None:
         stop_listener(listener)
@@ -461,7 +486,7 @@ def run_scan(config: Config) -> int:
         pool.start(worker_count)
         progress.start()
         with keep.running(on_fail="pass") as wake_mode:
-            _emit_startup_info(progress, run_logger, config, worker_count, wake_mode)
+            _emit_startup_info(progress, run_logger, config, worker_count, wake_mode, memory_limit, memory_warning)
             handed_off = True
             outcome = run_coordinator(worker_ctx, pool, listener, sinks, progress)
     except BaseException as exc:

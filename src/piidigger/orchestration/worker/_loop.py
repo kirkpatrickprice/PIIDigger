@@ -8,7 +8,18 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from piidigger.models.tasks import SHUTDOWN, ShutdownSentinel, Task, TaskResult, TaskStarted, TaskType, WorkerReady
+import psutil
+
+from piidigger.models.tasks import (
+    SHUTDOWN,
+    ShutdownSentinel,
+    Task,
+    TaskResult,
+    TaskStarted,
+    TaskType,
+    WorkerReady,
+    WorkerRetiring,
+)
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger, route_library_logs, setup_warning_capture
 from piidigger.orchestration.secure_delete import secure_rmtree
@@ -96,13 +107,35 @@ def _dispatch(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskRes
     return result
 
 
+# A worker replaces itself once its memory after a task is above this share of
+# max_worker_memory_mb.  CPython seldom returns freed memory to the OS, so a
+# worker that has just read a large file stays large while idle.  The worker
+# exits between tasks, never while waiting in task_queue.get(): a process killed
+# there leaves the queue's read lock held, and every other worker blocks on it
+# for good.  The margin keeps a waiting worker below the limit at which the
+# coordinator's memory sweep stops workers, so the sweep never stops one.
+_RETIRE_SHARE: float = 0.95
+
+
+def _rss_if_retiring(process: psutil.Process, ctx: WorkerContext) -> int | None:
+    """This worker's RSS if it is high enough that the worker should retire, else None."""
+    try:
+        rss = int(process.memory_info().rss)
+    except psutil.Error:
+        return None
+    threshold = _RETIRE_SHARE * ctx.config.max_worker_memory_mb * 1024 * 1024
+    return rss if rss > threshold else None
+
+
 def worker_loop(ctx: WorkerContext) -> None:
     """Main loop for each worker process.
 
     Pulls tasks from ctx.task_queue, dispatches them, and puts results on
     ctx.result_queue.  Exits cleanly on ShutdownSentinel, on KeyboardInterrupt,
-    or on taking any item once ctx.stop_event is set.
+    on taking any item once ctx.stop_event is set, or after a task that left it
+    near max_worker_memory_mb (see _RETIRE_SHARE).
     """
+    process = psutil.Process()
     logger = build_worker_logger(ctx.log_queue, f"worker-{os.getpid()}")
     setup_warning_capture(ctx.log_queue)
     route_library_logs(ctx.log_queue)
@@ -131,6 +164,10 @@ def worker_loop(ctx: WorkerContext) -> None:
             finally:
                 _cleanup_temp_workspace(ctx.task_workspace(task.task_id), logger)
             ctx.result_queue.put(result)
+            if (rss := _rss_if_retiring(process, ctx)) is not None:
+                ctx.result_queue.put(WorkerRetiring(worker_pid=os.getpid(), rss=rss))
+                logger.debug("retiring at %d MB to free memory (pid=%d)", rss // (1024 * 1024), os.getpid())
+                break
     except KeyboardInterrupt:
         logger.debug("worker interrupted; exiting after current task")
 

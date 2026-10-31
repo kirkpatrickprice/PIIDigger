@@ -17,6 +17,7 @@ Known gaps we chose not to fix yet. Each entry says what is wrong, why it was de
   - **Scripts and full results:** [docs/architecture/orchestration/measurements/queue-lock-hangs/](docs/architecture/orchestration/measurements/queue-lock-hangs/README.md). Rerun them after the fix.
 - **Why deferred:** Accepted for now; to be fixed in the next release.
   - Exposure requires a worker death on Linux/macOS. Deadline kills are low-risk, because a worker silent for 2× its timeout has long since flushed its messages.
+  - **The memory sweep adds a routine kill source**, about 9 kills in a full OneDrive scan. It stops a worker mid-task, so the read lock and the late-result race are avoided by design: idle workers retire themselves, and the coordinator drains waiting results before each sweep. The write-lock risk remains. A runaway file's worker sends one small message a second, so its own feeder holds the lock far less often than the busy small-file workers behind the measured ~4%. Its rate is unmeasured; per-worker pipes remove it.
   - The realistic trigger is a native crash on a poison file. Only a few mature libraries can crash that way: `lxml`, py7zr's codecs (`pyppmd`, `inflate64`, `bcj`, `brotli`, `pycryptodomex`), stdlib `zlib`/`lzma`/`bz2`, and `charset-normalizer`. `pypdf` is pure Python.
   - Slower storage, such as network shares, lowers coordinator saturation and the rate. That case is unmeasured.
 - **Where:** `orchestration/context.py` (the shared queues and event), `orchestration/worker/_loop.py`, `orchestration/coordinator.py` (`_drain`, `_teardown`), `run.py` (queue creation).
@@ -30,6 +31,12 @@ Known gaps we chose not to fix yet. Each entry says what is wrong, why it was de
 - **Why deferred:** Needs a design decision; only native crashes (segfaults) trigger it.  Quite rare, could only really happen if a worker hard-crashed within milliseconds of finishing the prior archive member.
 - **Where:** `orchestration/coordinator.py` (`HealthMonitor.tick`, crash sweep), `orchestration/registry.py` (`requeue_remaining`).
 - **Suggested fix:** Don't drop a suspect on its first crash. Requeue it with a retry budget similar to on-disk files, and drop it only after it's budget is spent.
+
+### A large docx or xls that parses slowly is still stopped
+- **What:** a long file scan keeps its task alive while it reads new bytes from disk or yields content (see `TaskProgress` in the pipeline doc). The docx and xls handlers pass a path to their parser (`docx2python`, `xlrd`) and parse the whole file before their first yield, so they send nothing meanwhile. One that parses for longer than 2 × `default_timeout_seconds` is stopped and recorded as timed out.
+- **Why deferred:** not seen. No docx or xls timed out across 2,000+ real files, and xls is a legacy format.
+- **Where:** `filehandlers/docx.py`, `filehandlers/xls.py`.
+- **Suggested fix:** docx could read through `source.open_stream()`. `docx2python` calls `zipfile.ZipFile()` on whatever it's given, despite its `BytesIO` type hint, so the decompression reads would count. The lxml parse that follows would still be silent. xlrd loads the whole file before parsing, so a read signal cannot help it; only yielding per sheet or per row block would.
 
 ### A slow directory listing is abandoned with its whole subtree
 - **What:** `ENUM_DIR` never sends `TaskProgress`, and a timed-out task is never retried. `get_mime()` opens every file, so a very large directory on slow storage can run past 2× `default_timeout_seconds`. Examples are ~100k files on an HDD, on a network share, or under antivirus scanning. The deadline sweep then kills the worker and abandons the task as `timed_out`. No file or subdirectory under it is enqueued, and the summary shows only "1 timed out". 1.x had no such limit.

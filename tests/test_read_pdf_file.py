@@ -94,3 +94,32 @@ def test_pdf_bad_metadata_keeps_page_text(monkeypatch: pytest.MonkeyPatch) -> No
     content = " ".join(_read(Path("testdata/pdf/sample-pans.pdf")))
 
     assert "4893013335386137" in content
+
+
+@pytest.mark.filehandlers
+def test_pdf_reports_progress_once_per_page(tmp_path: Path) -> None:
+    """A finished page keeps a long scan alive, without changing how text is chunked."""
+    from pypdf import PdfReader, PdfWriter
+
+    page = PdfReader("testdata/pdf/lorem-ipsum.pdf").pages[0]
+    writer = PdfWriter()
+    for _ in range(3):
+        writer.add_page(page)
+    path = tmp_path / "three-pages.pdf"
+    writer.write(path)
+    pages = 3
+
+    class _CountingItem(FilesystemItem):
+        def __init__(self, p: Path) -> None:
+            super().__init__(p)
+            self.pages_done = 0
+
+        def report_progress(self) -> None:
+            self.pages_done += 1
+
+    item = _CountingItem(path)
+    chunks = list(PdfHandler().read(item, Config()))
+
+    assert pages > 1
+    assert item.pages_done == pages
+    assert len(chunks) == 1, "pages still share one content buffer"
