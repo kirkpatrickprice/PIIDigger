@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from piidigger.archivehandlers import HANDLER_REGISTRY, get_handler
-from piidigger.exceptions import ArchiveReadError
+from piidigger.exceptions import ArchivePartlyReadError, ArchiveReadError
 from piidigger.models.payloads import EnumArchiveMembersPayload
 from piidigger.models.tasks import Task, TaskResult, TaskType
 from piidigger.orchestration.context import WorkerContext
@@ -135,7 +135,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
     approach consistent with handle_enum_dir: enumeration decides what is
     scanned, and separate tasks scan it.
     """
-    from piidigger.filehandlers import select_handler  # lazy: xlrd import triggers SyntaxWarning
+    from piidigger.filehandlers import file_ext, select_handler  # lazy: xlrd import triggers SyntaxWarning
 
     payload = EnumArchiveMembersPayload(**task.payload)
     archive_path = payload.archive_path
@@ -159,8 +159,14 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
         )
 
     reporter = ProgressReporter(ctx.result_queue.put, task.task_id)
+    read_error: str | None = None
     try:
         member_list = handler.list_members(archive_path, reporter.alive)
+    except ArchivePartlyReadError as exc:
+        # Damage part way through: scan what could be listed, and fail the task
+        # so the archive still counts as not fully scanned.
+        member_list = exc.members
+        read_error = str(exc)
     except ArchiveReadError as exc:
         # The coordinator logs the failure; a worker line would duplicate it.
         logger.debug("cannot read archive %s: %s", archive_path, exc)
@@ -206,7 +212,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
 
         uncompressed_size = member.uncompressed_size
         compressed_size = member.compressed_size
-        ext = Path(member_name).suffix
+        ext = file_ext(member_name)
 
         # 1. Path traversal.  Normalise backslashes first: on Windows a name
         # like "\x\y.txt" is rooted at the drive, and "C:x.txt" names a drive.
@@ -287,7 +293,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
         tally.report(logger, archive_path)
 
     members_skipped = sum(not_selected.values()) + sum(tally.count for tally in tallies)
-    archive_errors = traversal.count + bomb.count
+    archive_errors = traversal.count + bomb.count + (1 if read_error else 0)
 
     k = batch_count(len(accepted), bytes_found, ctx.n_workers, arc_cfg.max_batch_mb * 1024 * 1024)
     new_tasks: list[dict[str, Any]] = [
@@ -307,7 +313,8 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
     return TaskResult(
         task_id=task.task_id,
         task_type=task.task_type,
-        status="ok",
+        status="error" if read_error else "ok",
+        error_message=read_error,
         new_tasks=new_tasks,
         counters={
             "files_scanned": 1,

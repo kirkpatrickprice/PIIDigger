@@ -167,7 +167,7 @@ def _list_dir(path: Path) -> list[Path]:
 
 def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
     """Enumerate one directory: produce ENUM_DIR tasks for subdirs and SCAN_FILE tasks for files."""
-    from piidigger.filehandlers import select_handler  # lazy: xlrd import triggers SyntaxWarning
+    from piidigger.filehandlers import file_ext, select_handler  # lazy: xlrd import triggers SyntaxWarning
 
     payload = EnumDirPayload(**task.payload)
     path = payload.path
@@ -256,7 +256,7 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
                     continue
                 if config.local_files_only and _is_cloud_placeholder(entry):
                     continue
-                ext = entry.suffix
+                ext = file_ext(entry.name)
                 mime: str | None = get_mime(str(entry)) if test_magic() else None
 
                 # Archive files are enumerated separately — emit before the regular

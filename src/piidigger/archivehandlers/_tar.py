@@ -1,13 +1,30 @@
 from __future__ import annotations
 
+import gzip
 import lzma
 import tarfile
+import zlib
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from piidigger._progress_io import open_with_progress
-from piidigger.exceptions import ArchiveReadError
+from piidigger.exceptions import ArchivePartlyReadError, ArchiveReadError
 from piidigger.models.archive import MemberInfo
+
+# A truncated compressed tar raises EOFError.  A corrupt .tar.xz raises LZMAError,
+# a corrupt .tar.gz can raise zlib.error, and a corrupt zstd tar raises ZstdError,
+# none of them an OSError.
+_READ_ERRORS: tuple[type[Exception], ...] = (tarfile.TarError, OSError, EOFError, lzma.LZMAError, zlib.error)
+try:
+    from compression.zstd import ZstdError
+except ImportError:
+    # zstd is optional when CPython is built, and tarfile treats it that way too:
+    # without it, a zstd tar does not open, and everything else still works.
+    pass
+else:
+    _READ_ERRORS = (*_READ_ERRORS, ZstdError)
+
+_DRAIN_CHUNK_BYTES = 1024 * 1024
 
 ARCHIVE_TYPE = "tar"
 HANDLES = {
@@ -15,8 +32,34 @@ HANDLES = {
 }
 
 
+def _read_to_end(read: Callable[[int], bytes]) -> None:
+    """Read a compressed stream to its end, which makes its reader verify the checksum.
+
+    tarfile takes a damaged header part way through for the end of the archive,
+    with no error, so damage to a compressed tar can otherwise look like a
+    complete listing that is merely short.  A tar that ended normally has only
+    its padding left to read.  An uncompressed tar has no checksum to verify.
+
+    Bytes appended after a complete gzip stream are not damage: the stream has
+    passed its checksum by then, and gzip itself only warns about them.
+    """
+    try:
+        while read(_DRAIN_CHUNK_BYTES):
+            pass
+    except gzip.BadGzipFile as exc:
+        if not str(exc).startswith("Not a gzipped file"):
+            raise
+
+
 class TarArchiveHandler:
     def list_members(self, archive_path: Path, on_progress: Callable[[], None] | None = None) -> list[MemberInfo]:
+        """List members in archive order, one header at a time.
+
+        Raises ArchivePartlyReadError, holding the members already listed, when
+        the archive fails part way through; ArchiveReadError when nothing could
+        be listed.
+        """
+        members: list[MemberInfo] = []
         try:
             with open_with_progress(archive_path, on_progress) as raw, tarfile.open(fileobj=raw, mode="r:*") as tf:
                 # An uncompressed tar is read straight from the file, which
@@ -24,8 +67,7 @@ class TarArchiveHandler:
                 # decompressed to reach a member.  A compressed one is read
                 # through a gzip/bzip2/xz reader that wraps the file.
                 compressed = tf.fileobj is not raw
-                members = []
-                for info in tf.getmembers():
+                while (info := tf.next()) is not None:
                     if not (info.isfile() or info.isdir()):
                         # symlinks, hardlinks, device/FIFO nodes have no
                         # scannable content; skip rather than flag downstream
@@ -40,10 +82,14 @@ class TarArchiveHandler:
                             decompress_offset=info.offset_data if compressed else 0,
                         )
                     )
+                if compressed:
+                    _read_to_end(tf.fileobj.read)
                 return members
-        # A truncated compressed tar raises EOFError; a corrupt .tar.xz raises
-        # LZMAError, which is not an OSError.
-        except (tarfile.TarError, OSError, EOFError, lzma.LZMAError) as exc:
+        except _READ_ERRORS as exc:
+            if members:
+                raise ArchivePartlyReadError(
+                    f"archive is damaged; scanning the {len(members):,} member(s) listed: {exc}", members
+                ) from exc
             raise ArchiveReadError(str(exc)) from exc
 
     def extract_members(
@@ -110,7 +156,7 @@ class TarArchiveHandler:
                             on_failed(info.name, "member not found in the extraction folder")
                         continue
                     on_extracted(info.name, extracted)
-        except (tarfile.TarError, OSError, EOFError, lzma.LZMAError) as exc:
+        except _READ_ERRORS as exc:
             raise ArchiveReadError(str(exc)) from exc
 
 

@@ -1,3 +1,5 @@
+from pathlib import PurePath
+
 from piidigger.filehandlers import docx, pdf, plaintext, xls, xlsx
 
 # Extension → handler and MIME → handler registries built from each module's HANDLES dict.
@@ -9,6 +11,16 @@ for _mod in (plaintext, pdf, docx, xlsx, xls):
         _EXT_REGISTRY[_ext.lower()] = _mod.handler
     for _mime in _mod.HANDLES["mime"]:
         _MIME_REGISTRY[_mime] = _mod.handler
+
+
+def file_ext(name: str) -> str:
+    """The extension handlers are chosen by: a dotfile's whole name, otherwise its suffix.
+
+    Path(".env").suffix is "", so a file named exactly .env would otherwise never
+    match the ".env" extension.
+    """
+    path = PurePath(name)
+    return path.suffix or (path.name if path.name.startswith(".") else "")
 
 
 def get_handler_for(ext: str, mime: str | None):

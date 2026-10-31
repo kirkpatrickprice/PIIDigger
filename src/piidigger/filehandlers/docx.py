@@ -52,13 +52,28 @@ class DocxHandler:
                 if content_buffer.content_buffer_full():
                     yield content_buffer.get_content()
 
-            for comment in docx_content.comments:
+            unread: list[str] = []
+            try:
+                comments = docx_content.comments
+            # Any failure here, from a comment with no w:date to a bad CRC or
+            # malformed XML, is reported rather than costing the body text,
+            # which is still only buffered at this point.
+            except Exception:  # noqa: BLE001
+                comments = []
+                unread.append("comments")
+            for comment in comments:
                 if comment is not None:
                     content_buffer.append_content(comment[3])
                     if content_buffer.content_buffer_full():
                         yield content_buffer.get_content()
 
-            content_buffer.append_content(str(docx_content.core_properties))
+            try:
+                content_buffer.append_content(str(docx_content.core_properties))
+            except Exception:  # noqa: BLE001
+                unread.append("document properties")
+
+            if unread:
+                source.report_unread(f"Word {' and '.join(unread)} could not be read")
 
             final = content_buffer.finalize_content()
             if final:

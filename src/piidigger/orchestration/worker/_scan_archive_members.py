@@ -171,9 +171,9 @@ def _scan_member(
     matched), its counters, and why part of it was not read, if so.  Raises on
     any other reader error; the caller reports the member as failed.
     """
-    from piidigger.filehandlers import get_handler_for  # lazy: xlrd import triggers SyntaxWarning
+    from piidigger.filehandlers import file_ext, get_handler_for  # lazy: xlrd import triggers SyntaxWarning
 
-    ext = Path(member).suffix
+    ext = file_ext(member)
     file_handler = get_handler_for(ext, None)
     if file_handler is None:
         # Defensive: handle_enum_archive_members filters these out.

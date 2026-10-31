@@ -19,9 +19,15 @@ PIIDigger typically runs several worker processes at once (see the `performance`
 
 Findings are recorded as soon as each member is scanned. If one member takes too long or crashes its worker, PIIDigger skips that member, logs it, and carries on with the rest of the batch.
 
+### Limitation: members are selected by extension only
+
+In this release, PIIDigger chooses archive members by file extension alone. It makes that choice from the archive's member list, before it reads any content, so it can't detect a member's type the way it does for a file on disk.
+
+As a result, a member with no extension, or with an extension PIIDigger doesn't recognize, is never scanned, even if it holds plain text. A file named `README` or `.env.local` is scanned on disk but skipped inside an archive. Skipped members are counted in the scan log for each archive, by type. To scan them, extract the archive first and scan the extracted folder. Run `piidigger inspect filetypes` to list the recognized extensions.
+
 ### Symlinks and other non-regular members
 
-Before a member is ever extracted, it has to pass two gates: it must be an actual file (not a directory, and not a symlink, hardlink, device node, or similar), and its file type has to match a file type PIIDigger has a handler for -- either by extension or by MIME type. Archives — `.tar` in particular — can contain entries that are none of those things, most notably symbolic links. All three supported archive formats are covered:
+Before a member is ever extracted, it has to pass two gates: it must be an actual file (not a directory, and not a symlink, hardlink, device node, or similar), and its extension has to match a file type PIIDigger has a handler for. Archives — `.tar` in particular — can contain entries that are none of those things, most notably symbolic links. All three supported archive formats are covered:
 
 - **`.tar` (and its compressed variants):** symlinks, hardlinks, device nodes, and FIFOs are excluded during enumeration, before any extraction decision is made — they never become a scan task at all.
 - **`.zip`:** entries whose stored metadata marks them as a Unix symlink are excluded the same way during enumeration. Independently of that check, extraction here never uses a "recreate the original file type" operation anyway — it reads a member's stored bytes and writes them into a brand-new regular file, so there's no mechanism that could create or follow a filesystem symlink regardless.

@@ -91,7 +91,10 @@ class ArchiveHandler(Protocol):
         on_progress is called as the archive is read, so a long listing (a
         compressed tar is decompressed end to end) keeps its task alive.
 
-        Raises ArchiveReadError on any open or parse failure.
+        Raises ArchiveReadError when the archive cannot be listed, or its
+        subclass ArchivePartlyReadError, holding the members listed so far, when
+        it fails part way through.
+
         No content is extracted to disk during this call.
         """
         ...

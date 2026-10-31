@@ -2456,6 +2456,261 @@ def test_tar_handler_truncated_compressed_tar_raises_archive_read_error(tmp_path
     assert isinstance(exc_info.value.__cause__, EOFError)
 
 
+def _tar_without_end_marker(*members: tuple[str, bytes]) -> bytes:
+    """An uncompressed tar stream of (name, data) members, cut off where the next header would start."""
+    import io
+    import tarfile
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tf:
+        for name, data in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    # Each member is a 512-byte header plus its data, padded to 512 bytes.
+    length = sum(512 + (len(data) + 511) // 512 * 512 for _, data in members)
+    return buffer.getvalue()[:length]
+
+
+def _gz_with_invalid_block(path: Path, readable: bytes) -> Path:
+    """A .tar.gz whose deflate stream turns invalid after readable: gzip reports zlib.error."""
+    import gzip
+    import zlib
+
+    compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+    body = compressor.compress(readable) + compressor.flush(zlib.Z_FULL_FLUSH)
+    header = gzip.compress(b"")[:10]
+    path.write_bytes(header + body + b"\x07" + b"\xff" * 64)  # 0x07: reserved deflate block type
+    return path
+
+
+_PAN_MEMBER = ("m0.txt", b"card 4893013335386137\n")
+# gzip reads ahead in 128 KiB chunks, so damage any closer to the start fails at
+# open, before a member is listed.  Random bytes do not compress below that.
+_FILLER_MEMBER = ("filler.bin", os.urandom(1024 * 1024))
+
+
+@pytest.mark.unit
+def test_tar_handler_zlib_error_keeps_the_members_before_it(tmp_path: Path) -> None:
+    """Seen on recovered backups: zlib.error is not an OSError, and used to escape as an unhandled error."""
+    from piidigger.archivehandlers._tar import handler
+    from piidigger.exceptions import ArchivePartlyReadError
+
+    readable = _tar_without_end_marker(_PAN_MEMBER, _FILLER_MEMBER)
+    archive = _gz_with_invalid_block(tmp_path / "damaged.tar.gz", readable)
+
+    with pytest.raises(ArchivePartlyReadError) as exc_info:
+        handler.list_members(archive)
+
+    assert isinstance(exc_info.value.__cause__, zlib.error)
+    assert [m.name for m in exc_info.value.members] == ["m0.txt", "filler.bin"]
+
+
+@pytest.mark.unit
+def test_tar_handler_zlib_error_at_the_start_lists_nothing(tmp_path: Path) -> None:
+    """Nothing was listed, so this is a plain read error with nothing to salvage."""
+    from piidigger.archivehandlers._tar import handler
+    from piidigger.exceptions import ArchivePartlyReadError, ArchiveReadError
+
+    archive = _gz_with_invalid_block(tmp_path / "damaged.tar.gz", b"")
+
+    with pytest.raises(ArchiveReadError) as exc_info:
+        handler.list_members(archive)
+
+    assert not isinstance(exc_info.value, ArchivePartlyReadError)
+
+
+@pytest.mark.unit
+def test_tar_handler_damaged_header_is_not_a_short_but_complete_listing(tmp_path: Path) -> None:
+    """tarfile stops at a garbled header with no error; the stream's checksum must reveal it."""
+    import gzip
+
+    from piidigger.archivehandlers._tar import handler
+    from piidigger.exceptions import ArchivePartlyReadError
+
+    stream = _tar_without_end_marker(_PAN_MEMBER) + b"\xab" * 1024
+    data = bytearray(gzip.compress(stream))
+    data[-8] ^= 0xFF  # the gzip trailer's CRC-32, as flipped bits in the stream would leave it
+    archive = tmp_path / "damaged.tar.gz"
+    archive.write_bytes(bytes(data))
+
+    with pytest.raises(ArchivePartlyReadError) as exc_info:
+        handler.list_members(archive)
+
+    assert isinstance(exc_info.value.__cause__, gzip.BadGzipFile)
+    assert [m.name for m in exc_info.value.members] == ["m0.txt"]
+
+
+@pytest.mark.unit
+def test_tar_handler_bytes_after_a_complete_gzip_stream_are_not_damage(tmp_path: Path) -> None:
+    """Such as an appended signature.  The stream passed its checksum, and gzip itself only warns."""
+    import gzip
+
+    from piidigger.archivehandlers._tar import handler
+
+    archive = tmp_path / "signed.tar.gz"
+    tar = _tar_without_end_marker(_PAN_MEMBER) + b"\0" * 1024
+    archive.write_bytes(gzip.compress(tar) + b"SIGNATURE-appended-bytes")
+
+    assert [m.name for m in handler.list_members(archive)] == ["m0.txt"]
+
+
+@pytest.mark.unit
+def test_tar_handler_zstd_error_keeps_the_members_before_it(tmp_path: Path) -> None:
+    """Python 3.14 detects zstd in r:* mode, and ZstdError is not an OSError."""
+    from compression.zstd import ZstdError, compress
+
+    from piidigger.archivehandlers._tar import handler
+    from piidigger.exceptions import ArchivePartlyReadError
+
+    # A second frame whose first block header (after 6 frame-header bytes) has
+    # the reserved block type, which zstd always rejects.
+    bad_frame = bytearray(compress(b"text " * 1000))
+    bad_frame[6:] = b"\xff" * (len(bad_frame) - 6)
+    archive = tmp_path / "damaged.tar"
+    archive.write_bytes(compress(_tar_without_end_marker(_PAN_MEMBER, _FILLER_MEMBER)) + bytes(bad_frame))
+
+    with pytest.raises(ArchivePartlyReadError) as exc_info:
+        handler.list_members(archive)
+
+    assert isinstance(exc_info.value.__cause__, ZstdError)
+    assert [m.name for m in exc_info.value.members] == ["m0.txt", "filler.bin"]
+
+
+@pytest.mark.unit
+def test_tar_handler_imports_on_a_python_built_without_zstd(tmp_path: Path) -> None:
+    """zstd is optional in CPython.  Requiring it would stop the whole CLI from starting."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "sys.modules['_zstd'] = None\n"
+        "import piidigger.cli.main\n"
+        "from piidigger.archivehandlers._tar import _READ_ERRORS\n"
+        "assert not any(e.__name__ == 'ZstdError' for e in _READ_ERRORS)\n"
+    )
+    # Not the repo root: its piidigger.py would shadow the package.
+    subprocess.run([sys.executable, "-c", code], cwd=tmp_path, check=True, capture_output=True)  # noqa: S603
+
+
+@pytest.mark.unit
+def test_enum_archive_scans_what_a_damaged_tar_listed_and_reports_an_error(tmp_path: Path) -> None:
+    readable = _tar_without_end_marker(_PAN_MEMBER, _FILLER_MEMBER)
+    archive = _gz_with_invalid_block(tmp_path / "damaged.tar.gz", readable)
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="tar"), ctx, _logger())
+
+    assert result.status == "error"
+    assert "scanning the 2 member(s) listed" in (result.error_message or "")
+    assert result.counters["archive_errors"] == 1
+    assert _member_paths(result) == ["m0.txt"]
+
+    outcome = _scan(_scan_archive_task(archive, "m0.txt", archive_type="tar"), ctx)
+    assert outcome.findings, "the member before the damage was not scanned"
+
+
+@pytest.mark.unit
+def test_tar_batch_hitting_zlib_error_keeps_earlier_members_findings(tmp_path: Path) -> None:
+    """The extraction walk can hit the same damage: a read error for the batch, not an unhandled one."""
+    readable = _tar_without_end_marker(_PAN_MEMBER, _FILLER_MEMBER)
+    archive = _gz_with_invalid_block(tmp_path / "damaged.tar.gz", readable)
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+
+    outcome = _scan(_scan_archive_task(archive, "m0.txt", "m1.txt", archive_type="tar"), ctx)
+
+    assert outcome.result.status == "error"
+    assert outcome.result.counters["archive_errors"] == 1
+    assert outcome.findings
+
+
+_ADDED_TEXT_EXTS = [".md", ".yml", ".sql", ".cfg", ".conf", ".ini", ".tsv", ".rst", ".properties", ".env", ".eml"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("ext", _ADDED_TEXT_EXTS)
+def test_text_extension_is_scanned_as_an_archive_member(tmp_path: Path, ext: str) -> None:
+    """Members have no detected MIME type, so only their extension can qualify them."""
+    member = f"config{ext}"
+    archive = _build_archive(tmp_path, "zip", {member: b"card 4893013335386137\n"})
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+
+    enumerated = handle_enum_archive_members(_enum_archive_task(archive), ctx, _logger())
+    assert _member_paths(enumerated) == [member]
+
+    assert _scan(_scan_archive_task(archive, member), ctx).findings
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("member", [".env", "app/.env"])
+def test_a_file_named_exactly_dot_env_is_scanned_as_an_archive_member(tmp_path: Path, member: str) -> None:
+    """Path(".env").suffix is "", so the ".env" extension alone would never match it."""
+    archive = _build_archive(tmp_path, "zip", {member: b"card 4893013335386137\n"})
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+
+    assert _member_paths(handle_enum_archive_members(_enum_archive_task(archive), ctx, _logger())) == [member]
+    assert _scan(_scan_archive_task(archive, member), ctx).findings
+
+
+@pytest.mark.unit
+def test_a_file_named_exactly_dot_env_is_scanned_on_disk_whatever_include_mime_says(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / ".env").write_bytes(b"CARD=4893013335386137\n")
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+    ctx = replace(ctx, config=ctx.config.model_copy(update={"include_mime": []}))
+
+    listed = handle_enum_dir(Task(task_type=TaskType.ENUM_DIR, payload={"path": str(root), "depth": 0}), ctx, _logger())
+
+    assert len(listed.new_tasks) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        (".env", ".env"),
+        ("app/.env", ".env"),
+        ("prod.env", ".env"),
+        ("report.TXT", ".TXT"),
+        ("README", ""),
+        (".bashrc.bak", ".bak"),
+    ],
+)
+def test_file_ext(name: str, expected: str) -> None:
+    from piidigger.filehandlers import file_ext
+
+    assert file_ext(name) == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "name, content",
+    [
+        # puremagic sniffs these as types with no handler, which used to leave them unscanned.
+        ("settings.ini", b"[main]\nowner=card 4893013335386137\n"),
+        ("message.eml", b"From: a@example.com\nTo: b@example.com\nSubject: hi\n\ncard 4893013335386137\n"),
+    ],
+)
+def test_text_extension_wins_over_a_wrong_sniff_on_disk(tmp_path: Path, name: str, content: bytes) -> None:
+    from piidigger.orchestration.worker._scan_file import handle_scan_file
+
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / name).write_bytes(content)
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+
+    listed = handle_enum_dir(
+        Task(task_type=TaskType.ENUM_DIR, payload={"path": str(root), "depth": 0}), ctx, _logger()
+    )
+
+    assert len(listed.new_tasks) == 1
+    assert handle_scan_file(Task(**listed.new_tasks[0]), ctx, _logger()).findings
+
+
 @pytest.mark.unit
 def test_tar_handler_corrupt_xz_raises_archive_read_error(tmp_path: Path) -> None:
     """LZMAError is not an OSError, so it needs its own entry in both handlers' except clauses."""

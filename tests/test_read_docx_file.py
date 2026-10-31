@@ -1,3 +1,5 @@
+import re
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -123,3 +125,135 @@ def test_docx_closes_zipfile_when_abandoned(monkeypatch: pytest.MonkeyPatch) -> 
     next(gen)
     gen.close()
     _assert_closed(captured[0])
+
+
+def _docx_with_rewritten_parts(tmp_path: Path, rewrites: dict[str, tuple[bytes, bytes]]) -> Path:
+    """Copy the comments fixture, replacing bytes in the named zip parts."""
+    path = tmp_path / "rewritten.docx"
+    with (
+        zipfile.ZipFile("testdata/docx/lorem-ipsum-1line-comments.docx") as source,
+        zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as target,
+    ):
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename in rewrites:
+                pattern, replacement = rewrites[info.filename]
+                data, count = re.subn(pattern, replacement, data)
+                assert count, f"nothing to rewrite in {info.filename}"
+            target.writestr(info, data)
+    return path
+
+
+@pytest.mark.filehandlers
+def test_docx_comment_with_no_date_keeps_the_body_and_reports_comments(tmp_path: Path) -> None:
+    """docx2python reads w:date unconditionally, and the body is still only buffered when it raises."""
+    path = _docx_with_rewritten_parts(
+        tmp_path,
+        {
+            "word/comments.xml": (rb' w:date="[^"]*"', b""),
+            "word/document.xml": (rb"Lorem ipsum", b"4893013335386137 Lorem ipsum"),
+        },
+    )
+    item = FilesystemItem(path)
+
+    content = " ".join(DocxHandler().read(item, Config()))
+
+    assert "4893013335386137" in content
+    assert "Randy Bartels" in content, "the document properties after the comments were lost"
+    assert item.unread_reason == "Word comments could not be read"
+
+
+@pytest.mark.filehandlers
+def test_docx_bad_properties_keeps_body_and_comments(monkeypatch: pytest.MonkeyPatch) -> None:
+    from docx2python.docx_output import DocxContent
+
+    def broken(self):
+        raise KeyError("dc:creator")
+
+    monkeypatch.setattr(DocxContent, "core_properties", property(broken))
+    item = FilesystemItem(Path("testdata/docx/lorem-ipsum-1line-comments.docx"))
+
+    content = " ".join(DocxHandler().read(item, Config()))
+
+    assert "Lorem ipsum" in content
+    assert item.unread_reason == "Word document properties could not be read"
+
+
+@pytest.mark.filehandlers
+def test_docx_reports_every_unread_part_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    from docx2python.docx_output import DocxContent
+
+    def broken(self):
+        raise KeyError("part")
+
+    monkeypatch.setattr(DocxContent, "comments", property(broken))
+    monkeypatch.setattr(DocxContent, "core_properties", property(broken))
+    item = FilesystemItem(Path("testdata/docx/lorem-ipsum-1line-comments.docx"))
+
+    assert "Lorem ipsum" in " ".join(DocxHandler().read(item, Config()))
+    assert item.unread_reason == "Word comments and document properties could not be read"
+
+
+def _docx_with_bad_crc(tmp_path: Path, part: str) -> Path:
+    """The comments fixture with a PAN in its body and one byte of the named part's data flipped."""
+    path = tmp_path / "bad-crc.docx"
+    with (
+        zipfile.ZipFile("testdata/docx/lorem-ipsum-1line-comments.docx") as source,
+        zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as target,
+    ):
+        for name in source.namelist():
+            data = source.read(name)
+            if name == "word/document.xml":
+                data = data.replace(b"Lorem ipsum", b"4893013335386137 Lorem ipsum", 1)
+            target.writestr(name, data)
+    with zipfile.ZipFile(path) as zf:
+        info = zf.getinfo(part)
+    raw = bytearray(path.read_bytes())
+    # Past the local header's fixed 30 bytes, the name, and the start of the XML.
+    raw[info.header_offset + 30 + len(part) + 100] ^= 0xFF
+    path.write_bytes(bytes(raw))
+    return path
+
+
+@pytest.mark.filehandlers
+@pytest.mark.parametrize(
+    "part, reason",
+    [
+        ("word/comments.xml", "Word comments could not be read"),
+        ("docProps/core.xml", "Word document properties could not be read"),
+    ],
+)
+def test_docx_bad_crc_in_an_optional_part_keeps_the_body(tmp_path: Path, part: str, reason: str) -> None:
+    """BadZipFile from an optional part must not reach the handler's silent BadZipFile return."""
+    item = FilesystemItem(_docx_with_bad_crc(tmp_path, part))
+
+    content = " ".join(DocxHandler().read(item, Config()))
+
+    assert "4893013335386137" in content
+    assert item.unread_reason == reason
+
+
+@pytest.mark.filehandlers
+@pytest.mark.parametrize(
+    "part, closing_tag, reason",
+    [
+        ("word/comments.xml", rb"</w:comments>", "Word comments could not be read"),
+        ("docProps/core.xml", rb"</cp:coreProperties>", "Word document properties could not be read"),
+    ],
+)
+def test_docx_malformed_xml_in_an_optional_part_keeps_the_body(
+    tmp_path: Path, part: str, closing_tag: bytes, reason: str
+) -> None:
+    path = _docx_with_rewritten_parts(
+        tmp_path,
+        {
+            part: (closing_tag, b""),
+            "word/document.xml": (rb"Lorem ipsum", b"4893013335386137 Lorem ipsum"),
+        },
+    )
+    item = FilesystemItem(path)
+
+    content = " ".join(DocxHandler().read(item, Config()))
+
+    assert "4893013335386137" in content
+    assert item.unread_reason == reason
