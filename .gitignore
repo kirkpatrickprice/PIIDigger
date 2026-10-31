@@ -194,6 +194,7 @@ piidigger-logs/
 *venv*
 *.toml
 !pyproject.toml
+testdata/plaintext/json-logs/*.jsonl
 
 # Ignore macOS system files
 .DS_Store

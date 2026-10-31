@@ -1,0 +1,109 @@
+site_name: PIIDigger
+site_description: Identify Personally Identifiable Information in common file types
+site_url: https://kirkpatrickprice.github.io/PIIDigger
+repo_url: https://github.com/kirkpatrickprice/PIIDigger
+repo_name: kirkpatrickprice/PIIDigger
+docs_dir: docs
+
+# Exclude GitHub-specific files from documentation
+exclude_docs: |
+  .github/
+  docs/templates/
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.path
+    - navigation.top
+    - navigation.tracking
+    - navigation.indexes
+    - toc.integrate
+    - toc.follow
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+  palette:
+    # Dark mode
+    - scheme: slate
+      primary: indigo
+      accent: orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    # Light mode
+    - scheme: default
+      primary: indigo
+      accent: light blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  logo: assets/piidigger-logo.svg
+  favicon: assets/piidigger-logo.svg
+  font:
+    text: Roboto
+    code: Roboto Mono
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_div_format
+  - admonition
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: true
+            docstring_style: google
+
+nav:
+  - Home: index.md
+  - User Guides:
+      - Installation: user-guides/installation.md
+      - ⚠️ Breaking Changes: user-guides/breaking-changes.md
+      - Scan Command: user-guides/scan-command.md
+      - Config Command: user-guides/config-command.md
+      - Inspect Command: user-guides/inspect-command.md
+      - Advanced Configuration: user-guides/advanced-configuration.md
+      - Archive Handling: user-guides/archive-handling.md
+      - Troubleshooting: user-guides/troubleshooting.md
+  - Architecture Refactor:
+      - Overview: refactor/README.md
+      - Redesign: refactor/ARCHITECTURE_REDESIGN.md
+      - Current Issues: refactor/CURRENT_ISSUES.md
+      - Implementation Checklist: refactor/IMPLEMENTATION_CHECKLIST.md
+      - Testing Strategy: refactor/TESTING_STRATEGY.md
+  - Architecture:
+      - Orchestration: architecture/orchestration/coordinator-worker-pipeline.md
+      - Archive Handling (Architecture): architecture/archives/archive-handling.md
+      - Testing Requirements: architecture/quality/testing-requirements.md
+      - CI/CD Pipeline: architecture/ci-cd/pipeline.md
+  - Extending PIIDigger: reference/extending.md
+
+# To display Mermaid diagrams
+extra_javascript:
+  - https://unpkg.com/mermaid@11.16.0/dist/mermaid.min.js

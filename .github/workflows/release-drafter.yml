@@ -1,0 +1,17 @@
+name: Release Drafter
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  update-draft:
+    runs-on: ubuntu-latest
+    steps:
+      # v7 reads the token from its `token` input, which defaults to github.token.
+      - uses: release-drafter/release-drafter@v7
