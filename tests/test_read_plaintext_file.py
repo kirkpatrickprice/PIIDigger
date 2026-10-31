@@ -5,7 +5,7 @@ import pytest
 
 from piidigger.exceptions import UndetectableEncodingError
 from piidigger.filehandlers.plaintext import _MAX_LINE_CHARS, PlaintextHandler
-from piidigger.getencoding import _ENCODING_SAMPLE_BYTES
+from piidigger.getencoding import _ENCODING_SAMPLE_BYTES, _FALLBACK_ENCODING, detect_file_encoding
 from piidigger.models.config import BufferConfig, Config, PlaintextConfig
 from piidigger.orchestration.sources import FilesystemItem
 
@@ -37,6 +37,101 @@ def test_plaintext_undetectable_encoding_raises() -> None:
     # the file a silent skip; the scan handlers log the typed error instead.
     with pytest.raises(UndetectableEncodingError):
         _read(Path("testdata/plaintext/mislabeled-text-file.txt"))
+
+
+@pytest.mark.filehandlers
+def test_plaintext_mostly_text_with_stray_binary_is_read(tmp_path: Path) -> None:
+    """Browser storage files defeat encoding detection but still hold readable PII."""
+    from tests.test_getencoding import _MOSTLY_TEXT
+
+    path = tmp_path / "000003.log"
+    path.write_bytes(_MOSTLY_TEXT)
+
+    assert "jane.doe@example.com" in " ".join(_read(path))
+
+
+def _mixed_utf16_records(value: str, encoding: str = "utf-16-le", stray: bytes = b"\x01\xfe\xff\x00") -> bytes:
+    """ASCII keys with UTF-16 values and stray bytes, which no single encoding fits."""
+    return b"".join(b'{"value":"' + value.encode(encoding) + b'"}' + stray for _ in range(300))
+
+
+def _read_mixed(tmp_path: Path, data: bytes) -> str:
+    path = tmp_path / "localstorage.log"
+    path.write_bytes(data)
+    return " ".join(_read(path))
+
+
+@pytest.mark.filehandlers
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be"])
+@pytest.mark.parametrize("value", ["jane@example.com", "4893013335386137"])
+def test_plaintext_fallback_matches_utf16_values(tmp_path: Path, value: str, encoding: str) -> None:
+    """Read byte by byte, these arrive as "j\\0a\\0n\\0e\\0", which no data handler can match."""
+    data = _mixed_utf16_records(value, encoding)
+    (tmp_path / "s").write_bytes(data)
+    assert detect_file_encoding(tmp_path / "s") == _FALLBACK_ENCODING
+
+    assert value in _read_mixed(tmp_path, data)
+
+
+@pytest.mark.filehandlers
+def test_plaintext_utf16_values_match_when_an_encoding_is_detected(tmp_path: Path) -> None:
+    """With no high bytes, detection answers utf_8, and the NULs in the values are still there."""
+    data = _mixed_utf16_records("jane@example.com", stray=b"\x01\x02\x00")
+    (tmp_path / "s").write_bytes(data)
+    assert detect_file_encoding(tmp_path / "s") == "utf_8"
+
+    assert "jane@example.com" in _read_mixed(tmp_path, data)
+
+
+@pytest.mark.filehandlers
+def test_plaintext_utf16_heavy_file_is_read_not_skipped(tmp_path: Path) -> None:
+    """UTF-16 is half NULs, so stray bytes alone would otherwise push it under the threshold."""
+    value = "jane@example.com".encode("utf-16-le")
+    data = b"".join(b"\x01\xfe\xff\x00\x93\x07" + value for _ in range(300))
+
+    assert "jane@example.com" in _read_mixed(tmp_path, data)
+
+
+@pytest.mark.filehandlers
+@pytest.mark.parametrize(
+    "fields, expected",
+    [
+        (b"name\x004893013335386137\x004111111111111111\x00", ["4893013335386137", "4111111111111111"]),
+        (b"card=4893013335386137\x001\x00", ["4893013335386137"]),
+        (b"alice@example.com\0bob@example.com\0", ["alice@example.com", "bob@example.com"]),
+    ],
+    ids=["two-pans", "pan-then-digit", "two-emails"],
+)
+def test_plaintext_nul_delimited_fields_stay_apart(tmp_path: Path, fields: bytes, expected: list[str]) -> None:
+    """Removing a delimiter NUL would glue fields together and lose the values in them."""
+    words = _read_mixed(tmp_path, (fields + b"\xfe\xff\x01") * 100).split()
+
+    for value in expected:
+        assert any(word.endswith(value) or word == value for word in words)
+
+
+@pytest.mark.filehandlers
+def test_plaintext_removing_nuls_leaves_the_file_alone(tmp_path: Path) -> None:
+    data = _mixed_utf16_records("jane@example.com")
+
+    assert "\0" not in _read_mixed(tmp_path, data)
+    assert (tmp_path / "localstorage.log").read_bytes() == data
+
+
+@pytest.mark.filehandlers
+def test_plaintext_scan_limit_counts_the_text_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The limit bounds the reading, so removed NULs still count toward max_scan_mb."""
+    import piidigger.filehandlers.plaintext as plaintext
+
+    path = tmp_path / "localstorage.log"
+    path.write_bytes(b"x\0" * (4 * 1024 * 1024))
+    monkeypatch.setattr(plaintext, "detect_file_encoding", lambda _: _FALLBACK_ENCODING)
+
+    config = Config(plaintext=PlaintextConfig(max_scan_mb=1))
+    chunks = list(PlaintextHandler().read(FilesystemItem(path), config))
+
+    # 1 MiB of characters read, half of them NULs.
+    assert sum(len(c) for c in chunks) == 512 * 1024
 
 
 # Files with small, predictable content that fits in a single chunk.

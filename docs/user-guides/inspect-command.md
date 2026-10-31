@@ -56,7 +56,7 @@ Prints the single MIME type string PIIDigger's MIME detector assigns to that pat
 piidigger inspect encoding C:\Reports\notes.txt
 ```
 
-Prints the text encoding PIIDigger would use to decode the file during a scan (e.g. `utf_8`, `cp1252`), using the same detection code as the scanner. Like the scanner, it examines only the first 4 MB of the file, so it returns right away even for very large files. A file that is pure ASCII in that first 4 MB is reported as `utf_8`: UTF-8 reads ASCII identically and also handles any non-ASCII text later in the file. `None` means the encoding couldn't be determined, and the scanner skips the file. Only accepts a file, not a folder. If the file can't be read, the command reports the OS error instead of a silent failure.
+Prints the text encoding PIIDigger would use to decode the file during a scan (e.g. `utf_8`, `cp1252`), using the same detection code as the scanner. If detection fails but at least half of the sample is text, as with browser storage files, it prints `latin_1`, and the scanner reads the file that way. It prints `None` for an empty file, or for one the scanner would skip as binary. Like the scanner, it examines only the first 4 MB of the file, so it returns right away even for very large files. A file that is pure ASCII in that first 4 MB is reported as `utf_8`: UTF-8 reads ASCII identically and also handles any non-ASCII text later in the file. Only accepts a file, not a folder. If the file can't be read, the command reports the OS error instead of a silent failure.
 
 #### `piidigger inspect archivetypes`
 

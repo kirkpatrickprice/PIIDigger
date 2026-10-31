@@ -371,6 +371,27 @@ def test_scan_file_undetectable_encoding_is_logged_and_counted(
 
 
 @pytest.mark.unit
+def test_scan_file_mostly_text_with_stray_binary_yields_findings(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Detection gives up on these, but they are read rather than skipped."""
+    import logging
+
+    from tests.test_getencoding import _MOSTLY_TEXT
+
+    f = tmp_path / "000003.log"
+    f.write_bytes(_MOSTLY_TEXT)
+    logger = logging.getLogger("tests.scan_file.fallback")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path, data_handlers=["email"]), logger)
+
+    assert result.status == "ok"
+    assert result.findings
+    assert caplog.records == []
+
+
+@pytest.mark.unit
 def test_scan_file_that_vanished_after_listing_is_skipped_at_info(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

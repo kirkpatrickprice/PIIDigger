@@ -3,7 +3,14 @@ from pathlib import Path
 
 import pytest
 
-from piidigger.getencoding import _ENCODING_SAMPLE_BYTES, _trim_partial_utf8, detect_encoding, detect_file_encoding
+from piidigger.getencoding import (
+    _ENCODING_SAMPLE_BYTES,
+    _is_mostly_text,
+    _trim_partial_utf8,
+    detect_encoding,
+    detect_file_encoding,
+    remove_nuls,
+)
 
 
 @pytest.mark.utils
@@ -98,3 +105,89 @@ def test_detect_file_encoding_undetectable() -> None:
 )
 def test_trim_partial_utf8(sample: bytes, expected: bytes) -> None:
     assert _trim_partial_utf8(sample) == expected
+
+
+# ---------------------------------------------------------------------------
+# detect_file_encoding — fallback for mostly-text files detection gives up on
+# ---------------------------------------------------------------------------
+
+# Text with scattered NULs and high bytes, as in a browser LevelDB log.
+_MOSTLY_TEXT = b"".join(
+    b"key%d=jane.doe@example.com; " % i + bytes((i * 37 + j * 91) % 256 for j in range(6)) + b"\0\0" for i in range(300)
+)
+
+
+@pytest.mark.utils
+def test_mostly_text_fixture_really_defeats_detection() -> None:
+    """Keeps the fallback tests honest: without this, they might never reach the fallback."""
+    assert detect_encoding(_MOSTLY_TEXT) is None
+
+
+@pytest.mark.utils
+def test_detect_file_encoding_falls_back_on_mostly_text(tmp_path: Path) -> None:
+    assert detect_file_encoding(_write(tmp_path, _MOSTLY_TEXT)) == "latin_1"
+
+
+@pytest.mark.utils
+@pytest.mark.parametrize(
+    "fixture",
+    ["testdata/binary-json.json", "testdata/plaintext/mislabeled-text-file.txt"],
+)
+def test_detect_file_encoding_no_fallback_under_half_text(fixture: str) -> None:
+    assert detect_file_encoding(Path(fixture)) is None
+
+
+@pytest.mark.utils
+@pytest.mark.parametrize(
+    "sample, expected",
+    [
+        (b"", False),
+        (b"\0" * 10, False),
+        (b"a" * 10, True),
+        (b"\t\r\n" + b"\0" * 3, True),
+        (b"a" * 5 + b"\0" * 5, True),
+        (b"a" * 49 + b"\0" * 51, False),
+        (b"a" * 49 + b"\xff" * 51, False),
+        (b"a\0" * 8 + b"\xff" * 10, True),
+        (b"\0a" * 8 + b"\xff" * 10, True),
+        (b"a\0" * 3 + b"\xff" * 7, False),
+    ],
+    ids=[
+        "empty",
+        "all-nul",
+        "all-text",
+        "whitespace-counts",
+        "exactly-half",
+        "just-under-half",
+        "high-bytes-dont-count",
+        "utf16-le-nuls-count",
+        "utf16-be-nuls-count",
+        "short-run-nuls-dont-count",
+    ],
+)
+def test_is_mostly_text(sample: bytes, expected: bool) -> None:
+    assert _is_mostly_text(sample) is expected
+
+
+@pytest.mark.utils
+def test_detect_file_encoding_empty_file_is_still_none(tmp_path: Path) -> None:
+    assert detect_file_encoding(_write(tmp_path, b"")) is None
+
+
+@pytest.mark.utils
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("no nuls", "no nuls"),
+        ("j\0a\0n\0e\0", "jane"),
+        ("\0j\0a\0n\0e", "jane"),
+        ("a\0b", "a b"),
+        ("a\0b\0c\0", "a b c "),
+        ("4111\x005222", "4111 5222"),
+        ("key=j\0a\0n\0e\0;x\0y", "key=jane;x y"),
+        ("\0\0\0", "   "),
+    ],
+    ids=["none", "utf16-le", "utf16-be", "delimiter", "short-run", "digits", "mixed", "only-nuls"],
+)
+def test_remove_nuls(text: str, expected: str) -> None:
+    assert remove_nuls(text) == expected

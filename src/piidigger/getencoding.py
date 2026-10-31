@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from charset_normalizer import from_bytes
@@ -10,6 +11,20 @@ from charset_normalizer import from_bytes
 # the guess away from UTF-8.  It costs ~12 MiB and ~0.01 s.  See
 # testdata/plaintext/json-logs/compare_sample_sizes.py.
 _ENCODING_SAMPLE_BYTES: int = 4 * 1024 * 1024
+
+# When detection fails, a sample at least this share printable ASCII is still read
+# as text.  A few NUL bytes make charset-normalizer give up, even on files that are
+# otherwise all text, such as browser LevelDB logs and cache entries, which can hold
+# PII.  Measured on 122 such files: emails turned up only at 50% or more.
+_FALLBACK_MIN_TEXT_SHARE: float = 0.5
+# Decodes any byte, and leaves ASCII unchanged, so the data handlers can match.
+_FALLBACK_ENCODING: str = "latin_1"
+_TEXT_BYTES: bytes = bytes(range(0x20, 0x7F)) + b"\t\n\r"
+
+# ASCII stored as UTF-16, little- or big-endian: printable characters alternating
+# with NULs.  Four characters at least, so that a stray pair isn't taken for text.
+_UTF16_RUN_BYTES: re.Pattern[bytes] = re.compile(rb"(?:[\x20-\x7e]\0){4,}|(?:\0[\x20-\x7e]){4,}")
+_UTF16_RUN_TEXT: re.Pattern[str] = re.compile(r"(?:[\x20-\x7e]\0){4,}|(?:\0[\x20-\x7e]){4,}")
 
 
 def detect_encoding(data: bytes) -> str | None:
@@ -43,7 +58,11 @@ def detect_file_encoding(path: Path) -> str | None:
       nothing about the rest of the file, and UTF-8 decodes ASCII identically
       while still handling any non-ASCII text further in.
 
-    Returns None if the file is empty or the encoding cannot be determined.
+    When detection fails on a sample that is still mostly text, returns
+    _FALLBACK_ENCODING.
+
+    Returns None if the file is empty, or if detection fails and too little of
+    the sample is text.
     OSError from opening or reading the file is left to the caller.
     """
     with open(path, "rb") as f:
@@ -52,7 +71,36 @@ def detect_file_encoding(path: Path) -> str | None:
     if len(sample) == _ENCODING_SAMPLE_BYTES:
         sample = _trim_partial_utf8(sample)
     enc = detect_encoding(sample)
+    if enc is None:
+        return _FALLBACK_ENCODING if _is_mostly_text(sample) else None
     return "utf_8" if enc == "ascii" else enc
+
+
+def _is_mostly_text(sample: bytes) -> bool:
+    """True if at least _FALLBACK_MIN_TEXT_SHARE of a non-empty sample is text.
+
+    Text is printable ASCII, including the NULs of ASCII stored as UTF-16.  UTF-16
+    text would otherwise count as half text at best.
+    """
+    if not sample:
+        return False
+    text_bytes = len(sample) - len(sample.translate(None, _TEXT_BYTES))
+    text_bytes += sum(len(run) // 2 for run in _UTF16_RUN_BYTES.findall(sample))
+    return text_bytes / len(sample) >= _FALLBACK_MIN_TEXT_SHARE
+
+
+def remove_nuls(text: str) -> str:
+    """Return decoded text with no NULs, keeping what they separate matchable.
+
+    A NUL is never part of text, but what it means varies.  Files such as browser
+    storage can mix ASCII with UTF-16 values that no single encoding fits, which
+    decode as "j\\0a\\0n\\0e\\0": those NULs are removed, to rejoin the value.  Any
+    other NUL is a delimiter, so it becomes a space, and the fields on either side
+    of it stay apart.
+    """
+    if "\0" not in text:
+        return text
+    return _UTF16_RUN_TEXT.sub(lambda run: run.group().replace("\0", ""), text).replace("\0", " ")
 
 
 def _trim_partial_utf8(sample: bytes) -> bytes:

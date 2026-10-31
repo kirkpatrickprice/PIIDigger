@@ -2805,6 +2805,19 @@ def test_scan_archive_member_with_undetectable_encoding_is_counted_not_failed(tm
 
 
 @pytest.mark.unit
+def test_scan_archive_member_mostly_text_with_stray_binary_yields_findings(tmp_path: Path) -> None:
+    from tests.test_getencoding import _MOSTLY_TEXT
+
+    zp = tmp_path / "profile.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr("000003.log", _MOSTLY_TEXT)
+
+    result = _scan(_scan_archive_task(zp, "000003.log"), _make_ctx(tmp_path, data_handlers=["email"]))
+
+    assert result.findings
+
+
+@pytest.mark.unit
 def test_scan_member_partly_read_keeps_findings_and_counts_a_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

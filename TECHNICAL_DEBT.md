@@ -86,6 +86,26 @@ Known gaps we chose not to fix yet. Each entry says what is wrong, why it was de
 - **Where:** `archivehandlers/_7z.py`, `orchestration/coordinator.py` (`_requeue_failed_batch`).
 - **Suggested fix:** After a CRC or decode error in a solid folder, fail every remaining member of that folder at once instead of requeuing them. Either the 7z handler reports the folder boundary, or `_requeue_failed_batch` stops requeuing after a repeat failure on the same archive.
 
+## File handlers
+
+### A NUL next to a UTF-16 run can lose or corrupt the value beside it
+- **What:** `remove_nuls()` removes the NULs inside UTF-16-style runs and turns other NULs into spaces. A delimiter NUL that follows a printable character can look like the start of a run. So `alice@example.com\0a\0b\0c\0` reports the wrong domain, and `name\0` followed by a UTF-16 email reports the wrong local part. A PAN next to such a run is lost. All of these report as scanned and clean.
+- **Why deferred:** These need unusual adjacency, and such files were skipped entirely before the fallback. Only synthetic files have shown it; real LevelDB files are untested. A length byte in the digit range just before a UTF-16 value may be truly ambiguous.
+- **Where:** `getencoding.py` (`remove_nuls`, `_UTF16_RUN_TEXT`).
+- **Suggested fix:** When a run's first character directly follows another printable character, treat the NUL after that character as a delimiter. Take care that the big-endian branch doesn't consume the same NUL.
+
+### A value split by the 1 MiB read boundary is missed
+- **What:** `PlaintextHandler` reads a line of over 1 MiB in pieces. A PAN or email that straddles a cut is usually missed, in plain ASCII as well as UTF-16.
+- **Why deferred:** It needs a value exactly on a cut in a very long line.
+- **Where:** `filehandlers/plaintext.py` (`_MAX_LINE_CHARS`).
+- **Suggested fix:** Carry the last few hundred characters of each piece into the next, and de-duplicate matches.
+
+### Encoding detection can pick a wrong encoding with no sign of it
+- **What:** On a synthetic file of about 1 MiB of one repeated letter plus stray bytes and a UTF-16 value, charset-normalizer returned `utf_16_be` or `cp037`. The file then decoded to garbage, with no matches and a clean status. How often real files hit this is unknown.
+- **Why deferred:** Seen only on artificial filler, and detection itself is unchanged.
+- **Where:** `getencoding.py` (`detect_encoding`).
+- **Suggested fix:** After decoding, compare the printable share of the result with that of the raw bytes, and fall back when decoding made it much worse.
+
 ## Configuration
 
 ### `"all"` is stored literally instead of expanded

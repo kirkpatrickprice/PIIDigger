@@ -2,7 +2,7 @@ from collections.abc import Iterator
 
 from piidigger.exceptions import UndetectableEncodingError
 from piidigger.filehandlers._sharedfuncs import ContentBuffer
-from piidigger.getencoding import detect_file_encoding
+from piidigger.getencoding import detect_file_encoding, remove_nuls
 from piidigger.models.config import Config
 
 HANDLES = {
@@ -102,6 +102,9 @@ class PlaintextHandler:
 
     Raises UndetectableEncodingError for a non-empty file whose encoding
     cannot be detected.
+
+    NULs are dealt with by remove_nuls(), so UTF-16 values in a file of mixed
+    content can still match.  Only the text in memory changes.
     """
 
     def read(self, source, config: Config) -> Iterator[str]:  # source: ScannableItem
@@ -119,10 +122,10 @@ class PlaintextHandler:
         chars_read = 0
         with open(path, encoding=enc, errors="replace") as f:
             while line := f.readline(_MAX_LINE_CHARS):
-                content_buffer.append_content(line)
+                chars_read += len(line)
+                content_buffer.append_content(remove_nuls(line))
                 if content_buffer.content_buffer_full():
                     yield content_buffer.get_content()
-                chars_read += len(line)
                 if chars_read >= max_scan_chars:
                     break
 

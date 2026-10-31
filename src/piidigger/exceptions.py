@@ -33,5 +33,6 @@ class UndetectableEncodingError(Exception):
 
     Handlers cannot log, so the file would otherwise be a silent skip.  The
     scan handlers catch it, log the file at INFO and count it as scanned:
-    it is usually binary content with a text extension, not a read failure.
+    it is binary content with a text extension or type, not a read failure.  A
+    file that is still mostly text is read anyway; see detect_file_encoding().
     """
