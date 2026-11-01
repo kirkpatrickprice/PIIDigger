@@ -63,6 +63,27 @@ piidigger scan -f piidigger.toml
 2. **Is the encoding supported?** For plain-text files, run `piidigger inspect encoding <path>`. PIIDigger only scans encodings it can reliably map onto regex-friendly text; non-Latin encodings aren't currently supported.
 3. **Was the file inside an excluded directory, or too large?** Check `exclude_dirs`; for spreadsheets, the `[spreadsheet]` blank-row/column cutoffs; and for plain-text files, the `[plaintext] max_scan_mb` cutoff (only the first 64 MB is scanned by default) — see [Advanced Configuration](advanced-configuration.md).
 
+### Why am I seeing PDF pages that could not be read in the log?
+
+**Symptoms:** The log has a line like `1 of 170 PDF pages could not be read, first page 46: LimitReachedError: Reached maximum number of tokens per stream`, or `PDF could not be read: PdfReadError`.
+
+**Explanation:**
+
+- **`N of M PDF pages could not be read`:** PIIDigger scanned the other pages and kept those findings. The message names the first page it couldn't read; if N is more than 1, others were skipped too.
+- **`PDF could not be read: …`:** PIIDigger read nothing from this file. With `after page N` in the message, it scanned the pages up to that point.
+- **`Reached maximum number of tokens`, with or without `per stream`:** that page is unusually complex, often a detailed drawing. PIIDigger limits this based on how much memory each worker may use, so that one page is less likely to stop the worker and lose the whole file's results.
+- **Other errors:** these usually mean that part of the PDF is damaged. Other `LimitReachedError` messages are limits that the settings below don't change. PIIDigger doesn't log the details of parse errors, because they can quote the document's content.
+
+**Solutions:** For `Reached maximum number of tokens`, with or without `per stream`, or for `PDF could not be read: PdfReadError` on a PDF that opens normally elsewhere, raise `max_worker_memory_mb` in a [custom config](advanced-configuration.md) and scan the file again. Each worker can then use more memory, so check that your machine has room for it across all workers. The second case may have another cause, in which case raising it won't help.
+
+```toml
+max_worker_memory_mb = 2048
+```
+
+Very complex pages also take longer. If the log then shows the file timing out, raise `default_timeout_seconds` too.
+
+If you want the details, including the measurements behind the limits, see [PDF Memory Limits](../architecture/filehandlers/pdf-memory-limits.md).
+
 ### A scan appears hung
 
 **Symptoms:** No progress-bar movement for a long time, and the log file shows nothing new.

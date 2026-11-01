@@ -3,10 +3,11 @@ from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from pypdf import PdfReader
+from pypdf import PdfReader, apply_configuration
 from pypdf.errors import (
     EmptyFileError,
     FileNotDecryptedError,
+    LimitReachedError,
     PyPdfError,
 )
 
@@ -22,7 +23,22 @@ except ImportError:
 # font or metadata dictionary, or on a page over one of its safety limits.  One
 # bad page is skipped rather than costing the text of every page around it.  The
 # same errors from the document as a whole keep whatever was read before them.
-_PAGE_ERRORS = (PyPdfError, ValueError, KeyError, IndexError, TypeError, RecursionError)
+_PAGE_ERRORS = (PyPdfError, ValueError, KeyError, IndexError, TypeError, AttributeError, RecursionError)
+
+# pypdf's parsing limits count tokens, and memory is what they protect.  Memory a
+# worker keeps for everything other than one page: the document and the font cache
+# depend on the PDF, not on max_worker_memory_mb, so this is a fixed amount.
+_RESERVED_MEMORY_MB = 512
+# Memory per million, measured; see docs/architecture/filehandlers/pdf-memory-limits.md.
+# Tokens cost from 80 to 243 MB by operator.  133 reads every real page measured.  At
+# the default worker limit, the costliest stream reaches about that limit, and larger
+# workers have less margin.
+_MB_PER_MILLION_TOKENS = 133
+# Entries were measured at about 55 MB.  They are charged less than tokens because
+# reaching this limit costs the whole document, not one page.
+_MB_PER_MILLION_XREF_ENTRIES = 85
+# pypdf's own default, kept as the lowest limit for a small max_worker_memory_mb.
+_MIN_PARSING_LIMIT = 2_000_000
 
 # Fonts a document keeps parsed.  Real PDFs were measured using up to 18 on one
 # page, and a page using more than this parses them all again each time.  An
@@ -104,6 +120,27 @@ class _FontCache:
                 gc.collect()
 
 
+def _parsing_limit(max_worker_memory_mb: int, mb_per_million: int) -> int:
+    """A pypdf limit, from the memory assumed left after _RESERVED_MEMORY_MB.
+
+    A stream over the token limit is skipped and reported, keeping the rest of the
+    file's findings.  This is an estimate, not a bound: only the worker memory limit
+    is enforced.
+    """
+    allowance_mb = max_worker_memory_mb - _RESERVED_MEMORY_MB
+    return max(_MIN_PARSING_LIMIT, allowance_mb * 1_000_000 // mb_per_million)
+
+
+def _error_text(exc: Exception) -> str:
+    """An exception as text that is safe to log.
+
+    pypdf's parse errors can quote the decompressed page, so their text could put
+    a full card number in the log.  Its limit errors name the limit and do not quote
+    page text, so they keep theirs.  They can state integers from the file's structure.
+    """
+    return f"{type(exc).__name__}: {exc}" if isinstance(exc, LimitReachedError) else type(exc).__name__
+
+
 def _metadata_values(document: PdfReader) -> tuple[list[str], bool]:
     """The document's metadata as text, and whether any of it could not be read.
 
@@ -142,21 +179,27 @@ class PdfHandler:
         content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
         pages_seen = 0
         pages_unread = 0
+        first_unread = ""
         text_read = False
+        token_limit = _parsing_limit(config.max_worker_memory_mb, _MB_PER_MILLION_TOKENS)
+        xref_limit = _parsing_limit(config.max_worker_memory_mb, _MB_PER_MILLION_XREF_ENTRIES)
         try:
             try:
-                document = PdfReader(stream, strict=False)
+                document = PdfReader(stream, strict=False, xref_stream_maximum_entries=xref_limit)
                 fonts = _FontCache()
 
                 for page in document.pages:
                     pages_seen += 1
                     try:
-                        with fonts.active():
+                        # Like the font cache, the configuration is a ContextVar
+                        # setting, so it is never held across a yield.
+                        with fonts.active(), apply_configuration(stream_parsing_work_maximum_count=token_limit):
                             page_content = page.extract_text()
                     except FileNotDecryptedError:
                         raise
-                    except _PAGE_ERRORS:
+                    except _PAGE_ERRORS as exc:
                         pages_unread += 1
+                        first_unread = first_unread or f"page {pages_seen:,}: {_error_text(exc)}"
                         continue
                     finally:
                         # A finished page is real progress.  Text is still chunked
@@ -185,13 +228,12 @@ class PdfHandler:
                 source.report_unread("PDF is password protected", nothing_read=not text_read)
             except _PAGE_ERRORS as exc:
                 stopped = f" after page {pages_seen:,}" if pages_seen else ""
-                source.report_unread(
-                    f"PDF could not be read{stopped}: {type(exc).__name__}: {exc}", nothing_read=not text_read
-                )
+                source.report_unread(f"PDF could not be read{stopped}: {_error_text(exc)}", nothing_read=not text_read)
 
             if pages_unread:
                 source.report_unread(
-                    f"{pages_unread:,} of {pages_seen:,} PDF pages could not be read", nothing_read=not text_read
+                    f"{pages_unread:,} of {pages_seen:,} PDF pages could not be read, first {first_unread}",
+                    nothing_read=not text_read,
                 )
 
             final = content_buffer.finalize_content()
@@ -199,6 +241,11 @@ class PdfHandler:
                 yield final
         finally:
             stream.close()
+            # A parsed document is full of reference cycles.  Collect them now so
+            # the next file starts with the memory back, including the next member
+            # of an archive batch.  This frame's references must go first.
+            document = fonts = page = None
+            gc.collect()
 
 
 handler = PdfHandler()

@@ -352,7 +352,7 @@ def test_pdf_font_cache_drops_the_oldest_font_and_collects(tmp_path: Path, monke
 
     assert content.count("4893013335386137") == 5
     assert len(caches[0]._fonts) == 2
-    assert collected["n"] == 3, "pages 3, 4 and 5 each drop a font"
+    assert collected["n"] == 4, "pages 3, 4 and 5 each drop a font, and the document finishes"
 
 
 @pytest.mark.filehandlers
@@ -382,7 +382,7 @@ def test_pdf_without_the_font_cache_collects_garbage_per_page(tmp_path: Path, mo
 
     content = " ".join(_read(path))
 
-    assert collected["n"] == 2
+    assert collected["n"] == 3, "once per page, and once when the document finishes"
     assert content.count("4893013335386137") == 2
 
 
@@ -408,7 +408,7 @@ def test_pdf_page_over_a_pypdf_limit_is_skipped_and_reported(tmp_path: Path, mon
     content = " ".join(PdfHandler().read(item, Config()))
 
     assert content.count("4893013335386137") == 1
-    assert item.unread_reason == "1 of 2 PDF pages could not be read"
+    assert item.unread_reason == "1 of 2 PDF pages could not be read, first page 1: LimitReachedError: over a limit"
 
 
 @pytest.mark.filehandlers
@@ -426,7 +426,7 @@ def test_pdf_malformed_page_keeps_the_pages_around_it(tmp_path: Path, bad_stream
     content = " ".join(PdfHandler().read(item, Config()))
 
     assert content.count("4893013335386137") == 2
-    assert item.unread_reason == "1 of 3 PDF pages could not be read"
+    assert (item.unread_reason or "").startswith("1 of 3 PDF pages could not be read, first page 2: ")
 
 
 @pytest.mark.filehandlers
@@ -468,7 +468,7 @@ def test_pdf_failure_after_some_pages_still_yields_their_text(tmp_path: Path, mo
     item = FilesystemItem(Path("testdata/pdf/sample-pans.pdf"))
 
     assert "4893013335386137" in " ".join(PdfHandler().read(item, Config()))
-    assert item.unread_reason == "PDF could not be read after page 1: PdfReadError: broken page tree"
+    assert item.unread_reason == "PDF could not be read after page 1: PdfReadError"
     assert not item.nothing_read, "the first page was read"
 
 
@@ -511,8 +511,36 @@ def test_pdf_reports_skipped_pages_along_with_a_later_failure(monkeypatch: pytes
     list(PdfHandler().read(item, Config()))
 
     assert item.unread_reason == (
-        "PDF could not be read after page 1: PdfReadError: broken page tree; 1 of 1 PDF pages could not be read"
+        "PDF could not be read after page 1: PdfReadError; 1 of 1 PDF pages could not be read, first page 1: ValueError"
     )
+
+
+@pytest.mark.filehandlers
+def test_pdf_unread_message_does_not_quote_the_page(tmp_path: Path) -> None:
+    """pypdf's parse error quotes the page it failed on, and the unread message goes to the log."""
+    path = tmp_path / "damaged.pdf"
+    _identity_cmap_pdf(path, pages=1, text="1111", bad_pages={0: b"BT /F1 12 Tf ) (4893013335386137) Tj ET"})
+    item = FilesystemItem(path)
+
+    list(PdfHandler().read(item, Config()))
+
+    assert item.unread_reason == "1 of 1 PDF pages could not be read, first page 1: PdfReadError"
+
+
+@pytest.mark.filehandlers
+def test_pdf_document_failure_message_does_not_quote_the_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pypdf import PdfReader
+    from pypdf.errors import PdfReadError
+
+    def failing_pages(self):
+        raise PdfReadError("near 4893013335386137")
+
+    monkeypatch.setattr(PdfReader, "pages", property(failing_pages))
+    item = FilesystemItem(Path("testdata/pdf/sample-pans.pdf"))
+
+    list(PdfHandler().read(item, Config()))
+
+    assert item.unread_reason == "PDF could not be read: PdfReadError"
 
 
 @pytest.mark.filehandlers
@@ -544,3 +572,157 @@ def test_pdf_with_every_page_unreadable_read_nothing(monkeypatch: pytest.MonkeyP
     list(PdfHandler().read(item, Config()))
 
     assert item.nothing_read
+
+
+def _pdf_with_tokens(path: Path, tokens: int) -> None:
+    """A one-page PDF whose content stream holds about this many tokens, then the text 4893013335386137."""
+    content = b"1 0 0 1 0 0 cm\n" * (tokens // 7) + b"BT /F1 12 Tf (4893013335386137) Tj ET\n"
+    objects = [
+        b"<</Type/Catalog/Pages 2 0 R>>",
+        b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 100 100]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>",
+        b"<</Length %d>>\nstream\n" % len(content) + content + b"\nendstream",
+        b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]
+    with path.open("wb") as f:
+        f.write(b"%PDF-1.4\n")
+        offsets = []
+        for number, body in enumerate(objects, 1):
+            offsets.append(f.tell())
+            f.write(b"%d 0 obj\n" % number + body + b"\nendobj\n")
+        xref = f.tell()
+        f.write(b"xref\n0 6\n0000000000 65535 f \n")
+        f.writelines(b"%010d 00000 n \n" % offset for offset in offsets)
+        f.write(b"trailer<</Size 6/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n" % xref)
+
+
+@pytest.mark.filehandlers
+@pytest.mark.parametrize(
+    ("memory_mb", "tokens", "xref_entries"),
+    [
+        (256, 2_000_000, 2_000_000),
+        (512, 2_000_000, 2_000_000),
+        (1024, 3_849_624, 6_023_529),
+        (2048, 11_548_872, 18_070_588),
+        (4096, 26_947_368, 42_164_705),
+    ],
+)
+def test_pdf_parsing_limits_follow_worker_memory(memory_mb: int, tokens: int, xref_entries: int) -> None:
+    from piidigger.filehandlers.pdf import _MB_PER_MILLION_TOKENS, _MB_PER_MILLION_XREF_ENTRIES, _parsing_limit
+
+    assert _parsing_limit(memory_mb, _MB_PER_MILLION_TOKENS) == tokens
+    assert _parsing_limit(memory_mb, _MB_PER_MILLION_XREF_ENTRIES) == xref_entries
+
+
+@pytest.mark.filehandlers
+def test_pdf_parsing_limit_settings_exist_in_pypdf() -> None:
+    """Fails if a pypdf bump renames a limit, which would otherwise read as every page being unreadable."""
+    import dataclasses
+    import inspect
+
+    from pypdf import Configuration, PdfReader
+
+    assert "stream_parsing_work_maximum_count" in {field.name for field in dataclasses.fields(Configuration)}
+    assert "xref_stream_maximum_entries" in inspect.signature(PdfReader.__init__).parameters
+
+
+@pytest.mark.filehandlers
+def test_pdf_uses_the_limit_for_this_worker_only_while_extracting(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pypdf import PageObject, PdfReader, get_configuration
+
+    real_init = PdfReader.__init__
+    real_extract = PageObject.extract_text
+    default = get_configuration().stream_parsing_work_maximum_count
+    seen: dict[str, int] = {}
+
+    def spy_init(self, *args, **kwargs):
+        seen["xref"] = kwargs["xref_stream_maximum_entries"]
+        real_init(self, *args, **kwargs)
+
+    def spy_extract(self, *args, **kwargs):
+        seen["tokens"] = get_configuration().stream_parsing_work_maximum_count
+        return real_extract(self, *args, **kwargs)
+
+    monkeypatch.setattr(PdfReader, "__init__", spy_init)
+    monkeypatch.setattr(PageObject, "extract_text", spy_extract)
+    config = Config(max_worker_memory_mb=2048)
+
+    chunks = PdfHandler().read(FilesystemItem(Path("testdata/pdf/sample-pans.pdf")), config)
+    next(chunks)
+
+    assert get_configuration().stream_parsing_work_maximum_count == default, "must not be held across a yield"
+    chunks.close()
+    assert seen == {"xref": 18_070_588, "tokens": 11_548_872}
+
+
+@pytest.mark.filehandlers
+@pytest.mark.slow
+def test_pdf_page_over_the_old_limit_is_read_and_over_the_new_one_is_reported(tmp_path: Path) -> None:
+    """2,500,000 tokens: over pypdf's default, within the limit at the default worker memory."""
+    path = tmp_path / "busy-page.pdf"
+    _pdf_with_tokens(path, 2_500_000)
+
+    item = FilesystemItem(path)
+    assert "4893013335386137" in " ".join(PdfHandler().read(item, Config()))
+    assert item.unread_reason is None
+
+    small_worker = FilesystemItem(path)
+    list(PdfHandler().read(small_worker, Config(max_worker_memory_mb=512)))
+    assert (small_worker.unread_reason or "").startswith(
+        "1 of 1 PDF pages could not be read, first page 1: LimitReachedError: "
+    )
+
+
+@pytest.mark.filehandlers
+def test_pdf_attribute_error_keeps_text_read_so_far(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A malformed page tree can raise AttributeError, as a fuzzed PDF did with a number for a dictionary."""
+    from pypdf import PdfReader
+
+    real_pages = PdfReader.pages.fget
+
+    def pages_then_failure(self):
+        yield real_pages(self)[0]
+        raise AttributeError("'NumberObject' object has no attribute 'items'")
+
+    monkeypatch.setattr(PdfReader, "pages", property(pages_then_failure))
+    item = FilesystemItem(Path("testdata/pdf/sample-pans.pdf"))
+
+    assert "4893013335386137" in " ".join(PdfHandler().read(item, Config()))
+    assert item.unread_reason == "PDF could not be read after page 1: AttributeError"
+
+
+@pytest.mark.filehandlers
+@pytest.mark.parametrize("finish", ["read to the end", "closed early"])
+def test_pdf_collects_the_document_when_it_finishes(monkeypatch: pytest.MonkeyPatch, finish: str) -> None:
+    """The collection must see the document as garbage, so it has to run after this frame lets go of it."""
+    import weakref
+
+    from pypdf import PdfReader
+
+    from piidigger.filehandlers import pdf
+
+    readers: list[weakref.ref] = []
+    real_init = PdfReader.__init__
+
+    def tracking_init(self, *args, **kwargs):
+        readers.append(weakref.ref(self))
+        real_init(self, *args, **kwargs)
+
+    alive_after_collect: list[bool] = []
+    real_collect = gc.collect
+
+    def checking_collect():
+        real_collect()
+        alive_after_collect.append(any(reader() is not None for reader in readers))
+
+    monkeypatch.setattr(PdfReader, "__init__", tracking_init)
+    monkeypatch.setattr(pdf.gc, "collect", checking_collect)
+
+    chunks = PdfHandler().read(FilesystemItem(Path("testdata/pdf/sample-pans.pdf")), Config())
+    if finish == "read to the end":
+        list(chunks)
+    else:
+        next(chunks)
+        chunks.close()
+
+    assert alive_after_collect[-1] is False
