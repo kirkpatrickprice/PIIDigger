@@ -42,8 +42,10 @@ class ScannableItem(Protocol):
     # A file handler calls this when it yields what it could read but had to
     # leave part of the file unread.  The caller keeps the findings and reports
     # the file as not fully scanned; raising would lose both the findings and
-    # the content still to come.
-    def report_unread(self, reason: str) -> None: ...
+    # the content still to come.  Call it once per reason; all of them are kept.
+    # nothing_read says none of the content could be read, so the file is not
+    # counted as scanned.
+    def report_unread(self, reason: str, *, nothing_read: bool = False) -> None: ...
 
 
 @runtime_checkable

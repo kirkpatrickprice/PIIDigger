@@ -37,6 +37,8 @@ class TestFilesystemItem:
         assert item.unread_reason is None
         item.report_unread("1 of 2 pages")
         assert item.unread_reason == "1 of 2 pages"
+        item.report_unread("metadata")
+        assert item.unread_reason == "1 of 2 pages; metadata"
 
     def test_report_progress_without_on_progress_does_nothing(self, tmp_path):
         f = tmp_path / "doc.pdf"

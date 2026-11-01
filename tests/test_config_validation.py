@@ -274,7 +274,7 @@ def test_every_registered_result_format_builds_a_sink(name: str, tmp_path: Path)
         log_file=tmp_path / "test.log",
         results=ResultsConfig(path=tmp_path / "results", formats=[name]),
     )
-    sinks = _build_sinks(config)
+    sinks = _build_sinks(config, "20260101-000000")
     assert len(sinks) == 1, f"format {name!r} validates but builds no sink"
     assert type(sinks[0]) is OUTPUT_REGISTRY[name]
 
@@ -372,7 +372,7 @@ def test_mixed_case_result_format_builds_its_sink(spelling: str, expected_sink: 
         log_file=tmp_path / "test.log",
         results=ResultsConfig(path=tmp_path / "results", formats=[spelling]),
     )
-    sinks = _build_sinks(config)
+    sinks = _build_sinks(config, "20260101-000000")
     assert len(sinks) == 1, f"format {spelling!r} validates but builds no sink"
     assert type(sinks[0]).__name__ == expected_sink
 
@@ -387,7 +387,7 @@ def test_mixed_case_all_builds_every_sink(tmp_path: Path) -> None:
         log_file=tmp_path / "test.log",
         results=ResultsConfig(path=tmp_path / "results", formats=["ALL"]),
     )
-    assert len(_build_sinks(config)) == len(OUTPUT_REGISTRY)
+    assert len(_build_sinks(config, "20260101-000000")) == len(OUTPUT_REGISTRY)
 
 
 @pytest.mark.unit
@@ -420,4 +420,4 @@ def test_mixed_case_survives_a_toml_round_trip(tmp_path: Path) -> None:
     assert config.archives.formats == ["zip"]
 
     config = config.model_copy(update={"results": ResultsConfig(path=tmp_path / "results", formats=["CSV", "TEXT"])})
-    assert {type(s).__name__ for s in _build_sinks(config)} == {"CsvSink", "TextSink"}
+    assert {type(s).__name__ for s in _build_sinks(config, "20260101-000000")} == {"CsvSink", "TextSink"}

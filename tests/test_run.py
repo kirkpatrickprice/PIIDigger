@@ -5,12 +5,15 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import math
+import os
+import re
 import tempfile
 import threading
 from pathlib import Path
 
 import pytest
 
+import piidigger.run as run_mod
 from piidigger.models.config import Config, ResultsConfig
 from piidigger.orchestration.coordinator import CoordinatorResult
 from piidigger.orchestration.pool import WorkerPool
@@ -31,6 +34,7 @@ from piidigger.run import (
     _prompt_continue,
     _remove_temp_workspace,
     _resolve_workers,
+    _stamped_log_file,
     run_scan,
 )
 from tests._fs import make_dir_alias
@@ -78,6 +82,13 @@ def test_resolve_workers_rejects_unknown_preset() -> None:
         _resolve_workers("turbo", 8, 16)
 
 
+def _written_log(log_file: Path) -> Path:
+    """The one log file a run wrote for this configured log_file, whose name it stamps."""
+    written = list(log_file.parent.glob(f"{log_file.stem}-*{log_file.suffix}"))
+    assert len(written) == 1, written
+    return written[0]
+
+
 # ---------------------------------------------------------------------------
 # _build_sinks unit tests (no subprocesses)
 # ---------------------------------------------------------------------------
@@ -91,7 +102,7 @@ def test_build_sinks_no_formats_returns_empty(tmp_path: Path) -> None:
         log_file=tmp_path / "test.log",
         results=ResultsConfig(path=tmp_path / "results", formats=[]),
     )
-    sinks = _build_sinks(config)
+    sinks = _build_sinks(config, "20260101-000000")
     assert sinks == []
 
 
@@ -103,7 +114,7 @@ def test_build_sinks_all_formats_returns_three_sinks(tmp_path: Path) -> None:
         log_file=tmp_path / "test.log",
         results=ResultsConfig(path=tmp_path / "results", formats=["all"]),
     )
-    sinks = _build_sinks(config)
+    sinks = _build_sinks(config, "20260101-000000")
     assert len(sinks) == 3
     type_names = {type(s).__name__ for s in sinks}
     assert type_names == {"CsvSink", "JsonSink", "TextSink"}
@@ -117,7 +128,7 @@ def test_build_sinks_single_format(tmp_path: Path) -> None:
         log_file=tmp_path / "test.log",
         results=ResultsConfig(path=tmp_path / "results", formats=["text"]),
     )
-    sinks = _build_sinks(config)
+    sinks = _build_sinks(config, "20260101-000000")
     assert len(sinks) == 1
     assert type(sinks[0]).__name__ == "TextSink"
 
@@ -168,7 +179,7 @@ def test_run_scan_aborts_when_results_cannot_be_opened(tmp_path: Path, capsys: p
 
     assert rc == EXIT_ABORTED
     assert "Error: cannot open results file" in capsys.readouterr().err
-    assert "cannot open results file, aborting" in log_file.read_text()
+    assert "cannot open results file, aborting" in _written_log(log_file).read_text()
     assert not any(isinstance(h, logging.handlers.QueueHandler) for h in logging.getLogger().handlers)
 
 
@@ -200,7 +211,7 @@ def test_run_scan_reports_incomplete_when_a_sink_fails_mid_scan(
     )
 
     assert rc == EXIT_INCOMPLETE
-    log_text = log_file.read_text()
+    log_text = _written_log(log_file).read_text()
     assert log_text.count("write failed, no further results written to it") == 1
     assert "Results incomplete: TextSink" in capsys.readouterr().out
     csv_rows = next(results_dir.glob("*.csv")).read_text().splitlines()
@@ -489,7 +500,7 @@ def test_run_scan_cleans_up_when_workers_cannot_start(tmp_path: Path, monkeypatc
         )
 
     assert len(closed) == 1, "the results file was left open"
-    assert "scan failed during startup" in log_file.read_text()
+    assert "scan failed during startup" in _written_log(log_file).read_text()
     assert not set(Path(tempfile.gettempdir()).glob("piidigger_*")) - before
     assert not any(isinstance(h, logging.handlers.QueueHandler) for h in logging.getLogger().handlers)
 
@@ -573,7 +584,7 @@ def test_run_scan_ctrl_c_during_startup_exits_interrupted(tmp_path: Path, monkey
 
     assert rc == EXIT_INTERRUPTED
     assert len(closed) == 1
-    assert "scan interrupted during startup" in config.log_file.read_text()
+    assert "scan interrupted during startup" in _written_log(config.log_file).read_text()
 
 
 @pytest.mark.integration
@@ -595,7 +606,7 @@ def test_run_scan_cleans_up_when_setup_fails_before_the_pool_exists(
         run_scan(config)
 
     assert len(closed) == 1
-    assert "scan failed during startup" in config.log_file.read_text()
+    assert "scan failed during startup" in _written_log(config.log_file).read_text()
     assert not set(Path(tempfile.gettempdir()).glob("piidigger_*")) - before
     assert not any(isinstance(h, logging.handlers.QueueHandler) for h in logging.getLogger().handlers)
 
@@ -692,7 +703,6 @@ def test_startup_info_logs_the_memory_limit_and_shows_its_warning(caplog: pytest
 
 @pytest.mark.unit
 def test_memory_check_passes_without_asking_when_within_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    import piidigger.run as run_mod
 
     monkeypatch.setattr(run_mod, "_prompt_continue", lambda question: pytest.fail("must not prompt"))
 
@@ -704,7 +714,6 @@ def test_memory_check_passes_without_asking_when_within_budget(monkeypatch: pyte
 def test_memory_check_prompts_on_a_terminal_and_follows_the_answer(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, answer: bool
 ) -> None:
-    import piidigger.run as run_mod
 
     monkeypatch.setattr(run_mod.sys.stdin, "isatty", lambda: True, raising=False)
     questions: list[str] = []
@@ -725,7 +734,6 @@ def test_memory_check_prompts_on_a_terminal_and_follows_the_answer(
 def test_memory_check_continues_without_asking_when_not_interactive(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    import piidigger.run as run_mod
 
     monkeypatch.setattr(run_mod.sys.stdin, "isatty", lambda: False, raising=False)
     monkeypatch.setattr(run_mod, "_prompt_continue", lambda question: pytest.fail("must not prompt"))
@@ -742,8 +750,6 @@ def test_prompt_continue_defaults_to_continue_after_the_timeout(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     import io
-
-    import piidigger.run as run_mod
 
     class _NeverAnswers(io.StringIO):
         def readline(self, size: int | None = -1) -> str:
@@ -762,8 +768,6 @@ def test_prompt_continue_defaults_to_continue_after_the_timeout(
 def test_an_answer_after_a_timed_out_prompt_reaches_the_next_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     """The admin prompt timing out must not leave a reader behind that swallows the memory prompt's "n"."""
     import io
-
-    import piidigger.run as run_mod
 
     class _LateStdin(io.StringIO):
         """Like a terminal: each typed line is read once, and only after the user types it."""
@@ -794,8 +798,6 @@ def test_an_answer_after_a_timed_out_prompt_reaches_the_next_prompt(monkeypatch:
 def test_prompt_continue_treats_closed_stdin_as_continue_for_every_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     import io
 
-    import piidigger.run as run_mod
-
     monkeypatch.setattr(run_mod.sys, "stdin", io.StringIO(""))
 
     assert _prompt_continue("first", timeout=5) is True
@@ -804,10 +806,62 @@ def test_prompt_continue_treats_closed_stdin_as_continue_for_every_prompt(monkey
 
 @pytest.mark.unit
 def test_run_scan_aborts_when_the_memory_check_is_declined(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import piidigger.run as run_mod
 
     monkeypatch.setattr(run_mod, "_check_memory", lambda warning, logger: False)
     config = _startup_config(tmp_path)
 
     assert run_scan(config) == EXIT_ABORTED
     assert not config.results.path.exists(), "no results files are opened for a declined scan"
+
+
+@pytest.mark.unit
+def test_stamped_log_file_keeps_its_folder_and_suffix() -> None:
+    assert _stamped_log_file(Path("logs/piidigger.log"), "20261031-153257") == Path(
+        "logs/piidigger-20261031-153257.log"
+    )
+
+
+def test_run_scan_log_and_results_share_one_timestamp(tmp_path: Path) -> None:
+    scan_root = tmp_path / "scan"
+    scan_root.mkdir()
+    results = tmp_path / "results"
+    log_file = tmp_path / "logs" / "piidigger.log"
+
+    run_scan(Config(start_dirs=[scan_root], log_file=log_file, results=ResultsConfig(path=results, formats=["csv"])))
+
+    log_stamp = _written_log(log_file).stem.removeprefix("piidigger-")
+    assert re.fullmatch(r"\d{8}-\d{6}", log_stamp)
+    assert [p.name.endswith(f"-{log_stamp}.csv") for p in results.iterdir()] == [True]
+    assert not log_file.exists(), "the configured name itself is never written"
+
+
+def test_run_scan_does_not_scan_its_own_stamped_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare log_file puts the log in the scanned folder, where only the file itself is excluded."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data.txt").write_text("hello")
+
+    run_scan(
+        Config(
+            start_dirs=[tmp_path],
+            log_file=Path("piidigger.log"),
+            results=ResultsConfig(path=tmp_path / "results", formats=["csv"]),
+        )
+    )
+
+    assert "Scanned: 1 folder, 1 file," in _written_log(tmp_path / "piidigger.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_stamped_log_file_leaves_a_device_alone() -> None:
+    assert _stamped_log_file(Path(os.devnull), "20261031-153257") == Path(os.devnull)
+
+
+@pytest.mark.unit
+def test_stamped_log_file_leaves_a_symlink_alone(tmp_path: Path) -> None:
+    """/dev/stdout is a symlink, whose target is a regular file when stdout is redirected to one."""
+    target = tmp_path / "redirected.txt"
+    target.write_text("")
+    link = tmp_path / "stdout"
+    link.symlink_to(target)
+
+    assert _stamped_log_file(link, "20261031-153257") == link

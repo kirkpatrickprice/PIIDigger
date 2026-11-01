@@ -12,6 +12,7 @@ Covers:
   - handle_scan_archive_members (PII found, lineage fields, no-handler defensive path)
   - --no-archives CLI override logic
 """
+
 from __future__ import annotations
 
 import logging
@@ -51,6 +52,11 @@ _LOG_QUEUE: mp.Queue = mp.Queue()  # type: ignore[type-arg]
 _ZIP_FIXTURES = Path("testdata/zip")
 _7Z_FIXTURES = Path("testdata/7z")
 _TAR_FIXTURES = Path("testdata/tar")
+
+
+def _members_skipped(result: TaskResult) -> int:
+    """Every member an enumeration left out and counted, whatever the reason."""
+    return sum(count for key, count in result.counters.items() if key.startswith("archive_members_"))
 
 
 def _logger() -> logging.Logger:
@@ -440,7 +446,7 @@ def test_enum_archive_simple_pii_emits_scan_task(tmp_path: Path) -> None:
     assert t["task_type"] == TaskType.SCAN_ARCHIVE_MEMBERS
     assert t["items"] == ["readme.txt"]
     assert result.counters.get("files_found") == 1
-    assert result.counters.get("archive_members_skipped", 0) == 0
+    assert _members_skipped(result) == 0
 
 
 @pytest.mark.unit
@@ -450,7 +456,7 @@ def test_enum_archive_corrupt_returns_error(tmp_path: Path) -> None:
     result = handle_enum_archive_members(_enum_archive_task(archive), ctx, _logger())
 
     assert result.status == "error"
-    assert result.counters.get("archive_errors", 0) >= 1
+    assert result.counters.get("files_not_scanned") == 1
 
 
 @pytest.mark.unit
@@ -461,8 +467,8 @@ def test_enum_archive_traversal_member_rejected(tmp_path: Path) -> None:
 
     assert result.status == "ok"
     assert result.new_tasks == []
-    assert result.counters.get("archive_members_skipped", 0) >= 1
-    assert result.counters.get("archive_errors", 0) >= 1  # traversal counts as an error
+    assert _members_skipped(result) >= 1
+    assert result.counters.get("archive_members_unsafe", 0) >= 1  # traversal counts as unsafe
 
 
 @pytest.mark.unit
@@ -473,7 +479,7 @@ def test_enum_archive_encrypted_member_skipped(tmp_path: Path) -> None:
 
     assert result.status == "ok"
     assert result.new_tasks == []
-    assert result.counters.get("archive_members_skipped", 0) >= 1
+    assert _members_skipped(result) >= 1
 
 
 @pytest.mark.unit
@@ -485,20 +491,20 @@ def test_enum_archive_oversize_member_skipped(tmp_path: Path) -> None:
 
     assert result.status == "ok"
     assert result.new_tasks == []
-    assert result.counters.get("archive_members_skipped", 0) >= 1
+    assert _members_skipped(result) >= 1
 
 
 @pytest.mark.unit
 def test_enum_archive_bomb_ratio_rejected(tmp_path: Path) -> None:
-    """Member with ratio > 1000:1 is rejected (check 5)."""
+    """Member with ratio > 1000:1 is rejected (check 8)."""
     archive = _fixture("zip-bomb-simulated.zip")
     ctx = _make_ctx(tmp_path)
     result = handle_enum_archive_members(_enum_archive_task(archive), ctx, _logger())
 
     assert result.status == "ok"
     assert result.new_tasks == []
-    assert result.counters.get("archive_members_skipped", 0) >= 1
-    assert result.counters.get("archive_errors", 0) >= 1  # bomb rejection counts as error
+    assert _members_skipped(result) >= 1
+    assert result.counters.get("archive_members_unsafe", 0) >= 1  # bomb rejection counts as unsafe
 
 
 @pytest.mark.unit
@@ -510,7 +516,7 @@ def test_enum_archive_member_count_limit(tmp_path: Path) -> None:
 
     assert result.status == "ok"
     assert len(_member_paths(result)) == 3
-    assert result.counters.get("archive_members_skipped", 0) == 2
+    assert _members_skipped(result) == 2
 
 
 @pytest.mark.unit
@@ -524,7 +530,7 @@ def test_enum_archive_nested_zip_skipped(tmp_path: Path) -> None:
     # outer.txt should emit a task; inner.zip should be skipped
     assert len(result.new_tasks) == 1
     assert result.new_tasks[0]["items"] == ["outer.txt"]
-    assert result.counters.get("archive_members_skipped", 0) == 1
+    assert _members_skipped(result) == 1
 
 
 @pytest.mark.unit
@@ -539,7 +545,7 @@ def test_enum_archive_no_handler_member_skipped(tmp_path: Path) -> None:
 
     assert result.status == "ok"
     assert result.new_tasks == []
-    assert result.counters.get("archive_members_skipped", 0) >= 1
+    assert _members_skipped(result) >= 1
 
 
 @pytest.mark.unit
@@ -576,7 +582,7 @@ def test_enum_archive_total_size_limit_skips_oversized(tmp_path: Path) -> None:
 
     assert result.status == "ok"
     assert result.new_tasks == []
-    assert result.counters.get("archive_members_skipped", 0) >= 1
+    assert _members_skipped(result) >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -660,8 +666,9 @@ def test_scan_archive_member_unknown_handler_fails_that_member_only(tmp_path: Pa
 
     assert result.status == "ok"
     assert [p.item for p in result.done] == ["file.xyz999", "after.txt"]
-    assert result.done[0].counters == {"files_scanned": 1, "tasks_failed": 1}
-    assert result.counters.get("files_scanned") == 2
+    assert result.done[0].counters == {"files_not_scanned": 1, "tasks_failed": 1}
+    assert result.counters.get("files_scanned") == 1
+    assert result.counters.get("files_not_scanned") == 1
     assert result.counters.get("tasks_failed") == 1
     assert result.findings[0]["source_member_path"] == "after.txt"
 
@@ -677,9 +684,7 @@ def test_no_archives_flag_disables_archives_on_config() -> None:
     config = Config.default()
     assert config.archives.enabled is True
 
-    updated = config.model_copy(
-        update={"archives": config.archives.model_copy(update={"enabled": False})}
-    )
+    updated = config.model_copy(update={"archives": config.archives.model_copy(update={"enabled": False})})
     assert updated.archives.enabled is False
     # Other archive fields are preserved
     assert updated.archives.max_members == config.archives.max_members
@@ -690,9 +695,7 @@ def test_no_archives_flag_disables_archives_on_config() -> None:
 def test_no_archives_flag_does_not_mutate_original() -> None:
     """model_copy must not mutate the original Config (immutability check)."""
     config = Config.default()
-    _ = config.model_copy(
-        update={"archives": config.archives.model_copy(update={"enabled": False})}
-    )
+    _ = config.model_copy(update={"archives": config.archives.model_copy(update={"enabled": False})})
     assert config.archives.enabled is True
 
 
@@ -963,9 +966,7 @@ def test_7z_handler_corrupt_raises_archive_read_error(tmp_path: Path) -> None:
 def test_enum_archive_7z_simple_pii_emits_scan_task(tmp_path: Path) -> None:
     archive = _7z_fixture("simple-pii.7z")
     ctx = _make_ctx(tmp_path)
-    result = handle_enum_archive_members(
-        _enum_archive_task(archive, archive_type="7z"), ctx, _logger()
-    )
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="7z"), ctx, _logger())
 
     assert result.status == "ok"
     assert len(result.new_tasks) == 1
@@ -980,25 +981,21 @@ def test_enum_archive_7z_simple_pii_emits_scan_task(tmp_path: Path) -> None:
 def test_enum_archive_7z_corrupt_returns_error(tmp_path: Path) -> None:
     archive = _7z_fixture("corrupt.7z")
     ctx = _make_ctx(tmp_path)
-    result = handle_enum_archive_members(
-        _enum_archive_task(archive, archive_type="7z"), ctx, _logger()
-    )
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="7z"), ctx, _logger())
 
     assert result.status == "error"
-    assert result.counters.get("archive_errors", 0) >= 1
+    assert result.counters.get("files_not_scanned") == 1
 
 
 @pytest.mark.unit
 def test_enum_archive_7z_encrypted_skipped(tmp_path: Path) -> None:
     archive = _7z_fixture("encrypted.7z")
     ctx = _make_ctx(tmp_path)
-    result = handle_enum_archive_members(
-        _enum_archive_task(archive, archive_type="7z"), ctx, _logger()
-    )
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="7z"), ctx, _logger())
 
     assert result.status == "ok"
     assert result.new_tasks == []
-    assert result.counters.get("archive_members_skipped", 0) >= 1
+    assert _members_skipped(result) >= 1
 
 
 @pytest.mark.unit
@@ -1006,13 +1003,11 @@ def test_enum_archive_7z_oversize_member_skipped(tmp_path: Path) -> None:
     """100 MB member exceeds default 64 MB limit."""
     archive = _7z_fixture("oversize-member.7z")
     ctx = _make_ctx(tmp_path)
-    result = handle_enum_archive_members(
-        _enum_archive_task(archive, archive_type="7z"), ctx, _logger()
-    )
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="7z"), ctx, _logger())
 
     assert result.status == "ok"
     assert result.new_tasks == []
-    assert result.counters.get("archive_members_skipped", 0) >= 1
+    assert _members_skipped(result) >= 1
 
 
 @pytest.mark.unit
@@ -1020,13 +1015,11 @@ def test_enum_archive_7z_member_count_limit(tmp_path: Path) -> None:
     """5-member archive with max_members=3 → 3 members queued, 2 skipped."""
     archive = _7z_fixture("many-members.7z")
     ctx = _make_ctx(tmp_path, archives={"max_members": 3})
-    result = handle_enum_archive_members(
-        _enum_archive_task(archive, archive_type="7z"), ctx, _logger()
-    )
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="7z"), ctx, _logger())
 
     assert result.status == "ok"
     assert len(_member_paths(result)) == 3
-    assert result.counters.get("archive_members_skipped", 0) == 2
+    assert _members_skipped(result) == 2
 
 
 @pytest.mark.unit
@@ -1048,9 +1041,7 @@ def test_enum_archive_7z_symlink_member_not_scanned(tmp_path: Path, monkeypatch:
     monkeypatch.setattr(_7z, "_is_symlink", lambda info: info.filename == "link-to-readme.txt")
 
     ctx = _make_ctx(tmp_path)
-    result = handle_enum_archive_members(
-        _enum_archive_task(archive, archive_type="7z"), ctx, _logger()
-    )
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="7z"), ctx, _logger())
 
     assert result.status == "ok"
     member_paths = _member_paths(result)
@@ -1063,12 +1054,10 @@ def test_enum_archive_unknown_type_returns_error(tmp_path: Path) -> None:
     fake = tmp_path / "fake.rar"
     fake.write_bytes(b"placeholder")
     ctx = _make_ctx(tmp_path)
-    result = handle_enum_archive_members(
-        _enum_archive_task(fake, archive_type="rar"), ctx, _logger()
-    )
+    result = handle_enum_archive_members(_enum_archive_task(fake, archive_type="rar"), ctx, _logger())
 
     assert result.status == "error"
-    assert result.counters.get("archive_errors", 0) >= 1
+    assert result.counters.get("files_not_scanned") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1154,10 +1143,7 @@ def test_enum_dir_archive_type_in_payload(tmp_path: Path) -> None:
     result = handle_enum_dir(_enum_dir_task(root), ctx, _logger())
 
     archive_tasks = [t for t in result.new_tasks if t["task_type"] == TaskType.ENUM_ARCHIVE_MEMBERS]
-    types_by_ext = {
-        Path(t["payload"]["archive_path"]).suffix: t["payload"]["archive_type"]
-        for t in archive_tasks
-    }
+    types_by_ext = {Path(t["payload"]["archive_path"]).suffix: t["payload"]["archive_type"] for t in archive_tasks}
     assert types_by_ext[".zip"] == "zip"
     assert types_by_ext[".7z"] == "7z"
 
@@ -1441,9 +1427,7 @@ def test_tar_handler_transparent_xz() -> None:
 def test_enum_archive_tar_simple_pii_emits_scan_task(tmp_path: Path) -> None:
     archive = _tar_fixture("simple-pii.tar")
     ctx = _make_ctx(tmp_path)
-    result = handle_enum_archive_members(
-        _enum_archive_task(archive, archive_type="tar"), ctx, _logger()
-    )
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="tar"), ctx, _logger())
 
     assert result.status == "ok"
     assert len(result.new_tasks) == 1
@@ -1455,9 +1439,7 @@ def test_enum_archive_tar_simple_pii_emits_scan_task(tmp_path: Path) -> None:
 def test_enum_archive_tar_gz_simple_pii_emits_scan_task(tmp_path: Path) -> None:
     archive = _tar_fixture("simple-pii.tar.gz")
     ctx = _make_ctx(tmp_path)
-    result = handle_enum_archive_members(
-        _enum_archive_task(archive, archive_type="tar"), ctx, _logger()
-    )
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="tar"), ctx, _logger())
 
     assert result.status == "ok"
     assert len(result.new_tasks) == 1
@@ -1467,9 +1449,7 @@ def test_enum_archive_tar_gz_simple_pii_emits_scan_task(tmp_path: Path) -> None:
 def test_enum_archive_tar_corrupt_returns_error(tmp_path: Path) -> None:
     archive = _tar_fixture("corrupt.tar")
     ctx = _make_ctx(tmp_path)
-    result = handle_enum_archive_members(
-        _enum_archive_task(archive, archive_type="tar"), ctx, _logger()
-    )
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="tar"), ctx, _logger())
 
     assert result.status == "error"
 
@@ -1478,35 +1458,29 @@ def test_enum_archive_tar_corrupt_returns_error(tmp_path: Path) -> None:
 def test_enum_archive_tar_oversize_member_skipped(tmp_path: Path) -> None:
     archive = _tar_fixture("oversize-member.tar.gz")
     ctx = _make_ctx(tmp_path, archives={"max_member_uncompressed_size_mb": 1})
-    result = handle_enum_archive_members(
-        _enum_archive_task(archive, archive_type="tar"), ctx, _logger()
-    )
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="tar"), ctx, _logger())
 
     assert result.status == "ok"
     assert len(result.new_tasks) == 0
-    assert result.counters.get("archive_members_skipped", 0) >= 1
+    assert _members_skipped(result) >= 1
 
 
 @pytest.mark.unit
 def test_enum_archive_tar_member_count_limit(tmp_path: Path) -> None:
     archive = _tar_fixture("many-members.tar")
     ctx = _make_ctx(tmp_path, archives={"max_members": 3})
-    result = handle_enum_archive_members(
-        _enum_archive_task(archive, archive_type="tar"), ctx, _logger()
-    )
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="tar"), ctx, _logger())
 
     assert result.status == "ok"
     assert len(_member_paths(result)) == 3
-    assert result.counters.get("archive_members_skipped", 0) == 2
+    assert _members_skipped(result) == 2
 
 
 @pytest.mark.unit
 def test_enum_archive_tar_traversal_member_rejected(tmp_path: Path) -> None:
     archive = _tar_fixture("traversal-member.tar")
     ctx = _make_ctx(tmp_path)
-    result = handle_enum_archive_members(
-        _enum_archive_task(archive, archive_type="tar"), ctx, _logger()
-    )
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="tar"), ctx, _logger())
 
     assert result.status == "ok"
     member_paths = _member_paths(result)
@@ -1518,9 +1492,7 @@ def test_enum_archive_tar_symlink_member_not_scanned(tmp_path: Path) -> None:
     """Symlink members excluded by list_members() are never scanned."""
     archive = _tar_fixture("symlink-member.tar")
     ctx = _make_ctx(tmp_path)
-    result = handle_enum_archive_members(
-        _enum_archive_task(archive, archive_type="tar"), ctx, _logger()
-    )
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="tar"), ctx, _logger())
 
     assert result.status == "ok"
     member_paths = _member_paths(result)
@@ -1812,7 +1784,7 @@ def test_decompress_offset_by_format(tmp_path: Path) -> None:
     tar_path = _build_archive(tmp_path, "tar", members)
     tar_offsets = [m.decompress_offset for m in _archive_handler("tar").list_members(tar_path)]
     with tarfile.open(tar_path) as tf:
-        assert tar_offsets == [info.offset_data for info in tf.getmembers()]
+        assert tar_offsets == [info.offset for info in tf.getmembers()]
     assert tar_offsets == sorted(tar_offsets)
 
 
@@ -1867,12 +1839,12 @@ def test_enum_archive_skips_members_too_deep_to_reach(tmp_path: Path, archive_ty
     """A member behind 2 MB of skipped data is out of reach under a 1 MB cap, unless the format can seek."""
     members = {"huge.txt": b"h" * (2 * 1024 * 1024), "small.txt": b"s" * 10}
     archive = _build_archive(tmp_path, archive_type, members)
-    ctx = _make_ctx(tmp_path, archives={"max_total_uncompressed_size_mb": 1, "max_member_uncompressed_size_mb": 1})
+    ctx = _make_ctx(tmp_path, archives={"max_decompress_depth_mb": 1, "max_member_uncompressed_size_mb": 1})
 
     result = handle_enum_archive_members(_enum_archive_task(archive, archive_type=archive_type), ctx, _logger())
 
     assert _member_paths(result) == expected
-    assert result.counters.get("archive_members_skipped") == 2 - len(expected)
+    assert _members_skipped(result) == 2 - len(expected)
 
 
 @pytest.mark.unit
@@ -1883,7 +1855,7 @@ def test_enum_archive_scans_a_repeated_path_once(tmp_path: Path) -> None:
     result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="tar"), ctx, _logger())
 
     assert _member_paths(result) == ["same.txt"]
-    assert result.counters.get("archive_members_skipped") == 1
+    assert _members_skipped(result) == 1
 
 
 @pytest.mark.unit
@@ -1933,7 +1905,7 @@ def test_scan_batch_reports_a_missing_member_as_failed(tmp_path: Path) -> None:
 
     assert outcome.status == "ok"
     assert [p.item for p in outcome.done] == ["a.txt", "gone.txt"]
-    assert outcome.done[1].counters == {"files_scanned": 1, "tasks_failed": 1}
+    assert outcome.done[1].counters == {"files_not_scanned": 1, "tasks_failed": 1}
 
 
 @pytest.mark.unit
@@ -2006,7 +1978,7 @@ def test_enum_archive_rejects_rooted_and_drive_member_names(tmp_path: Path, name
     result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="tar"), ctx, _logger())
 
     assert _member_paths(result) == ["ok.txt"]
-    assert result.counters.get("archive_errors") == 1
+    assert result.counters.get("archive_members_unsafe") == 1
 
 
 @pytest.mark.unit
@@ -2020,9 +1992,7 @@ def test_tar_extract_members_hands_over_the_path_the_filter_wrote(tmp_path: Path
     dest = tmp_path / "out"
     got: list[Path] = []
 
-    _archive_handler("tar").extract_members(
-        archive, ["\\probe\\x.txt"], dest, on_extracted=lambda m, p: got.append(p)
-    )
+    _archive_handler("tar").extract_members(archive, ["\\probe\\x.txt"], dest, on_extracted=lambda m, p: got.append(p))
 
     assert len(got) == 1
     assert got[0].resolve().is_relative_to(dest.resolve())
@@ -2048,7 +2018,7 @@ def test_scan_batch_never_touches_a_path_outside_its_task_folder(
     outcome = _scan(_scan_archive_task(archive, "a.txt"), _make_ctx(tmp_path))
 
     assert host_file.read_bytes() == b"do not delete"
-    assert outcome.done[0].counters == {"files_scanned": 1, "tasks_failed": 1}
+    assert outcome.done[0].counters == {"files_not_scanned": 1, "tasks_failed": 1}
 
 
 @pytest.mark.unit
@@ -2197,7 +2167,7 @@ def test_enum_archive_honours_include_exts(tmp_path: Path) -> None:
     result = handle_enum_archive_members(_enum_archive_task(archive), ctx, _logger())
 
     assert _member_paths(result) == ["a.pdf", "D.PDF"]
-    assert result.counters.get("archive_members_skipped") == 2
+    assert _members_skipped(result) == 2
 
 
 @pytest.mark.unit
@@ -2274,7 +2244,7 @@ def test_enum_archive_unscannable_members_do_not_use_up_the_size_budget(
         result = handle_enum_archive_members(_enum_archive_task(archive), ctx, logger)
 
     assert _member_paths(result) == ["after.txt"]
-    assert result.counters["archive_members_skipped"] == 1
+    assert _members_skipped(result) == 1
     assert not any("max_total_uncompressed_size_mb" in r.getMessage() for r in caplog.records)
 
 
@@ -2282,14 +2252,16 @@ def test_enum_archive_unscannable_members_do_not_use_up_the_size_budget(
 def test_enum_archive_unscannable_members_still_count_toward_the_depth_limit(tmp_path: Path) -> None:
     """In a compressed tar, reaching a member means decompressing whatever precedes it, scannable or not."""
     archive = _build_archive(tmp_path, "tar", {"video.mp4": b"\0" * (2 * 1024 * 1024), "after.txt": b"notes"})
-    ctx = _make_ctx(tmp_path, archives={"max_total_uncompressed_size_mb": 1})
+    ctx = _make_ctx(tmp_path, archives={"max_decompress_depth_mb": 1})
 
     result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="tar"), ctx, _logger())
 
     assert result.status == "ok"
     assert archive.name.endswith(".tar.gz")
     assert _member_paths(result) == []
-    assert result.counters["archive_members_skipped"] == 2
+    assert _members_skipped(result) == 2
+    assert result.counters["archive_members_too_deep"] == 1
+    assert result.counters["archive_members_unsupported"] == 1
 
 
 @pytest.mark.unit
@@ -2305,7 +2277,7 @@ def test_enum_archive_member_count_limit_counts_only_scannable_members(
         result = handle_enum_archive_members(_enum_archive_task(archive), ctx, logger)
 
     assert _member_paths(result) == ["x.txt", "y.txt"]
-    assert result.counters["archive_members_skipped"] == 4  # 3 videos, then z.txt over the limit
+    assert _members_skipped(result) == 4  # 3 videos, then z.txt over the limit
     limit_warnings = [r.getMessage() for r in caplog.records if "max_members" in r.getMessage()]
     assert limit_warnings == [f"archive {archive}: 1 member(s) not scanned: max_members (2) reached ('z.txt')"]
 
@@ -2336,7 +2308,7 @@ def test_enum_archive_rejects_traversal_whatever_the_member_type(tmp_path: Path)
     )
 
     assert _member_paths(result) == ["ok.txt"]
-    assert result.counters["archive_errors"] == 1
+    assert result.counters["archive_members_unsafe"] == 1
 
 
 def _member(name: str, size: int = 10, *, encrypted: bool = False) -> MemberInfo:
@@ -2363,6 +2335,155 @@ def _enum_listed(
     )
 
 
+_GIB: int = 1024 * 1024 * 1024
+
+
+def _at_offset(name: str, offset: int, size: int = 1024) -> MemberInfo:
+    return MemberInfo(
+        name=name, uncompressed_size=size, compressed_size=0, is_dir=False, is_encrypted=False, decompress_offset=offset
+    )
+
+
+@pytest.mark.unit
+def test_enum_archive_depth_limit_is_separate_from_the_total(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Past the 8 GiB total but within the 32 GiB depth is scanned; past 32 GiB is too deep to reach."""
+    members = [_at_offset("deep.txt", 9 * _GIB), _at_offset("too-deep.txt", 33 * _GIB)]
+
+    result = _enum_listed(monkeypatch, tmp_path, members, _logger(), {})
+
+    assert _member_paths(result) == ["deep.txt"]
+    assert result.counters["archive_members_too_deep"] == 1
+    assert "archive_members_over_total" not in result.counters
+
+
+@pytest.mark.unit
+def test_enum_archive_total_limit_still_applies_within_the_depth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    size = 400 * 1024 * 1024  # under the 512 MB member limit
+    members = [_at_offset(f"m{i}.txt", i * size, size) for i in range(21)]
+
+    result = _enum_listed(monkeypatch, tmp_path, members, _logger(), {})
+
+    assert len(_member_paths(result)) == 20, "20 x 400 MB is the most that fits in 8,192 MB"
+    assert result.counters["archive_members_over_total"] == 1
+    assert "archive_members_too_deep" not in result.counters
+
+
+@pytest.mark.unit
+def test_enum_archive_counts_each_skip_reason_apart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The summary tells a limit from an unsupported type, so 15,696 lost members cannot hide among images."""
+    members = [
+        _member("ok.txt"),
+        _member("a.png"),
+        _member("inner.zip"),
+        _member("locked.txt", encrypted=True),
+        _member("ok.txt"),
+        _member("../evil.txt"),
+        _member("big.txt", 1024 * 1024 * 1024),
+    ]
+
+    result = _enum_listed(monkeypatch, tmp_path, members, _logger(), {})
+
+    skipped = {key: count for key, count in result.counters.items() if key.startswith("archive_members_")}
+    assert skipped == {
+        "archive_members_unsupported": 1,
+        "archive_members_nested": 1,
+        "archive_members_encrypted": 1,
+        "archive_members_repeated": 1,
+        "archive_members_unsafe": 1,
+        "archive_members_limited": 1,
+    }
+
+
+@pytest.mark.unit
+def test_enum_archive_ignores_macos_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finder's metadata fails to read as text and holds nothing of the user's, so it is not even counted."""
+    names = ("a.txt", "__MACOSX/._a.txt", "docs/b.txt", "docs/._b.txt", "__MACOSX/docs/._c.zip")
+    members = [_member(n) for n in names]
+
+    result = _enum_listed(monkeypatch, tmp_path, members, _logger(), {})
+
+    assert _member_paths(result) == ["a.txt", "docs/b.txt"]
+    assert _members_skipped(result) == 0
+
+
+@pytest.mark.unit
+def test_enum_archive_scans_user_files_with_macos_like_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    names = ["__MACOSX/customers.csv", "backup/__MACOSX/more.csv", "backup/__MACOSX/._x.csv", "._ledger.csv"]
+
+    result = _enum_listed(monkeypatch, tmp_path, [_member(n) for n in names], _logger(), {})
+
+    assert _member_paths(result) == names
+
+
+@pytest.mark.unit
+def test_enum_archive_depth_limit_ignores_a_member_at_offset_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A format that can seek has nothing to decompress past, as the docs promise."""
+    members = [_at_offset("first.txt", 0, 2 * 1024 * 1024)]
+
+    result = _enum_listed(monkeypatch, tmp_path, members, _logger(), {"max_decompress_depth_mb": 1})
+
+    assert _member_paths(result) == ["first.txt"]
+
+
+@pytest.mark.unit
+def test_enum_archive_depth_limit_does_not_count_the_members_own_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tar of a folder has a header before its first file, which must not cost that file."""
+    members = [_at_offset("folder/first.txt", 512, 2 * 1024 * 1024)]
+
+    result = _enum_listed(monkeypatch, tmp_path, members, _logger(), {"max_decompress_depth_mb": 1})
+
+    assert _member_paths(result) == ["folder/first.txt"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("archive_type", _FORMATS)
+def test_enum_archive_depth_limit_ignores_a_real_first_member(tmp_path: Path, archive_type: str) -> None:
+    archive = _build_archive(tmp_path, archive_type, {"first.txt": os.urandom(2 * 1024 * 1024)})  # not a bomb
+    ctx = _make_ctx(tmp_path, archives={"max_decompress_depth_mb": 1})
+
+    result = handle_enum_archive_members(_enum_archive_task(archive, archive_type=archive_type), ctx, _logger())
+
+    assert _member_paths(result) == ["first.txt"]
+
+
+@pytest.mark.unit
+def test_enum_archive_itself_is_not_counted_as_a_scanned_file(tmp_path: Path) -> None:
+    archive = _build_archive(tmp_path, "zip", {"inner.zip": b"x"})
+
+    result = handle_enum_archive_members(_enum_archive_task(archive), _make_ctx(tmp_path), _logger())
+
+    assert result.counters["archives_opened"] == 1
+    assert "files_scanned" not in result.counters
+
+
+@pytest.mark.unit
+def test_enum_archive_macos_folder_does_not_hide_traversal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _enum_listed(monkeypatch, tmp_path, [_member("__MACOSX/../../evil.txt")], _logger(), {})
+
+    assert result.counters["archive_members_unsafe"] == 1
+
+
+@pytest.mark.unit
+def test_enum_archive_type_line_lists_the_top_types_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    members = [_member(f"m{i}.t{i}x") for i in range(20)]
+    logger = logging.getLogger("tests.archives.top_types")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        _enum_listed(monkeypatch, tmp_path, members, logger, {})
+
+    line = next(r.getMessage() for r in caplog.records if "by type" in r.getMessage())
+    assert line.endswith("and 5 more types")
+    assert line.count("×") == 15
+
+
 @pytest.mark.unit
 def test_enum_archive_logs_each_skip_reason_once_per_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -2379,8 +2500,8 @@ def test_enum_archive_logs_each_skip_reason_once_per_archive(
         result = _enum_listed(monkeypatch, tmp_path, members, logger, {"max_members": 2})
 
     assert _member_paths(result) == ["a.txt", "b.txt"]
-    assert result.counters["archive_errors"] == 50
-    assert result.counters["archive_members_skipped"] == 101
+    assert result.counters["archive_members_unsafe"] == 50
+    assert _members_skipped(result) == 101
     messages = [r.getMessage().split(": ", 1)[1] for r in caplog.records]
     assert messages == [
         "50 member(s) not scanned: path traversal rejected ('../x0.txt', '../x1.txt', '../x2.txt' and 47 more)",
@@ -2604,7 +2725,7 @@ def test_enum_archive_scans_what_a_damaged_tar_listed_and_reports_an_error(tmp_p
 
     assert result.status == "error"
     assert "scanning the 2 member(s) listed" in (result.error_message or "")
-    assert result.counters["archive_errors"] == 1
+    assert result.counters["archives_opened"] == 1
     assert _member_paths(result) == ["m0.txt"]
 
     outcome = _scan(_scan_archive_task(archive, "m0.txt", archive_type="tar"), ctx)
@@ -2621,7 +2742,6 @@ def test_tar_batch_hitting_zlib_error_keeps_earlier_members_findings(tmp_path: P
     outcome = _scan(_scan_archive_task(archive, "m0.txt", "m1.txt", archive_type="tar"), ctx)
 
     assert outcome.result.status == "error"
-    assert outcome.result.counters["archive_errors"] == 1
     assert outcome.findings
 
 
@@ -2703,9 +2823,7 @@ def test_text_extension_wins_over_a_wrong_sniff_on_disk(tmp_path: Path, name: st
     (root / name).write_bytes(content)
     ctx = _make_ctx(tmp_path, data_handlers=["pan"])
 
-    listed = handle_enum_dir(
-        Task(task_type=TaskType.ENUM_DIR, payload={"path": str(root), "depth": 0}), ctx, _logger()
-    )
+    listed = handle_enum_dir(Task(task_type=TaskType.ENUM_DIR, payload={"path": str(root), "depth": 0}), ctx, _logger())
 
     assert len(listed.new_tasks) == 1
     assert handle_scan_file(Task(**listed.new_tasks[0]), ctx, _logger()).findings
@@ -2799,7 +2917,7 @@ def test_scan_archive_member_with_undetectable_encoding_is_counted_not_failed(tm
 
     assert result.status == "ok"
     assert [p.item for p in result.done] == ["binary.txt", "after.txt"]
-    assert result.done[0].counters == {"files_scanned": 1}
+    assert result.done[0].counters == {"files_unreadable": 1}
     assert "tasks_failed" not in result.counters
     assert result.findings[0]["source_member_path"] == "after.txt"
 
@@ -2842,6 +2960,21 @@ def test_scan_member_partly_read_keeps_findings_and_counts_a_failure(
     assert len(outcome.findings) == 2
     assert outcome.counters["tasks_failed"] == 1
     assert outcome.counters["files_scanned"] == 2
+    assert [p.error_message for p in outcome.done] == ["1 of 2 PDF pages could not be read", None]
+
+
+@pytest.mark.unit
+def test_scan_batch_member_with_nothing_read_is_not_counted_as_scanned(tmp_path: Path) -> None:
+    zp = tmp_path / "docs.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr("fake.pdf", "plain text, not a PDF")
+
+    outcome = _scan(_scan_archive_task(zp, "fake.pdf"), _make_ctx(tmp_path))
+
+    assert outcome.done[0].counters["files_not_scanned"] == 1
+    assert outcome.done[0].counters["tasks_failed"] == 1
+    assert "files_scanned" not in outcome.done[0].counters
+    assert (outcome.done[0].error_message or "").startswith("PDF could not be read: ")
 
 
 @pytest.mark.unit

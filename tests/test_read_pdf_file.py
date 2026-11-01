@@ -20,10 +20,58 @@ def test_pdf_missing_file() -> None:
 
 
 @pytest.mark.filehandlers
-def test_pdf_mislabeled() -> None:
-    # Not a valid PDF — PdfReadError caught internally, yields nothing.
-    chunks = _read(Path("testdata/pdf/mislabled-pdf-file.pdf"))
-    assert chunks == []
+@pytest.mark.parametrize("body", [b"plain text, not a PDF", b"%PDF-1.4\ngarbage after the header"])
+def test_pdf_mislabeled(tmp_path: Path, body: bytes) -> None:
+    # Not a valid PDF: nothing to yield, and it was not scanned, so it must not look clean.
+    path = tmp_path / "mislabeled.pdf"
+    path.write_bytes(body)
+    item = FilesystemItem(path)
+
+    assert list(PdfHandler().read(item, Config())) == []
+    assert (item.unread_reason or "").startswith("PDF could not be read: ")
+    assert item.nothing_read
+
+
+@pytest.mark.filehandlers
+def test_pdf_zero_bytes_is_not_reported() -> None:
+    item = FilesystemItem(Path("testdata/pdf/mislabled-pdf-file.pdf"))
+
+    assert list(PdfHandler().read(item, Config())) == []
+    assert item.unread_reason is None
+
+
+def _encrypted_pdf(tmp_path: Path, algorithm: str) -> Path:
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+    writer.encrypt("secret", algorithm=algorithm)
+    path = tmp_path / "locked.pdf"
+    with path.open("wb") as f:
+        writer.write(f)
+    return path
+
+
+@pytest.mark.filehandlers
+@pytest.mark.parametrize("algorithm", ["RC4-128", "AES-256"])
+def test_pdf_password_protected_is_reported(tmp_path: Path, algorithm: str) -> None:
+    item = FilesystemItem(_encrypted_pdf(tmp_path, algorithm))
+
+    assert list(PdfHandler().read(item, Config())) == []
+    assert item.unread_reason == "PDF is password protected"
+    assert item.nothing_read
+
+
+@pytest.mark.filehandlers
+def test_pdf_truncated_is_reported(tmp_path: Path) -> None:
+    raw = Path("testdata/pan/sample-pans.pdf").read_bytes()
+    path = tmp_path / "cut.pdf"
+    path.write_bytes(raw[: len(raw) // 2])
+    item = FilesystemItem(path)
+
+    list(PdfHandler().read(item, Config()))
+
+    assert item.unread_reason is not None
 
 
 @pytest.mark.filehandlers
@@ -92,10 +140,12 @@ def test_pdf_bad_metadata_keeps_page_text(monkeypatch: pytest.MonkeyPatch) -> No
         raise TypeError("malformed /Info dictionary")
 
     monkeypatch.setattr(PdfReader, "metadata", property(broken_metadata))
+    item = FilesystemItem(Path("testdata/pdf/sample-pans.pdf"))
 
-    content = " ".join(_read(Path("testdata/pdf/sample-pans.pdf")))
+    content = " ".join(PdfHandler().read(item, Config()))
 
     assert "4893013335386137" in content
+    assert item.unread_reason == "PDF metadata could not be fully read"
 
 
 @pytest.mark.filehandlers
@@ -385,12 +435,21 @@ def test_pdf_bad_metadata_entry_keeps_buffered_text(tmp_path: Path, monkeypatch:
     from pypdf.errors import PdfReadError
 
     class _BadMetadata(dict):
-        def get(self, *args):
-            raise PdfReadError("bad /Info entry")
+        def get(self, key, *args):
+            if key == "/Title":
+                raise PdfReadError("bad /Info entry")
+            return super().get(key, *args)
 
-    monkeypatch.setattr(PdfReader, "metadata", property(lambda self: _BadMetadata(a=1)))
+    monkeypatch.setattr(
+        PdfReader, "metadata", property(lambda self: _BadMetadata({"/Title": "x", "/Author": "someone@example.com"}))
+    )
+    item = FilesystemItem(Path("testdata/pdf/sample-pans.pdf"))
 
-    assert "4893013335386137" in " ".join(_read(Path("testdata/pdf/sample-pans.pdf")))
+    content = " ".join(PdfHandler().read(item, Config()))
+
+    assert "4893013335386137" in content
+    assert "someone@example.com" in content, "one bad entry must not lose the entries after it"
+    assert item.unread_reason == "PDF metadata could not be fully read"
 
 
 @pytest.mark.filehandlers
@@ -406,8 +465,54 @@ def test_pdf_failure_after_some_pages_still_yields_their_text(tmp_path: Path, mo
         raise PdfReadError("broken page tree")
 
     monkeypatch.setattr(PdfReader, "pages", property(pages_then_failure))
+    item = FilesystemItem(Path("testdata/pdf/sample-pans.pdf"))
 
-    assert "4893013335386137" in " ".join(_read(Path("testdata/pdf/sample-pans.pdf")))
+    assert "4893013335386137" in " ".join(PdfHandler().read(item, Config()))
+    assert item.unread_reason == "PDF could not be read after page 1: PdfReadError: broken page tree"
+    assert not item.nothing_read, "the first page was read"
+
+
+@pytest.mark.filehandlers
+def test_pdf_malformed_page_tree_keeps_buffered_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """pypdf can raise more than PdfReadError from the page tree, and that must not lose the text read so far."""
+    from pypdf import PdfReader
+
+    real_pages = PdfReader.pages.fget
+
+    def pages_then_failure(self):
+        yield real_pages(self)[0]
+        raise KeyError("/Kids")
+
+    monkeypatch.setattr(PdfReader, "pages", property(pages_then_failure))
+    item = FilesystemItem(Path("testdata/pdf/sample-pans.pdf"))
+
+    assert "4893013335386137" in " ".join(PdfHandler().read(item, Config()))
+    assert "KeyError" in (item.unread_reason or "")
+
+
+@pytest.mark.filehandlers
+def test_pdf_reports_skipped_pages_along_with_a_later_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pypdf import PageObject, PdfReader
+    from pypdf.errors import PdfReadError
+
+    real_pages = PdfReader.pages.fget
+
+    def pages_then_failure(self):
+        yield real_pages(self)[0]
+        raise PdfReadError("broken page tree")
+
+    def bad_page(self, *args, **kwargs):
+        raise ValueError("bad page")
+
+    monkeypatch.setattr(PdfReader, "pages", property(pages_then_failure))
+    monkeypatch.setattr(PageObject, "extract_text", bad_page)
+    item = FilesystemItem(Path("testdata/pdf/sample-pans.pdf"))
+
+    list(PdfHandler().read(item, Config()))
+
+    assert item.unread_reason == (
+        "PDF could not be read after page 1: PdfReadError: broken page tree; 1 of 1 PDF pages could not be read"
+    )
 
 
 @pytest.mark.filehandlers
@@ -423,4 +528,19 @@ def test_pdf_not_decrypted_is_not_treated_as_a_page_error(tmp_path: Path, monkey
 
     list(PdfHandler().read(item, Config()))
 
-    assert item.unread_reason is None, "a locked document is not one bad page"
+    assert item.unread_reason == "PDF is password protected", "a locked document is not one bad page"
+
+
+@pytest.mark.filehandlers
+def test_pdf_with_every_page_unreadable_read_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pypdf import PageObject
+
+    def bad_page(self, *args, **kwargs):
+        raise ValueError("bad page")
+
+    monkeypatch.setattr(PageObject, "extract_text", bad_page)
+    item = FilesystemItem(Path("testdata/pdf/sample-pans.pdf"))
+
+    list(PdfHandler().read(item, Config()))
+
+    assert item.nothing_read

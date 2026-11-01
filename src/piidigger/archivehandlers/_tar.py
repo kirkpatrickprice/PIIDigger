@@ -79,7 +79,7 @@ class TarArchiveHandler:
                             compressed_size=0,
                             is_dir=info.isdir(),
                             is_encrypted=False,
-                            decompress_offset=info.offset_data if compressed else 0,
+                            decompress_offset=info.offset if compressed else 0,
                         )
                     )
                 if compressed:

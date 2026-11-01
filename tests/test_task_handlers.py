@@ -216,7 +216,7 @@ def test_enum_dir_nonexistent_path_returns_error(tmp_path: Path) -> None:
     ctx = _make_ctx(tmp_path, start_dirs=[missing])  # only a start directory is listed without a parent listing it
     result = handle_enum_dir(_enum_dir_task(missing), ctx, _logger())
     assert result.status == "error"
-    assert result.counters.get("dirs_scanned") == 1
+    assert result.counters == {"dirs_not_scanned": 1}
 
 
 @pytest.mark.unit
@@ -295,7 +295,7 @@ def test_scan_file_no_handler_returns_error(tmp_path: Path) -> None:
     )
 
     assert result.status == "error"
-    assert result.counters.get("files_scanned") == 1
+    assert result.counters.get("files_not_scanned") == 1
 
 
 @pytest.mark.unit
@@ -346,7 +346,8 @@ def test_scan_file_permission_denied_returns_error(tmp_path: Path) -> None:
         result = handle_scan_file(_scan_file_task(f), ctx, _logger())
 
     assert result.status == "error"
-    assert result.counters.get("files_scanned") == 1
+    assert result.counters.get("files_not_scanned") == 1
+    assert "files_scanned" not in result.counters, "a file that could not be opened was not scanned"
 
 
 @pytest.mark.unit
@@ -363,7 +364,7 @@ def test_scan_file_undetectable_encoding_is_logged_and_counted(
         result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path), logger)
 
     assert result.status == "ok"
-    assert result.counters == {"files_scanned": 1, "bytes_scanned": f.stat().st_size}
+    assert result.counters == {"files_unreadable": 1, "bytes_not_scanned": f.stat().st_size}
     assert result.findings == []
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (logging.INFO, f"skipping {f}: text encoding could not be detected")
@@ -408,7 +409,7 @@ def test_scan_file_that_vanished_after_listing_is_skipped_at_info(
         result = handle_scan_file(task, _make_ctx(tmp_path), logger)
 
     assert result.status == "ok"
-    assert result.counters == {"files_scanned": 1, "bytes_scanned": len("listed, then deleted")}
+    assert result.counters == {"files_not_scanned": 1, "bytes_not_scanned": len("listed, then deleted")}
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (logging.INFO, f"skipping {f}: file no longer exists (removed after it was listed)")
     ]
@@ -448,7 +449,7 @@ def test_enum_dir_subfolder_that_vanished_after_listing_is_skipped_at_info(
         result = handle_enum_dir(task, _make_ctx(tmp_path, start_dirs=[root]), logger)
 
     assert result.status == "ok"
-    assert result.counters == {"dirs_scanned": 1}
+    assert result.counters == {"dirs_not_scanned": 1}
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (logging.INFO, f"skipping {gone}: folder no longer exists (removed after it was listed)")
     ]
@@ -692,6 +693,26 @@ def test_scan_file_partly_read_keeps_findings_and_reports_an_error(tmp_path: Pat
     assert result.counters["results_found"] == 1
 
 
+@pytest.mark.unit
+def test_scan_file_with_nothing_read_is_an_error_and_not_counted_as_scanned(tmp_path: Path) -> None:
+    class _LockedReader:
+        def read(self, source, config):  # noqa: ANN001, ANN202
+            source.report_unread("PDF is password protected", nothing_read=True)
+            yield from ()
+
+    f = tmp_path / "locked.pdf"
+    f.write_bytes(b"xyz")
+
+    with unittest.mock.patch("piidigger.filehandlers.get_handler_for", return_value=_LockedReader()):
+        result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path), _logger())
+
+    assert result.status == "error"
+    assert result.error_message == "PDF is password protected"
+    assert result.counters["files_not_scanned"] == 1
+    assert result.counters["bytes_not_scanned"] == 3
+    assert "files_scanned" not in result.counters
+
+
 # ---------------------------------------------------------------------------
 # handle_scan_file: progress keeps a long scan alive
 # ---------------------------------------------------------------------------
@@ -763,3 +784,170 @@ def test_scan_file_empty_content_is_not_progress(tmp_path: Path, monkeypatch: py
 
     ctx = _scan_with_handler(tmp_path, _Blank(), monkeypatch)
     assert _alive_count(ctx) == 0
+
+
+# ---------------------------------------------------------------------------
+# What a scan counts: results by type, and files it leaves out
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_scan_file_counts_results_per_data_handler(tmp_path: Path) -> None:
+    f = tmp_path / "both.txt"
+    f.write_text("card 4111111111111111 and 4893013335386137, mail someone@example.com")
+
+    result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path, data_handlers=["pan", "email"]), _logger())
+
+    assert result.counters["results_by_handler:pan"] == 2
+    assert result.counters["results_by_handler:email"] == 1
+    assert result.counters["results_found"] == 3
+
+
+@pytest.mark.unit
+def test_enum_dir_tallies_unsupported_files_by_type(tmp_path: Path) -> None:
+    for name in ("a.DOC", "b.doc", "c.rtf", "noext", "kept.txt"):
+        (tmp_path / name).write_text("hello")
+
+    result = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger())
+
+    tally = {k: v for k, v in result.counters.items() if k.startswith("files_unsupported_by_type:")}
+    assert tally.pop("files_unsupported_by_type:.doc") == 2
+    assert tally.pop("files_unsupported_by_type:.rtf") == 1
+    assert sum(tally.values()) == 1, "the extensionless file may be text or not, by its detected type"
+    assert result.counters["files_found"] >= 1
+
+
+def _denied_junction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: Path) -> Path:
+    junction = tmp_path / "Application Data"
+    monkeypatch.setattr(Path, "is_junction", lambda self: self == junction)
+    monkeypatch.setattr(Path, "iterdir", lambda self: (_ for _ in ()).throw(PermissionError("access denied")))
+    real_resolve = Path.resolve
+    monkeypatch.setattr(Path, "resolve", lambda self, *a, **k: target if self == junction else real_resolve(self))
+    return junction
+
+
+@pytest.mark.unit
+def test_enum_dir_denied_junction_to_a_scanned_folder_is_not_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The legacy profile junctions answer access denied, which read as hundreds of failed folders."""
+    junction = _denied_junction(tmp_path, monkeypatch, tmp_path / "AppData" / "Roaming")
+
+    result = handle_enum_dir(_enum_dir_task(junction), _make_ctx(tmp_path, start_dirs=[tmp_path]), _logger())
+
+    assert result.status == "ok"
+    assert result.counters == {"dirs_not_scanned": 1}
+
+
+@pytest.mark.unit
+def test_enum_dir_denied_junction_outside_the_scan_stays_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A folder-mounted volume may be the only way to its content, so losing it must be reported."""
+    junction = _denied_junction(tmp_path, monkeypatch, tmp_path.parent / "other-volume")
+
+    result = handle_enum_dir(_enum_dir_task(junction), _make_ctx(tmp_path, start_dirs=[tmp_path]), _logger())
+
+    assert result.status == "error"
+
+
+@pytest.mark.unit
+def test_enum_dir_follows_a_readable_junction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "mounted").mkdir()
+    monkeypatch.setattr(Path, "is_junction", lambda self: self.name == "mounted")
+
+    result = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger())
+
+    assert [Path(t["payload"]["path"]).name for t in result.new_tasks] == ["mounted"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bin_name", ["$RECYCLE.BIN", "$Recycle.Bin"])
+def test_enum_dir_skips_recycle_bin_stubs_but_scans_deleted_files(tmp_path: Path, bin_name: str) -> None:
+    sid = tmp_path / bin_name / "S-1-5-21"
+    sid.mkdir(parents=True)
+    (sid / "$IABC123.txt").write_bytes(b"stub")
+    (sid / "$RABC123.txt").write_text("deleted PII is still PII")
+
+    result = handle_enum_dir(_enum_dir_task(sid), _make_ctx(tmp_path), _logger())
+
+    assert [Path(t["payload"]["file_path"]).name for t in result.new_tasks] == ["$RABC123.txt"]
+    assert not any(key.startswith("files_unsupported_by_type:") for key in result.counters)
+
+
+@pytest.mark.unit
+def test_enum_dir_keeps_a_file_named_like_a_stub_outside_the_recycle_bin(tmp_path: Path) -> None:
+    (tmp_path / "$Invoices.txt").write_text("not a stub")
+
+    result = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger())
+
+    assert [Path(t["payload"]["file_path"]).name for t in result.new_tasks] == ["$Invoices.txt"]
+
+
+@pytest.mark.unit
+def test_enum_dir_scans_user_files_named_like_stubs_inside_a_deleted_folder(tmp_path: Path) -> None:
+    deleted = tmp_path / "$Recycle.Bin" / "S-1-5-21" / "$RABC123"
+    deleted.mkdir(parents=True)
+    (deleted / "$Invoices.csv").write_text("deleted PII is still PII")
+    (deleted / "$IABC123.txt").write_text("a real file, one level below where stubs sit")
+
+    result = handle_enum_dir(_enum_dir_task(deleted), _make_ctx(tmp_path), _logger())
+
+    assert sorted(Path(t["payload"]["file_path"]).name for t in result.new_tasks) == ["$IABC123.txt", "$Invoices.csv"]
+
+
+def _junction_to(monkeypatch: pytest.MonkeyPatch, junction: Path, target: Path) -> None:
+    junction.mkdir()
+    real_resolve = Path.resolve
+    monkeypatch.setattr(Path, "is_junction", lambda self: self == junction)
+    monkeypatch.setattr(Path, "resolve", lambda self, *a, **k: target if self == junction else real_resolve(self))
+
+
+def _names(result: object) -> list[str]:
+    return [Path(t["payload"]["path"]).name for t in result.new_tasks]  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+def test_enum_dir_does_not_follow_a_junction_to_a_folder_it_came_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path.resolve()
+    _junction_to(monkeypatch, root / "link", root)
+
+    result = handle_enum_dir(_enum_dir_task(root), _make_ctx(tmp_path, start_dirs=[root]), _logger())
+
+    assert _names(result) == []
+
+
+@pytest.mark.unit
+def test_enum_dir_stops_a_cycle_entered_from_outside_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """e/x -> a, a/l -> b, b/l -> a.  The written path never holds a or b, but e/x resolves to a."""
+    root = tmp_path.resolve()
+    a = root / "a"
+    a.mkdir()
+    walked = root / "e" / "x" / "l"
+    walked.mkdir(parents=True)
+    junction = walked / "l"
+    junction.mkdir()
+    real_resolve = Path.resolve
+    aliases = {root / "e" / "x": a, root / "e" / "x" / "l": root / "b", junction: a}
+    monkeypatch.setattr(Path, "is_junction", lambda self: self in aliases)
+    monkeypatch.setattr(Path, "resolve", lambda self, *args, **kw: aliases.get(self) or real_resolve(self))
+
+    result = handle_enum_dir(_enum_dir_task(walked), _make_ctx(tmp_path, start_dirs=[root]), _logger())
+
+    assert _names(result) == []
+
+
+@pytest.mark.unit
+def test_enum_dir_follows_a_junction_to_a_folder_above_the_start_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its content is reached no other way, even though the target contains the junction."""
+    docs = tmp_path.resolve() / "docs"
+    docs.mkdir()
+    _junction_to(monkeypatch, docs / "up", tmp_path.resolve())
+
+    result = handle_enum_dir(_enum_dir_task(docs), _make_ctx(tmp_path, start_dirs=[docs]), _logger())
+
+    assert _names(result) == ["up"]

@@ -5,6 +5,7 @@ import logging
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -13,21 +14,40 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TaskID, TextColumn
 from rich.table import Table
 from rich.text import Text
 
+from piidigger.orchestration.counters import (
+    BYTES_DONE,
+    DIRS_DONE,
+    FILES_DONE,
+    RESULTS_BY_HANDLER,
+    UNSUPPORTED_BY_TYPE,
+    type_tally_text,
+)
+
 # Counter keys accumulated into self._counters (display values only).
 # tasks_completed / tasks_pending are handled separately for ETA and are
 # NOT accumulated in _counters.
 _COUNTER_KEYS: tuple[str, ...] = (
     "dirs_found",
-    "dirs_scanned",
     "files_found",
-    "files_scanned",
     "bytes_found",
-    "bytes_scanned",
+    *DIRS_DONE,
+    *FILES_DONE,
+    *BYTES_DONE,
     "results_found",
+)
+
+# Why archive members were rejected: a counter and its words in the summary.
+_REJECTED_MEMBERS: tuple[tuple[str, str], ...] = (
+    ("archive_members_too_deep", "too deep to reach"),
+    ("archive_members_over_total", "over the archive's total size"),
+    ("archive_members_limited", "over a member size or count limit"),
+    ("archive_members_unsafe", "unsafe"),
+    ("archive_members_repeated", "repeated"),
 )
 
 _EVENTS_BUFFER_SIZE = 20
 _PANEL_BORDER_ROWS = 2
+_PANEL_SIDE_COLUMNS = 4  # a border and a space of padding on each side
 _PROGRESS_PANEL_ROWS = 5 + _PANEL_BORDER_ROWS
 _EVENTS_HEADER_ROWS = 1
 
@@ -79,23 +99,33 @@ class IncompleteWork:
         return self.failed + self.timed_out + self.abandoned + self.over_memory + self.unfinished
 
 
-def describe_incomplete(work: IncompleteWork) -> str | None:
-    """What was not scanned and why, in plain language, or None if nothing.
+def _row(count: int, text: str) -> str:
+    """One line of a summary block: the count in its own column, then what it counts."""
+    return f"{count:>9,}  {text}"
 
-    Used by ProgressDisplay.summary_lines() for the "Not fully scanned" line.
+
+def _plural(count: int, singular: str, plural: str) -> str:
+    return singular if count == 1 else plural
+
+
+def describe_incomplete(work: IncompleteWork) -> str | None:
+    """A summary row for the work that did not finish and why, or None if nothing.
+
+    Failed includes a file read only in part, whose findings are kept, so the row
+    does not claim that any of this was skipped outright.
     """
     if not work.total:
         return None
     reasons = [
-        (work.failed, "failed with an error"),
+        (work.failed, _plural(work.failed, "error", "errors")),
         (work.timed_out, "timed out"),
-        (work.abandoned, "abandoned after crashing a worker"),
-        (work.over_memory, "exceeded the memory limit"),
+        (work.abandoned, "crashed a worker"),
+        (work.over_memory, "over the memory limit"),
         (work.unfinished, "unfinished when the scan stopped"),
     ]
     detail = ", ".join(f"{n:,} {why}" for n, why in reasons if n)
-    noun = "file or folder was" if work.total == 1 else "files or folders were"
-    return f"{work.total:,} {noun} skipped — {detail}"
+    noun = _plural(work.total, "file, folder or archive member", "files, folders or archive members")
+    return _row(work.total, f"{noun}: {detail}")
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -132,7 +162,8 @@ class ProgressDisplay:
     a plain-text summary so CI and piped runs still see a result line.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, log_file: Path | None = None) -> None:
+        self._log_file = log_file
         self._console = Console(stderr=False)
         self._is_tty: bool = self._console.is_terminal
         self._counters: dict[str, int] = {k: 0 for k in _COUNTER_KEYS}
@@ -181,13 +212,23 @@ class ProgressDisplay:
             table.add_row(f"[{color}]{level}[/{color}]", Text(message))
         return table
 
+    def _config_text(self) -> Text:
+        # emoji=False: a ":name:" in a path is not an emoji code.
+        return Text.from_markup("\n".join(self._startup_lines), emoji=False) if self._startup_lines else Text()
+
+    def _config_rows(self) -> int:
+        """Rows the config panel's text takes, since a long path wraps."""
+        if not self._startup_lines:
+            return 0
+        return len(self._config_text().wrap(self._console, max(1, self._console.width - _PANEL_SIDE_COLUMNS)))
+
     def _visible_events(self) -> list[tuple[str, str]]:
         """Newest events that fit below the config and progress panels.
 
         A display taller than the terminal cannot be redrawn in place, so the
         whole screen flickers on every refresh.
         """
-        used = len(self._startup_lines) + _PANEL_BORDER_ROWS + _PROGRESS_PANEL_ROWS
+        used = self._config_rows() + _PANEL_BORDER_ROWS + _PROGRESS_PANEL_ROWS
         room = self._console.height - used - _PANEL_BORDER_ROWS - _EVENTS_HEADER_ROWS
         return list(self._events)[-room:] if room > 0 else []
 
@@ -209,8 +250,7 @@ class ProgressDisplay:
         return _fmt_eta(elapsed * pending / self._tasks_completed)
 
     def _build_config_panel(self) -> Panel:
-        content = Text.from_markup("\n".join(self._startup_lines)) if self._startup_lines else Text()
-        return Panel(content, title="[bold]Scan Configuration[/bold]", border_style="blue", expand=True)
+        return Panel(self._config_text(), title="[bold]Scan Configuration[/bold]", border_style="blue", expand=True)
 
     def _build_progress_panel(self) -> Panel:
         bars = self._bars
@@ -328,32 +368,32 @@ class ProgressDisplay:
             return
 
         dirs_found = self._counters["dirs_found"]
-        dirs_scanned = self._counters["dirs_scanned"]
+        dirs_done = sum(self._counters[k] for k in DIRS_DONE)
         files_found = self._counters["files_found"]
-        files_scanned = self._counters["files_scanned"]
+        files_done = sum(self._counters[k] for k in FILES_DONE)
         bytes_found = self._counters["bytes_found"]
-        bytes_scanned = self._counters["bytes_scanned"]
+        bytes_done = sum(self._counters[k] for k in BYTES_DONE)
 
         # Use absolute values so the bar always reflects total state, not deltas.
-        # max() guards the brief window where scanned could equal found before
+        # max() guards the brief window where done could equal found before
         # the next batch of found values arrives.
         bars.update(
             self._bar_task_ids["dirs"],
-            total=max(dirs_found, dirs_scanned),
-            completed=dirs_scanned,
-            label=f"{dirs_scanned:>8,} / {dirs_found:>8,}",
+            total=max(dirs_found, dirs_done),
+            completed=dirs_done,
+            label=f"{dirs_done:>8,} / {dirs_found:>8,}",
         )
         bars.update(
             self._bar_task_ids["files"],
-            total=max(files_found, files_scanned),
-            completed=files_scanned,
-            label=f"{files_scanned:>8,} / {files_found:>8,}",
+            total=max(files_found, files_done),
+            completed=files_done,
+            label=f"{files_done:>8,} / {files_found:>8,}",
         )
         bars.update(
             self._bar_task_ids["bytes"],
-            total=max(bytes_found, bytes_scanned),
-            completed=bytes_scanned,
-            label=f"{_fmt_bytes(bytes_scanned):>8} / {_fmt_bytes(bytes_found):>8}",
+            total=max(bytes_found, bytes_done),
+            completed=bytes_done,
+            label=f"{_fmt_bytes(bytes_done):>8} / {_fmt_bytes(bytes_found):>8}",
         )
 
         for key, task_id in self._text_task_ids.items():
@@ -409,43 +449,114 @@ class ProgressDisplay:
             unfinished=self._unfinished,
         )
 
+    def _by_prefix(self, prefix: str) -> dict[str, int]:
+        """The counters kept per kind under one prefix, keyed by kind."""
+        return {k.removeprefix(prefix): v for k, v in self._counters.items() if k.startswith(prefix) and v > 0}
+
+    def _describe_results(self) -> str:
+        total = self._counters["results_found"]
+        if not total:
+            return "No results found."
+        by_handler = sorted(self._by_prefix(RESULTS_BY_HANDLER).items(), key=lambda kv: kv[1], reverse=True)
+        detail = ", ".join(f"{count:,} {handler}" for handler, count in by_handler)
+        found = f"Found {total:,} {_plural(total, 'result', 'results')}"
+        return f"{found}: {detail}." if detail else f"{found}."
+
+    def _describe_scanned(self) -> str | None:
+        dirs = self._counters["dirs_scanned"]
+        files = self._counters["files_scanned"]
+        size = self._counters["bytes_scanned"]
+        parts = []
+        if dirs:
+            parts.append(f"{dirs:,} {_plural(dirs, 'folder', 'folders')}")
+        if files:
+            parts.append(f"{files:,} {_plural(files, 'file', 'files')}")
+        if size:
+            parts.append(_fmt_bytes(size))
+        return ", ".join(parts) or None
+
+    def _not_fully_scanned_rows(self) -> list[str]:
+        """One row per kind of content that was not read and might hold PII."""
+        rows = []
+        if (incomplete := describe_incomplete(self.incomplete)) is not None:
+            rows.append(incomplete)
+        count = self._counters.get
+        if unreadable := count("files_unreadable", 0):
+            rows.append(_row(unreadable, f"{_plural(unreadable, 'file', 'files')} not read: content looks binary"))
+        rejected = [(count(key, 0), words) for key, words in _REJECTED_MEMBERS]
+        if total := sum(n for n, _ in rejected):
+            detail = ", ".join(f"{n:,} {words}" for n, words in rejected if n)
+            rows.append(_row(total, f"archive {_plural(total, 'member', 'members')} rejected: {detail}"))
+        if encrypted := count("archive_members_encrypted", 0):
+            rows.append(_row(encrypted, f"archive {_plural(encrypted, 'member', 'members')} encrypted"))
+        if nested := count("archive_members_nested", 0):
+            rows.append(_row(nested, f"nested {_plural(nested, 'archive', 'archives')} not opened"))
+        return rows
+
+    def _skipped_by_design_rows(self) -> list[str]:
+        """Rows for what PIIDigger has no reader for, or was told to leave out."""
+        rows = []
+        if files := sum(self._by_prefix(UNSUPPORTED_BY_TYPE).values()):
+            rows.append(_row(files, f"{_plural(files, 'file', 'files')} of unsupported types"))
+        if members := self._counters.get("archive_members_unsupported", 0):
+            rows.append(_row(members, f"archive {_plural(members, 'member', 'members')} of unsupported types"))
+        return rows
+
     def summary_lines(self, *, for_log: bool = False) -> list[tuple[int, str]]:
-        """The end-of-scan summary, as (logging level, text) pairs.
+        """The end-of-scan summary, as (logging level, text) pairs, one fact per line.
 
         stop() prints these, and the coordinator logs them before the log
         listener stops, so the screen and the log cannot drift apart.
 
-        The first line gives the totals and the run time.  A second line
-        appears only when some work did not complete, so a partial scan cannot
-        be mistaken for a full one.  Then one line per results file that failed.
+        The first lines give the run time, the results and what was scanned.  A
+        "Not fully scanned" block appears only for content that was not read and
+        might hold PII, so a partial scan cannot be mistaken for a full one.  A
+        "Skipped by design" block stays apart from it, so an unsupported type does
+        not read as a problem.  Then one line per results file that failed.  Rows
+        with a zero count are left out.
 
-        for_log leaves out the screen's "See the log for details." pointers.
+        for_log leaves out the screen's "See the log for details." pointer and its
+        blank lines, and adds the unsupported file types, which are too long a
+        list for the screen.
         """
         if self._scan_end is None:
             self._scan_end = time.monotonic()
         see_log = "" if for_log else " See the log for details."
-
-        parts = []
-        for k, v in self._counters.items():
-            if v <= 0:
-                continue
-            parts.append(f"{k}={_fmt_bytes(v)}" if "bytes" in k else f"{k}={v:,}")
+        if not for_log and self._log_file is not None:
+            see_log = f" See the log for details: {self._log_file}"
+        run_time = _fmt_duration(self._scan_end - self._scan_start)
 
         incomplete = self.incomplete
+        finished = False
         if self._interrupted:
-            heading = "Scan interrupted."
+            heading = f"Scan interrupted after {run_time}."
         elif self._workers_failed:
-            heading = "Scan stopped early: workers could not start."
+            heading = f"Scan stopped early after {run_time}: workers could not start."
         elif incomplete.unfinished:
-            heading = "Scan stopped early."
+            heading = f"Scan stopped early after {run_time}."
         else:
-            heading = "Scan complete."
-        totals = "  ".join(parts) if parts else "No results."
-        run_time = _fmt_duration(self._scan_end - self._scan_start)
-        level = logging.INFO if heading == "Scan complete." else logging.WARNING
-        lines = [(level, f"{heading} {totals}  run_time={run_time}")]
-        if (detail := describe_incomplete(incomplete)) is not None:
-            lines.append((logging.WARNING, f"Not fully scanned: {detail}.{see_log}"))
+            heading = f"Scan complete in {run_time}."
+            finished = True
+        level = logging.INFO if finished else logging.WARNING
+
+        lines = [(level, f"{heading} {self._describe_results()}")]
+        if (scanned := self._describe_scanned()) is not None:
+            lines.append((level, f"  Scanned: {scanned}"))
+
+        def block(block_level: int, title: str, rows: list[str]) -> None:
+            if not rows:
+                return
+            if not for_log:
+                lines.append((block_level, ""))
+            lines.append((block_level, title))
+            lines.extend((block_level, row) for row in rows)
+
+        block(logging.WARNING, f"Not fully scanned.{see_log}", self._not_fully_scanned_rows())
+        block(logging.INFO, "Skipped by design:", self._skipped_by_design_rows())
+        if for_log and (by_type := self._by_prefix(UNSUPPORTED_BY_TYPE)):
+            lines.append((logging.INFO, f"Files of unsupported types, by type: {type_tally_text(by_type)}"))
+        if self._output_failures and not for_log:
+            lines.append((logging.WARNING, ""))
         lines.extend(
             (logging.WARNING, f"Results incomplete: {label} stopped after an error ({error}).{see_log}")
             for label, error in self._output_failures
@@ -466,6 +577,7 @@ class ProgressDisplay:
 
         for _, line in self.summary_lines():
             if self._is_tty:
-                self._console.print(line)
+                # A path is plain text, and must stay whole to be copied.
+                self._console.print(line, markup=False, emoji=False, soft_wrap=True)
             else:
                 print(line, file=sys.stdout)  # noqa: T201 — intentional user-facing output

@@ -1,4 +1,4 @@
-from pathlib import PurePath
+from pathlib import PurePosixPath
 
 from piidigger.filehandlers import docx, pdf, plaintext, xls, xlsx
 
@@ -17,9 +17,11 @@ def file_ext(name: str) -> str:
     """The extension handlers are chosen by: a dotfile's whole name, otherwise its suffix.
 
     Path(".env").suffix is "", so a file named exactly .env would otherwise never
-    match the ".env" extension.
+    match the ".env" extension.  A backslash separates folders here on every
+    platform: an archive made on Windows can name "a.dist-info\\licenses\\src",
+    whose suffix would otherwise be most of that path.
     """
-    path = PurePath(name)
+    path = PurePosixPath(name.replace("\\", "/"))
     return path.suffix or (path.name if path.name.startswith(".") else "")
 
 

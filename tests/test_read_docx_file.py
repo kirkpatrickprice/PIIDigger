@@ -257,3 +257,127 @@ def test_docx_malformed_xml_in_an_optional_part_keeps_the_body(
 
     assert "4893013335386137" in content
     assert item.unread_reason == reason
+
+
+_NOTES_FIXTURE = "testdata/docx/lorem-ipsum-1line-with-footnote-endnote.docx"
+
+
+@pytest.mark.filehandlers
+@pytest.mark.parametrize(
+    "fixture, part, name, kept",
+    [
+        ("testdata/docx/lorem-ipsum-1line-header-footer.docx", "word/header1.xml", "header", "Footer text"),
+        ("testdata/docx/lorem-ipsum-1line-header-footer.docx", "word/footer1.xml", "footer", "Header Text"),
+        (_NOTES_FIXTURE, "word/footnotes.xml", "footnotes", "ENDNOTE"),
+        (_NOTES_FIXTURE, "word/endnotes.xml", "endnotes", "FOOTNOTE"),
+    ],
+)
+def test_docx_bad_text_part_keeps_the_rest(fixture: str, part: str, name: str, kept: str, tmp_path: Path) -> None:
+    """A bad CRC or malformed XML in one part used to lose the body, silently or with an error."""
+    path = tmp_path / "bad-part.docx"
+    with zipfile.ZipFile(fixture) as source, zipfile.ZipFile(path, "w") as target:
+        for item_name in source.namelist():
+            data = source.read(item_name)
+            target.writestr(item_name, data[: len(data) // 2] if item_name == part else data)
+    item = FilesystemItem(path)
+
+    content = " ".join(DocxHandler().read(item, Config()))
+
+    assert "Lorem ipsum" in content
+    assert kept in content
+    assert item.unread_reason == f"Word {name} could not be read"
+
+
+@pytest.mark.filehandlers
+def test_docx_bad_body_keeps_the_notes_and_is_reported(tmp_path: Path) -> None:
+    path = tmp_path / "bad-body.docx"
+    with zipfile.ZipFile(_NOTES_FIXTURE) as source, zipfile.ZipFile(path, "w") as target:
+        for name in source.namelist():
+            data = source.read(name)
+            target.writestr(name, data[: len(data) // 2] if name == "word/document.xml" else data)
+    item = FilesystemItem(path)
+
+    content = " ".join(DocxHandler().read(item, Config()))
+
+    assert "FOOTNOTE" in content
+    assert "body" in (item.unread_reason or "")
+
+
+@pytest.mark.filehandlers
+def test_docx_not_a_zip_is_reported(tmp_path: Path) -> None:
+    path = tmp_path / "fake.docx"
+    path.write_bytes(b"this is not a zip file")
+    item = FilesystemItem(path)
+
+    assert list(DocxHandler().read(item, Config())) == []
+    assert item.unread_reason == "Word document could not be read"
+    assert item.nothing_read
+
+
+@pytest.mark.filehandlers
+def test_docx_damaged_rels_is_reported(tmp_path: Path) -> None:
+    """docx2python needs every .rels file to read any part, so this one costs the whole document."""
+    path = tmp_path / "bad-rels.docx"
+    with zipfile.ZipFile(_NOTES_FIXTURE) as source, zipfile.ZipFile(path, "w") as target:
+        for name in source.namelist():
+            data = source.read(name)
+            target.writestr(name, data[: len(data) // 2] if name == "word/_rels/document.xml.rels" else data)
+    item = FilesystemItem(path)
+
+    assert list(DocxHandler().read(item, Config())) == []
+    assert item.unread_reason == "Word document could not be read"
+
+
+@pytest.mark.filehandlers
+def test_docx_zero_bytes_is_not_reported() -> None:
+    item = FilesystemItem(Path("testdata/docx/empty-file.docx"))
+
+    assert list(DocxHandler().read(item, Config())) == []
+    assert item.unread_reason is None
+
+
+@pytest.mark.filehandlers
+def test_docx_access_denied_still_reaches_the_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An OSError is not damage to the document, and the coordinator reports access denied differently."""
+    import docx2python.docx_reader as reader_mod
+
+    path = tmp_path / "locked.docx"
+    path.write_bytes(Path(_NOTES_FIXTURE).read_bytes())
+
+    def denied(*args, **kwargs):
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(reader_mod.zipfile, "ZipFile", denied)
+
+    with pytest.raises(PermissionError):
+        list(DocxHandler().read(FilesystemItem(path), Config()))
+
+
+@pytest.mark.filehandlers
+def test_docx_with_only_its_body_damaged_and_no_other_text_read_nothing(tmp_path: Path) -> None:
+    """Empty headers and notes read without error, but no text was read, only the document properties."""
+    path = tmp_path / "bad-body.docx"
+    with zipfile.ZipFile("testdata/docx/lorem-ipsum-1line.docx") as source, zipfile.ZipFile(path, "w") as target:
+        for name in source.namelist():
+            data = source.read(name)
+            target.writestr(name, data[: len(data) // 2] if name == "word/document.xml" else data)
+    item = FilesystemItem(path)
+
+    list(DocxHandler().read(item, Config()))
+
+    assert item.nothing_read
+
+
+@pytest.mark.filehandlers
+def test_docx_with_a_bad_footnote_still_read_text(tmp_path: Path) -> None:
+    path = tmp_path / "bad-note.docx"
+    with zipfile.ZipFile(_NOTES_FIXTURE) as source, zipfile.ZipFile(path, "w") as target:
+        for name in source.namelist():
+            data = source.read(name)
+            target.writestr(name, data[: len(data) // 2] if name == "word/footnotes.xml" else data)
+    item = FilesystemItem(path)
+
+    list(DocxHandler().read(item, Config()))
+
+    assert item.unread_reason
+    assert not item.nothing_read

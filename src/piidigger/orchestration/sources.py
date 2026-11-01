@@ -29,7 +29,9 @@ class FilesystemItem:
     report_progress() passes a file handler's own progress (a finished PDF page)
     to on_progress, for work that neither reads new bytes nor yields content.
     report_unread() records why part of the file was not read, for the worker
-    to read back from unread_reason once the handler has finished.
+    to read back from unread_reason once the handler has finished.  A file can
+    have several reasons; unread_reason gives them all.  nothing_read says the
+    handler could read none of it, so the worker does not count it as scanned.
     """
 
     def __init__(
@@ -46,7 +48,8 @@ class FilesystemItem:
         self._archive_path = archive_path
         self._member_path = member_path
         self._on_progress = on_progress
-        self._unread_reason: str | None = None
+        self._unread_reasons: list[str] = []
+        self._nothing_read = False
 
     @property
     def display_path(self) -> str:
@@ -89,9 +92,14 @@ class FilesystemItem:
         if self._on_progress is not None:
             self._on_progress()
 
-    def report_unread(self, reason: str) -> None:
-        self._unread_reason = reason
+    def report_unread(self, reason: str, *, nothing_read: bool = False) -> None:
+        self._unread_reasons.append(reason)
+        self._nothing_read = self._nothing_read or nothing_read
 
     @property
     def unread_reason(self) -> str | None:
-        return self._unread_reason
+        return "; ".join(self._unread_reasons) or None
+
+    @property
+    def nothing_read(self) -> bool:
+        return self._nothing_read

@@ -19,16 +19,16 @@ This guide covers cross-cutting problems that aren't specific to one `piidigger`
 
 ### Start with the log file
 
-Every run writes to a log file — `logs/piidigger.log` by default (configurable via `log_file` in `piidigger.toml`; see [Advanced Configuration](advanced-configuration.md)). When something looks wrong, watch it live in a second terminal while the scan runs:
+Each run writes to a log file named for its start time — `logs/piidigger-<YYYYMMDD-HHMMSS>.log` by default, with the same timestamp as that run's results files (configurable via `log_file` in `piidigger.toml`; see [Advanced Configuration](advanced-configuration.md)). The live display shows this run's log name in its Scan Configuration panel. When something looks wrong, watch it live in a second terminal while the scan runs. These commands open the newest log with the default name:
 
 ```powershell
 # Windows PowerShell
-Get-Content logs/piidigger.log -Wait
+Get-ChildItem logs/piidigger-*.log | Sort-Object LastWriteTime | Select-Object -Last 1 | Get-Content -Wait
 ```
 
 ```bash
 # Linux/macOS
-tail -f logs/piidigger.log
+tail -f "$(ls -t logs/piidigger-*.log | head -1)"
 ```
 
 ## Core Functionality

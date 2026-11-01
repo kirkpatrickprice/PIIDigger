@@ -57,8 +57,7 @@ def test_stop_prints_summary_in_non_tty(
 
     captured = capsys.readouterr()
     assert "Scan complete" in captured.out
-    assert "files_scanned=7" in captured.out
-    assert "bytes_scanned=2.0 KB" in captured.out
+    assert "Scanned: 7 files, 2.0 KB" in captured.out
 
 
 @pytest.mark.unit
@@ -66,13 +65,13 @@ def test_stop_with_no_counters_prints_no_results(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """stop() prints 'No results.' when all counters are zero."""
+    """stop() prints 'No results found.' when all counters are zero."""
     monkeypatch.setattr("rich.console.Console.is_terminal", property(lambda self: False))
     display = ProgressDisplay()
     display.stop()
 
     captured = capsys.readouterr()
-    assert "No results." in captured.out
+    assert "No results found." in captured.out
 
 
 @pytest.mark.unit
@@ -109,44 +108,36 @@ def test_complete_scan_prints_no_incomplete_line(
     display.stop()
 
     out = capsys.readouterr().out
-    assert out.startswith("Scan complete.")
+    assert out.startswith("Scan complete in ")
     assert "Not fully scanned" not in out
 
 
 @pytest.mark.unit
-def test_incomplete_work_gets_its_own_line(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Partial coverage is stated in words, not buried among the key=value totals."""
+def test_incomplete_work_gets_its_own_block(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Partial coverage is stated in words, not buried among the totals."""
     display = _non_tty(monkeypatch)
     display.update({"files_scanned": 10, "tasks_failed": 1})
     display.update({"tasks_failed": 1})
     display.report_incomplete(timed_out=1, abandoned=1, unfinished=0, interrupted=False)
-    display.stop()
 
-    first, second = capsys.readouterr().out.splitlines()
-    assert first.startswith("Scan complete.")
-    assert "tasks_failed" not in first, "failures belong on the second line, not in the totals"
-    assert second == (
-        "Not fully scanned: 4 files or folders were skipped — 2 failed with an error, "
-        "1 timed out, 1 abandoned after crashing a worker. See the log for details."
-    )
+    assert [text for _, text in display.summary_lines()][1:] == [
+        "  Scanned: 10 files",
+        "",
+        "Not fully scanned. See the log for details.",
+        "        4  files, folders or archive members: 2 errors, 1 timed out, 1 crashed a worker",
+    ]
 
 
 @pytest.mark.unit
-def test_interrupted_scan_says_so(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_interrupted_scan_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
     """An interrupted scan must not report itself as complete."""
     display = _non_tty(monkeypatch)
     display.report_incomplete(timed_out=0, abandoned=0, unfinished=12, interrupted=True)
-    display.stop()
 
-    first, second = capsys.readouterr().out.splitlines()
-    assert first.startswith("Scan interrupted.")
-    assert "12 unfinished when the scan stopped" in second
+    lines = [text for _, text in display.summary_lines()]
+
+    assert lines[0].startswith("Scan interrupted after ")
+    assert "12 unfinished when the scan stopped" in lines[-1]
 
 
 @pytest.mark.unit
@@ -158,7 +149,7 @@ def test_unfinished_work_without_interrupt_says_stopped_early(
     display.report_incomplete(timed_out=0, abandoned=0, unfinished=3, interrupted=False)
     display.stop()
 
-    assert capsys.readouterr().out.startswith("Scan stopped early.")
+    assert capsys.readouterr().out.startswith("Scan stopped early after ")
 
 
 @pytest.mark.unit
@@ -166,26 +157,21 @@ def test_incomplete_summary_uses_singular_for_one_item(monkeypatch: pytest.Monke
     display = _non_tty(monkeypatch)
     display.report_incomplete(timed_out=1, abandoned=0, unfinished=0, interrupted=False)
 
-    assert display.summary_lines()[1] == (
+    assert display.summary_lines()[-1] == (
         logging.WARNING,
-        "Not fully scanned: 1 file or folder was skipped — 1 timed out. See the log for details.",
+        "        1  file, folder or archive member: 1 timed out",
     )
 
 
 @pytest.mark.unit
-def test_files_over_the_memory_limit_are_reported_as_not_scanned(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_files_over_the_memory_limit_are_reported_as_not_scanned(monkeypatch: pytest.MonkeyPatch) -> None:
     display = _non_tty(monkeypatch)
     display.report_incomplete(timed_out=0, abandoned=0, over_memory=2, unfinished=0, interrupted=False)
-    display.stop()
 
-    first, second = capsys.readouterr().out.splitlines()
-    assert first.startswith("Scan complete.")
-    assert second == (
-        "Not fully scanned: 2 files or folders were skipped — 2 exceeded the memory limit. See the log for details."
-    )
+    lines = [text for _, text in display.summary_lines()]
+
+    assert lines[0].startswith("Scan complete in ")
+    assert lines[-1] == "        2  files, folders or archive members: 2 over the memory limit"
 
 
 @pytest.mark.unit
@@ -208,7 +194,10 @@ def test_summary_reports_the_run_time(monkeypatch: pytest.MonkeyPatch) -> None:
     first = display.summary_lines()
     again = display.summary_lines()
 
-    assert first == [(logging.INFO, "Scan complete. files_scanned=3  run_time=1:02:05")]
+    assert first == [
+        (logging.INFO, "Scan complete in 1:02:05. No results found."),
+        (logging.INFO, "  Scanned: 3 files"),
+    ]
     assert again == first, "the run time is fixed at the first call, so the log and the screen agree"
 
 
@@ -223,11 +212,15 @@ def test_summary_lines_for_the_log_drop_the_pointer_to_the_log(monkeypatch: pyte
     log = display.summary_lines(for_log=True)
 
     assert [text for _, text in screen][1:] == [
-        "Not fully scanned: 1 file or folder was skipped — 1 failed with an error. See the log for details.",
+        "",
+        "Not fully scanned. See the log for details.",
+        "        1  file, folder or archive member: 1 error",
+        "",
         "Results incomplete: results.csv stopped after an error (disk full). See the log for details.",
     ]
     assert log[1:] == [
-        (logging.WARNING, "Not fully scanned: 1 file or folder was skipped — 1 failed with an error."),
+        (logging.WARNING, "Not fully scanned."),
+        (logging.WARNING, "        1  file, folder or archive member: 1 error"),
         (logging.WARNING, "Results incomplete: results.csv stopped after an error (disk full)."),
     ]
 
@@ -240,7 +233,8 @@ def test_summary_heading_is_a_warning_when_the_scan_did_not_finish(monkeypatch: 
     level, text = display.summary_lines()[0]
 
     assert level == logging.WARNING
-    assert text.startswith("Scan interrupted. No results.  run_time=")
+    assert text.startswith("Scan interrupted after ")
+    assert text.endswith(". No results found.")
 
 
 @pytest.mark.unit
@@ -257,18 +251,16 @@ def test_failures_are_counted_without_report_incomplete() -> None:
 
 
 @pytest.mark.unit
-def test_workers_failing_to_start_is_not_reported_as_complete(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_workers_failing_to_start_is_not_reported_as_complete(monkeypatch: pytest.MonkeyPatch) -> None:
     """Nothing was really scanned, even though no work was left outstanding."""
     display = _non_tty(monkeypatch)
     display.report_incomplete(timed_out=0, abandoned=2, unfinished=0, interrupted=False, workers_failed=True)
-    display.stop()
 
-    first, second = capsys.readouterr().out.splitlines()
-    assert first.startswith("Scan stopped early: workers could not start.")
-    assert "2 abandoned after crashing a worker" in second
+    lines = [text for _, text in display.summary_lines()]
+
+    assert ": workers could not start." in lines[0]
+    assert lines[0].startswith("Scan stopped early after ")
+    assert "2 crashed a worker" in lines[-1]
 
 
 @pytest.mark.unit
@@ -291,3 +283,191 @@ def test_events_panel_shows_messages_literally(message: str) -> None:
     with console.capture() as captured:
         console.print(display._build_events_table())
     assert message in captured.get()
+
+
+# ---------------------------------------------------------------------------
+# The summary block, as a whole
+# ---------------------------------------------------------------------------
+
+
+def _laptop_run(monkeypatch: pytest.MonkeyPatch) -> ProgressDisplay:
+    import piidigger.orchestration.progress as progress_mod
+
+    clock = iter([0.0, 2473.0])
+    monkeypatch.setattr(progress_mod.time, "monotonic", lambda: next(clock))
+    display = _non_tty(monkeypatch)
+    display.update(
+        {
+            "results_found": 108_108,
+            "results_by_handler:email": 47_373,
+            "results_by_handler:pan": 60_735,
+            "dirs_scanned": 28_036,
+            "dirs_not_scanned": 12,
+            "files_scanned": 108_826,
+            "bytes_scanned": 6_871_947_673,
+            "tasks_failed": 41,
+            "files_unreadable": 562,
+            "bytes_not_scanned": 999,
+            "archive_members_too_deep": 15_696,
+            "archive_members_over_total": 3,
+            "archive_members_limited": 2,
+            "archive_members_unsafe": 1,
+            "archive_members_repeated": 1,
+            "archive_members_encrypted": 5,
+            "archive_members_nested": 7,
+            "archive_members_unsupported": 13_787,
+            "files_unsupported_by_type:.doc": 114,
+            "files_unsupported_by_type:.rtf": 6,
+        }
+    )
+    display.report_incomplete(timed_out=0, abandoned=0, over_memory=10, unfinished=0, interrupted=False)
+    return display
+
+
+@pytest.mark.unit
+def test_summary_block_on_screen(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert [text for _, text in _laptop_run(monkeypatch).summary_lines()] == [
+        "Scan complete in 0:41:13. Found 108,108 results: 60,735 pan, 47,373 email.",
+        "  Scanned: 28,036 folders, 108,826 files, 6.4 GB",
+        "",
+        "Not fully scanned. See the log for details.",
+        "       51  files, folders or archive members: 41 errors, 10 over the memory limit",
+        "      562  files not read: content looks binary",
+        "   15,703  archive members rejected: 15,696 too deep to reach, 3 over the archive's total size, "
+        "2 over a member size or count limit, 1 unsafe, 1 repeated",
+        "        5  archive members encrypted",
+        "        7  nested archives not opened",
+        "",
+        "Skipped by design:",
+        "      120  files of unsupported types",
+        "   13,787  archive members of unsupported types",
+    ]
+
+
+@pytest.mark.unit
+def test_summary_log_adds_the_types_and_leaves_out_the_screen_formatting(monkeypatch: pytest.MonkeyPatch) -> None:
+    display = _laptop_run(monkeypatch)
+
+    screen = display.summary_lines()
+    log = display.summary_lines(for_log=True)
+
+    assert log[-1] == (logging.INFO, "Files of unsupported types, by type: .doc ×114, .rtf ×6")
+    assert all(text for _, text in log), "no blank lines in the log"
+    assert [row for row in screen if row[1] and "See the log" not in row[1]] == [
+        row for row in log[:-1] if row[1] != "Not fully scanned."
+    ], "the screen and the log must report the same facts"
+
+
+@pytest.mark.unit
+def test_summary_levels_tell_a_problem_from_a_design_choice(monkeypatch: pytest.MonkeyPatch) -> None:
+    levels = {text: level for level, text in _laptop_run(monkeypatch).summary_lines()}
+
+    assert levels["      562  files not read: content looks binary"] == logging.WARNING
+    assert levels["   13,787  archive members of unsupported types"] == logging.INFO
+
+
+@pytest.mark.unit
+def test_summary_clean_run_is_two_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    display = _non_tty(monkeypatch)
+    display.update({"files_scanned": 1, "dirs_scanned": 1, "bytes_scanned": 10})
+    display.update({"results_found": 1, "results_by_handler:pan": 1})
+
+    lines = [text for _, text in display.summary_lines()]
+
+    assert len(lines) == 2
+    assert lines[0].endswith("Found 1 result: 1 pan.")
+    assert lines[1] == "  Scanned: 1 folder, 1 file, 10.0 B"
+
+
+@pytest.mark.unit
+def test_summary_new_data_handler_appears_without_any_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    display = _non_tty(monkeypatch)
+    display.update({"results_found": 2, "results_by_handler:phone": 2})
+
+    assert display.summary_lines()[0][1].endswith("Found 2 results: 2 phone.")
+
+
+@pytest.mark.unit
+def test_summary_scanned_row_leaves_out_what_was_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bars reach their totals through these counters, but the summary must not call them scanned."""
+    display = _non_tty(monkeypatch)
+    display.update({"files_scanned": 1, "files_not_scanned": 2, "files_unreadable": 3, "dirs_not_scanned": 4})
+
+    assert "  Scanned: 1 file" in [text for _, text in display.summary_lines()]
+
+
+@pytest.mark.unit
+def test_bars_count_everything_finished(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed or binary file must not leave the files bar short of 100%."""
+    display = ProgressDisplay()
+    display._is_tty = True
+    display._live = None
+    monkeypatch.setattr("rich.live.Live.start", lambda self, *a, **k: None)
+    display.start()
+    display.update(
+        {"files_found": 4, "files_scanned": 1, "files_not_scanned": 2, "files_unreadable": 1}
+        | {"dirs_found": 2, "dirs_scanned": 1, "dirs_not_scanned": 1}
+        | {"bytes_found": 30, "bytes_scanned": 10, "bytes_not_scanned": 20}
+    )
+
+    assert display._bars is not None
+    assert all(task.percentage == 100 for task in display._bars.tasks)
+
+
+@pytest.mark.unit
+def test_summary_names_the_log_on_screen_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pathlib import Path
+
+    monkeypatch.setattr("rich.console.Console.is_terminal", property(lambda self: False))
+    display = ProgressDisplay(log_file=Path("logs/piidigger-20261031-153257.log"))
+    display.report_incomplete(timed_out=1, abandoned=0, unfinished=0, interrupted=False)
+
+    screen = [text for _, text in display.summary_lines()]
+    log = [text for _, text in display.summary_lines(for_log=True)]
+
+    assert f"Not fully scanned. See the log for details: {Path('logs/piidigger-20261031-153257.log')}" in screen
+    assert "Not fully scanned." in log
+
+
+@pytest.mark.unit
+def test_summary_prints_a_path_literally(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from pathlib import Path
+
+    log_file = Path("logs/:warning:/[draft]/piidigger-1.log")
+    display = ProgressDisplay(log_file=log_file)
+    display._is_tty = True
+    display.report_incomplete(timed_out=1, abandoned=0, unfinished=0, interrupted=False)
+    display.stop()
+
+    assert str(log_file) in capsys.readouterr().out
+
+
+@pytest.mark.unit
+def test_events_allow_for_a_config_line_that_wraps() -> None:
+    from rich.console import Console
+
+    display = ProgressDisplay()
+    display._console = Console(width=60, height=30)
+    display.set_startup_info(["short"])
+    for i in range(25):
+        display.log_event("ERROR", f"event {i}")
+    with_short_path = len(display._visible_events())
+
+    display.set_startup_info([f"Log file: logs/{'x' * 120}.log"])
+
+    assert display._config_rows() == 4, "the label, then 3 rows of path, at this width"
+    assert len(display._visible_events()) == with_short_path - 3
+
+
+@pytest.mark.unit
+def test_config_panel_shows_a_path_literally() -> None:
+    from rich.console import Console
+
+    display = ProgressDisplay()
+    display.set_startup_info(["Log file: logs/:warning:/piidigger.log"])
+
+    console = Console(width=100, color_system=None)
+    with console.capture() as captured:
+        console.print(display._build_config_panel())
+
+    assert "logs/:warning:/piidigger.log" in captured.get()

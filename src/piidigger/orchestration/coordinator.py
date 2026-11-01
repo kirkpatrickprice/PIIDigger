@@ -655,6 +655,13 @@ def _handle_progress(
     _route_to_sinks(message.findings, sinks, logger)
     if message.findings:
         progress.log_event("INFO", _findings_summary(message.findings))
+    if message.error_message:
+        # The worker logged this member's failure; the batch goes on, so no
+        # result will ever show it.
+        record = registry.get(message.task_id)
+        archive = _task_path(record.task) if record is not None else ""
+        member = f"{archive}::{message.item}" if archive else str(message.item)
+        progress.log_event("ERROR", f"Error: {_truncate_path(member)} — {_short_error(message.error_message)}")
     if message.counters:
         progress.update(message.counters)
 
@@ -689,7 +696,7 @@ def _requeue_failed_batch(
     msg = result.error_message or "(no message)"
     logger.error("[%s] %r failed: %s%s", result.task_type.value, member, msg, _requeue_clause(record))
     progress.log_event("ERROR", f"Error: {_truncate_path(member)} — {_short_error(msg)}")
-    update = {"files_scanned": 1, "tasks_failed": 1, "tasks_pending": len(registry)}
+    update = {"files_not_scanned": 1, "tasks_failed": 1, "tasks_pending": len(registry)}
     if result.task_id not in registry:
         update["tasks_completed"] = 1  # the failed member was the batch's last
     progress.update(update)
@@ -776,14 +783,14 @@ def _handle_result(
     # One update per result, so the display refreshes once.  tasks_pending is
     # read after the children above were enqueued.  A failed task counts as
     # completed for the ETA, and separately as not scanned for the summary.
-    # Unreported members also count as scanned, as _requeue_failed_batch()
-    # counts its failed member, so files_scanned still reaches files_found.
+    # Unreported members count as not scanned, as _requeue_failed_batch() counts
+    # its failed member, so the files bar still reaches files_found.
     update = {**result.counters, "tasks_completed": 1, "tasks_pending": len(registry)}
     if result.status == "error" and not task.items:
         update["tasks_failed"] = 1
     elif unreported:
         update["tasks_failed"] = unreported
-        update["files_scanned"] = update.get("files_scanned", 0) + unreported
+        update["files_not_scanned"] = update.get("files_not_scanned", 0) + unreported
     progress.update(update)
 
 

@@ -240,14 +240,21 @@ Sinks never log; they raise `OSError`. `run_scan()` treats a failed `open()` as 
 
 The other sinks keep receiving findings, and the scan carries on. `close()` is still called on a failed sink to release its file handle.
 
-A per-file failure (an access-denied error, a single timeout) does not by itself change the exit code — only a run that could not really scan anything, or one interrupted mid-scan, does. The progress display's end-of-run summary reports per-file failures, timeouts, and abandonments in a "Not fully scanned" line whenever any occurred, and its heading reads `Scan interrupted.` or `Scan stopped early` instead of `Scan complete.` when appropriate — so a truncated run is never described the same way as a full one.
+A per-file failure (an access-denied error, a single timeout) does not by itself change the exit code — only a run that could not really scan anything, or one interrupted mid-scan, does. A file read only in part follows the same rule, as do binary files and rejected archive members. A full-disk scan nearly always meets a locked file, so a non-zero exit code here would tell automation nothing. The summary reports them instead.
+
+The progress display's end-of-run summary has one fact per line. Its first lines give the run time, the results per data handler, and what was scanned. Its heading reads `Scan interrupted` or `Scan stopped early` instead of `Scan complete` when appropriate, so a truncated run is never described the same way as a full one. Two blocks follow, each only when it has a row and with zero rows left out:
+
+- **Not fully scanned** lists content that was not read and might hold PII: failures, timeouts, crashes, memory kills, unfinished work, binary-looking files, rejected and encrypted archive members, and nested archives.
+- **Skipped by design** lists files and archive members of types PIIDigger has no reader for, or was told to leave out. The log also gets the unsupported file types, largest first.
+
+A `*_scanned` counter means the content was read. Work finished without being read has counters of its own (`files_unreadable`, `files_not_scanned`, `archives_opened`, `dirs_not_scanned`, `bytes_not_scanned`), so the "Scanned" row stays truthful. The progress bars add them all up, so they still reach their totals. [orchestration/counters.py](../../../src/piidigger/orchestration/counters.py) holds the shared names.
 
 ## Protocols
 
 Five `Protocol` classes in [protocols.py](../../../src/piidigger/protocols.py) define every extension surface:
 
 - **`ScannableItem`** — a scannable unit of content (`display_path`, `ext`, `mime`, `size`, `depth`, `open_stream()`, `open_bytes()`, `materialize()`). `FilesystemItem` is the only implementation — it represents both on-disk files and extracted archive members via optional `archive_path`/`member_path` kwargs.
-- **`FileHandler`** — reads a `ScannableItem` into text chunks (`plaintext`, `docx`, `pdf`, `xlsx`, `xls`). A handler that could read only part of a file calls `source.report_unread()`. The worker then returns the findings with `status="error"`, so the file counts as not fully scanned and its findings still reach the output.
+- **`FileHandler`** — reads a `ScannableItem` into text chunks (`plaintext`, `docx`, `pdf`, `xlsx`, `xls`). A handler that could read only part of a file calls `source.report_unread()`, once per reason. The worker then returns the findings with `status="error"`, so the file counts as not fully scanned and its findings still reach the output. This covers skipped PDF pages, password-protected PDFs, damaged or mislabeled files, and any unreadable part of a Word document. Only an empty file stays silent. An archive member reports the same way through `TaskProgress.error_message`, so it gets the same line in the events panel.
 - **`DataHandler`** — finds PII matches in a text chunk (`pan`, `email`; `phonenum`/`trackdata` are stub/not yet implemented).
 - **`OutputSink`** — writes a `ResultRecord` to a destination (`csv`, `json`, `text`). Raises `OSError` instead of logging; `path` names its file in error messages. See [Output sink failures](#output-sink-failures).
 - **`ArchiveHandler`** — lists and extracts archive members. Covered in depth in [Archive Handling](../archives/archive-handling.md).

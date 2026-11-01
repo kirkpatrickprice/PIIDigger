@@ -55,8 +55,15 @@ class ProgressReporter:
         """Report that work on item is starting, so a hang or crash can be pinned on it."""
         self._send(TaskProgress(task_id=self._task_id, worker_pid=self._pid, event="item_started", item=item))
 
-    def item_done(self, item: str, findings: list[dict[str, Any]], counters: dict[str, int]) -> None:
-        """Report that item is finished, with its findings and counters."""
+    def item_done(
+        self,
+        item: str,
+        findings: list[dict[str, Any]],
+        counters: dict[str, int],
+        *,
+        error_message: str | None = None,
+    ) -> None:
+        """Report that item is finished, with its findings, its counters, and any failure to show the user."""
         self._send(
             TaskProgress(
                 task_id=self._task_id,
@@ -65,6 +72,7 @@ class ProgressReporter:
                 item=item,
                 findings=findings,
                 counters=counters,
+                error_message=error_message,
             )
         )
 

@@ -59,7 +59,8 @@ class TaskProgress(PiiDiggerModel):
     * item_started: the worker is about to work on `item`.  If the worker then
       hangs or dies, the coordinator knows which item to blame.
     * item_done: `item` is finished.  Carries that item's findings and
-      counters, so they reach the output even if a later item hangs.
+      counters, so they reach the output even if a later item hangs, and
+      error_message if it failed or was only partly read.
     * alive: the worker is reading data but has not finished an item.  Sent at
       most once a second, and only when bytes actually move — never from a
       timer — so a stuck worker goes quiet and its deadline still fires.
@@ -77,6 +78,7 @@ class TaskProgress(PiiDiggerModel):
     item: str | None = None
     findings: list[dict[str, Any]] = Field(default_factory=list)
     counters: dict[str, int] = Field(default_factory=dict)
+    error_message: str | None = None
 
 
 @dataclass(frozen=True)

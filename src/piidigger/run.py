@@ -201,6 +201,7 @@ def _emit_startup_info(
         f"Performance: {config.performance} — {worker_count} worker process{plural}",
         f"Memory limit: {memory_limit}",
         f"Scan directories: {dirs}",
+        f"Log file: {config.log_file}",
         f"Sleep prevention: {sleep_status}",
         "Press CTRL-C to terminate the scan",
     ]
@@ -210,6 +211,7 @@ def _emit_startup_info(
         # Escaped: a path ending in a backslash (C:\) would otherwise escape
         # the closing tag, and a "[" in a path would be read as markup.
         f"[bold white]Scan directories:[/bold white] [cyan]{escape(dirs)}[/cyan]",
+        f"[bold white]Log file:[/bold white] [cyan]{escape(str(config.log_file))}[/cyan]",
         f"[bold white]Sleep prevention:[/bold white] {sleep_markup}",
         "Press CTRL-C to terminate the scan",
     ]
@@ -235,11 +237,26 @@ def _resolve_workers(performance: str, physical_cores: int, logical_cores: int) 
     raise ValueError(f"unknown performance preset: {performance}")
 
 
-def _build_sinks(config: Config) -> list[Any]:
+def _stamped_log_file(log_file: Path, timestamp: str) -> Path:
+    """Return log_file with the scan's timestamp added to its name, as the results files have.
+
+    Runs started in different seconds keep their own logs, and a log can be matched
+    to its results.  A device such as /dev/null or NUL keeps its name: that is a
+    request to discard the log, and a stamped name would be a new file or an error.
+    So does a symlink, such as /dev/stdout: its target decides where the log goes,
+    and is a regular file when stdout is redirected to one.
+    """
+    is_device = os.path.normcase(str(log_file)) == os.path.normcase(os.devnull)
+    if is_device or log_file.is_symlink() or (log_file.exists() and not log_file.is_file()):
+        return log_file
+    return log_file.with_name(f"{log_file.stem}-{timestamp}{log_file.suffix}")
+
+
+def _build_sinks(config: Config, timestamp: str) -> list[Any]:
     """Instantiate output sinks based on config.results.
 
-    Filenames are stamped with the scan start time so successive runs never
-    overwrite each other: piidigger-<YYYYMMDD-HHMMSS>.<ext>
+    Filenames are stamped with the scan start time so runs started in different
+    seconds do not overwrite each other: <hostname>-<YYYYMMDD-HHMMSS>.<ext>
     """
     r = config.results
     active = _ALL_FORMATS if "all" in r.formats else _ALL_FORMATS & set(r.formats)
@@ -247,7 +264,6 @@ def _build_sinks(config: Config) -> list[Any]:
         return []
 
     hostname = _UNSAFE_CHARS.sub("_", socket.gethostname())
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     stem = f"{hostname}-{timestamp}"
 
     sinks: list[Any] = []
@@ -260,7 +276,7 @@ def _build_sinks(config: Config) -> list[Any]:
     return sinks
 
 
-def _open_sinks(config: Config, logger: logging.Logger) -> list[Any] | None:
+def _open_sinks(config: Config, timestamp: str, logger: logging.Logger) -> list[Any] | None:
     """Create the results folder and open every sink, or return None if any fails.
 
     Sinks raise OSError rather than log, so the failure is reported here: to the
@@ -270,7 +286,7 @@ def _open_sinks(config: Config, logger: logging.Logger) -> list[Any] | None:
     opened: list[Any] = []
     try:
         config.results.path.mkdir(parents=True, exist_ok=True)
-        for sink in _build_sinks(config):
+        for sink in _build_sinks(config, timestamp):
             sink.open()
             opened.append(sink)
     except OSError as exc:
@@ -413,6 +429,10 @@ def run_scan(config: Config) -> int:
 
     Exit codes: EXIT_OK, EXIT_ABORTED, EXIT_INCOMPLETE, EXIT_INTERRUPTED.
     """
+    # One timestamp for the whole run, so its log and results files share it.
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    config = config.model_copy(update={"log_file": _stamped_log_file(config.log_file, timestamp)})
+
     log_queue: mp.Queue[object] = mp.Queue()
     task_queue: mp.Queue[object] = mp.Queue()
     result_queue: mp.Queue[object] = mp.Queue()
@@ -435,7 +455,7 @@ def run_scan(config: Config) -> int:
         config.max_worker_memory_mb, worker_count, psutil.virtual_memory().total
     )
     proceed = _check_admin(config, run_logger) and _check_memory(memory_warning, run_logger)
-    sinks = _open_sinks(config, run_logger) if proceed else None
+    sinks = _open_sinks(config, timestamp, run_logger) if proceed else None
     if sinks is None:
         stop_listener(listener)
         stop_library_log_routing()
@@ -448,7 +468,7 @@ def run_scan(config: Config) -> int:
     temp_base: Path | None = None
     ctx: WorkerContext | None = None
     pool: WorkerPool | None = None
-    progress = ProgressDisplay()
+    progress = ProgressDisplay(log_file=config.log_file)
     handed_off = False
     try:
         # Create a PIIDigger-owned temp root and exclude it from directory

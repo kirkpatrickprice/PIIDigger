@@ -639,11 +639,10 @@ def test_clean_run_reports_no_unfinished_work(tmp_path: Path) -> None:
     log_text = log_file.read_text(encoding="utf-8")
     assert "Not fully scanned" not in log_text
     # The end-of-scan totals reach the log, at INFO, with the run time.
-    summary = [line for line in log_text.splitlines() if "Scan complete." in line]
+    summary = [line for line in log_text.splitlines() if "Scan complete in " in line]
     assert len(summary) == 1
-    assert " INFO Scan complete. " in summary[0]
-    assert "files_scanned=1" in summary[0]
-    assert "run_time=0:00:" in summary[0]
+    assert " INFO Scan complete in 0:00:" in summary[0]
+    assert "  Scanned: 1 folder, 1 file" in log_text
 
 
 @pytest.mark.integration
@@ -669,11 +668,11 @@ def test_failed_task_is_reported_as_not_scanned(tmp_path: Path, capsys: pytest.C
 
     assert outcome == CoordinatorResult(interrupted=False, unfinished=0)
     assert progress.incomplete.failed == 1
-    assert "1 failed with an error" in capsys.readouterr().out
+    assert "1  file, folder or archive member: 1 error" in capsys.readouterr().out
     # The same line reaches the log, so a log-only review sees what was skipped.
     # The log is UTF-8 on every platform; read_text() alone would use cp1252 on Windows.
     log_text = log_file.read_text(encoding="utf-8")
-    assert "Not fully scanned: 1 file or folder was skipped — 1 failed with an error." in log_text
+    assert "1  file, folder or archive member: 1 error" in log_text
     assert log_text.count("Not fully scanned") == 1
     assert "See the log for details" not in log_text
 
@@ -799,7 +798,7 @@ def test_workers_that_cannot_start_end_the_scan_and_the_process(tmp_path: Path) 
     assert incomplete["unfinished"] == 0
     outcome_line = next(ln for ln in proc.stdout.splitlines() if ln.startswith("OUTCOME="))
     assert json.loads(outcome_line.removeprefix("OUTCOME="))["workers_failed"] is True
-    assert "Scan stopped early: workers could not start." in proc.stdout
+    assert ": workers could not start." in proc.stdout
 
 
 @pytest.mark.slow

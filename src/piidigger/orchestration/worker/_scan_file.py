@@ -9,6 +9,7 @@ from piidigger.models.payloads import ScanFilePayload
 from piidigger.models.results import ResultRecord
 from piidigger.models.tasks import Task, TaskResult
 from piidigger.orchestration.context import WorkerContext
+from piidigger.orchestration.counters import result_counters
 from piidigger.orchestration.sources import FilesystemItem
 from piidigger.orchestration.worker._content import scan_content
 from piidigger.orchestration.worker._removed import was_removed
@@ -29,7 +30,7 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
             task_type=task.task_type,
             status="error",
             error_message=f"no file handler for ext={payload.ext!r} mime={payload.mime!r}",
-            counters={"files_scanned": 1},
+            counters={"files_not_scanned": 1, "bytes_not_scanned": payload.size},
             worker_pid=os.getpid(),
         )
 
@@ -49,26 +50,26 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
         per_handler = scan_content(file_handler, item, ctx.config, enabled_handlers, reporter.alive)
     except UndetectableEncodingError as exc:
         # Usually binary content behind a text extension: not a failure, but
-        # logged so an operator can see which files were never read.
+        # logged and counted so an operator can see which files were never read.
         logger.info("skipping %s: %s", payload.display_path, exc)
         return TaskResult(
             task_id=task.task_id,
             task_type=task.task_type,
             status="ok",
-            counters={"files_scanned": 1, "bytes_scanned": payload.size},
+            counters={"files_unreadable": 1, "bytes_not_scanned": payload.size},
             worker_pid=os.getpid(),
         )
     except Exception as exc:  # noqa: BLE001
         if isinstance(exc, FileNotFoundError) and was_removed(payload.file_path):
             # Removed after its folder was listed, e.g. by a software update:
-            # there is nothing to scan, and it is not a failure.  Counted like
-            # the encoding skip above, so the progress totals still add up.
+            # there is nothing to scan, and it is not a failure.  Counted so
+            # the progress totals still add up.
             logger.info("skipping %s: file no longer exists (removed after it was listed)", payload.display_path)
             return TaskResult(
                 task_id=task.task_id,
                 task_type=task.task_type,
                 status="ok",
-                counters={"files_scanned": 1, "bytes_scanned": payload.size},
+                counters={"files_not_scanned": 1, "bytes_not_scanned": payload.size},
                 worker_pid=os.getpid(),
             )
         # The coordinator logs the failure; this line only adds the traceback.
@@ -79,7 +80,7 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
             status="error",
             # With the type: str() of a KeyError is only the key, e.g. '7'.
             error_message=f"{type(exc).__name__}: {exc}",
-            counters={"files_scanned": 1, "bytes_scanned": payload.size},
+            counters={"files_not_scanned": 1, "bytes_not_scanned": payload.size},
             worker_pid=os.getpid(),
         )
 
@@ -92,16 +93,18 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
         )
         findings.append(record.model_dump())
 
-    # Count individual match values, not ResultRecord objects, to match CSV row count.
-    results_count = sum(len(v) for f in findings for v in f.get("matches", {}).values())
     # Part of the file was not read: an error, so the scan summary says so, that
     # still carries the findings from the part that was.
+    if item.nothing_read:
+        read_counters = {"files_not_scanned": 1, "bytes_not_scanned": payload.size}
+    else:
+        read_counters = {"files_scanned": 1, "bytes_scanned": payload.size}
     return TaskResult(
         task_id=task.task_id,
         task_type=task.task_type,
         status="error" if item.unread_reason else "ok",
         error_message=item.unread_reason,
         findings=findings,
-        counters={"files_scanned": 1, "bytes_scanned": payload.size, "results_found": results_count},
+        counters={**read_counters, **result_counters(findings)},
         worker_pid=os.getpid(),
     )

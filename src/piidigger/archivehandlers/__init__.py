@@ -21,11 +21,7 @@ for _mod in _MODULES:
 # endswith() — "tar.gz" must be tried before "gz" so it wins for "data.tar.gz".
 _EXT_REGISTRY: tuple[tuple[str, str], ...] = tuple(
     sorted(
-        (
-            (ext.lstrip(".").lower(), _mod.ARCHIVE_TYPE)
-            for _mod in _MODULES
-            for ext in _mod.HANDLES["ext"]
-        ),
+        ((ext.lstrip(".").lower(), _mod.ARCHIVE_TYPE) for _mod in _MODULES for ext in _mod.HANDLES["ext"]),
         key=lambda pair: -len(pair[0]),
     )
 )

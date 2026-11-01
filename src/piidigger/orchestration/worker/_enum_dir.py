@@ -4,6 +4,7 @@ import logging
 import os
 import stat
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -12,12 +13,16 @@ from piidigger.models.config import Config
 from piidigger.models.payloads import EnumDirPayload
 from piidigger.models.tasks import Task, TaskResult, TaskType
 from piidigger.orchestration.context import WorkerContext
+from piidigger.orchestration.counters import UNSUPPORTED_BY_TYPE
 from piidigger.orchestration.worker._filesystems import is_remote_filesystem
 from piidigger.orchestration.worker._removed import was_removed
 from piidigger.orchestration.worker._reporter import ProgressReporter
 
 # Attempts at listing a directory when a signal interrupts the read (EINTR).
 _LIST_ATTEMPTS: int = 3
+
+# A Recycle Bin $I file's name without its extension: "$I" and six characters.
+_RECYCLE_STUB_STEM_LENGTH: int = 8
 
 
 def _is_excluded(path: Path, exclude_dirs: list[str]) -> bool:
@@ -150,6 +155,25 @@ def _is_cloud_placeholder(path: Path) -> bool:
         return False
 
 
+def _is_junction_cycle(path: Path, start_dirs: list[Path]) -> bool:
+    """Return True if path is a Windows junction to a folder this walk came through.
+
+    Only symlinks are skipped otherwise, so following this one would list the same
+    tree again at every level until the path grew too long.  Only the folders
+    actually walked count, at or below a start directory, so nothing is lost: a
+    junction to a folder above the start directory is followed, because that
+    content is not reached any other way.
+    """
+    if not path.is_junction():
+        return False
+    try:
+        target = path.resolve()
+        walked = (parent for parent in path.parents if any(parent.is_relative_to(start) for start in start_dirs))
+        return any(parent.resolve() == target for parent in walked)
+    except OSError:
+        return False
+
+
 def _list_dir(path: Path) -> list[Path]:
     """List path, retrying when a signal interrupts the read.
 
@@ -165,6 +189,38 @@ def _list_dir(path: Path) -> list[Path]:
     raise AssertionError("unreachable")
 
 
+def _is_recycle_bin_stub(path: Path) -> bool:
+    """Return True for a Windows Recycle Bin $I file: the deleted file's name, size and date, in binary.
+
+    Windows names one $I plus six characters, directly under a folder per user
+    (<bin>/<SID>/$IABC123.txt).  Its partner $R file is the deleted file itself,
+    and a deleted folder keeps its files' own names, so anything else starting
+    with $I is the user's and is still scanned, because deleted PII is still PII.
+    """
+    return (
+        path.name.startswith("$I")
+        and len(path.stem) == _RECYCLE_STUB_STEM_LENGTH
+        and path.parent.parent.name.casefold() == "$recycle.bin"
+    )
+
+
+def _is_junction_to_scanned_folder(path: Path, start_dirs: list[Path]) -> bool:
+    """Return True if path is a Windows junction whose target this scan reaches another way.
+
+    The legacy junctions in a profile (Application Data, My Documents) refuse to
+    be listed, and their targets are scanned under their real names, so a refusal
+    loses nothing.  A junction elsewhere, or a folder-mounted volume, may be the
+    only way to its content, so its refusal stays a failure.
+    """
+    if not path.is_junction():
+        return False
+    try:
+        target = path.resolve()
+        return target != path and any(target.is_relative_to(start.resolve()) for start in start_dirs)
+    except OSError:
+        return False
+
+
 def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
     """Enumerate one directory: produce ENUM_DIR tasks for subdirs and SCAN_FILE tasks for files."""
     from piidigger.filehandlers import file_ext, select_handler  # lazy: xlrd import triggers SyntaxWarning
@@ -176,10 +232,20 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
     dirs_found = 0
     files_found = 0
     bytes_found = 0
+    unsupported: Counter[str] = Counter()
 
     try:
         entries = _list_dir(path)
     except PermissionError as exc:
+        if _is_junction_to_scanned_folder(path, ctx.config.start_dirs):
+            logger.info("skipping %s: junction refused listing, and its target is scanned directly", path)
+            return TaskResult(
+                task_id=task.task_id,
+                task_type=task.task_type,
+                status="ok",
+                counters={"dirs_not_scanned": 1},
+                worker_pid=os.getpid(),
+            )
         # The coordinator logs the failure; worker lines would duplicate it.
         logger.debug("permission denied listing %s: %s", path, exc)
         return TaskResult(
@@ -187,7 +253,7 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
             task_type=task.task_type,
             status="error",
             error_message=str(exc),
-            counters={"dirs_scanned": 1},
+            counters={"dirs_not_scanned": 1},
             worker_pid=os.getpid(),
         )
     except FileNotFoundError as exc:
@@ -203,7 +269,7 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
                 task_type=task.task_type,
                 status="error",
                 error_message=str(exc),
-                counters={"dirs_scanned": 1},
+                counters={"dirs_not_scanned": 1},
                 worker_pid=os.getpid(),
             )
         # Removed after its parent was listed, e.g. by a software update: there
@@ -213,7 +279,7 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
             task_id=task.task_id,
             task_type=task.task_type,
             status="ok",
-            counters={"dirs_scanned": 1},
+            counters={"dirs_not_scanned": 1},
             worker_pid=os.getpid(),
         )
     except OSError as exc:
@@ -223,7 +289,7 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
             task_type=task.task_type,
             status="error",
             error_message=str(exc),
-            counters={"dirs_scanned": 1},
+            counters={"dirs_not_scanned": 1},
             worker_pid=os.getpid(),
         )
 
@@ -240,6 +306,9 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
             if entry.is_dir():
                 if _is_excluded(entry, config.exclude_dirs):
                     continue
+                if _is_junction_cycle(entry, config.start_dirs):
+                    logger.info("skipping %s: junction points back at a folder already walked", entry)
+                    continue
                 if config.local_files_only and is_remote_filesystem(str(entry), entry.stat().st_dev):
                     logger.info("skipping %s: network filesystem (local_files_only)", entry)
                     continue
@@ -255,6 +324,8 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
                 if _is_excluded_file(entry, ctx.exclude_file_names, ctx.exclude_files):
                     continue
                 if config.local_files_only and _is_cloud_placeholder(entry):
+                    continue
+                if _is_recycle_bin_stub(entry):
                     continue
                 ext = file_ext(entry.name)
                 mime: str | None = get_mime(str(entry)) if test_magic() else None
@@ -283,6 +354,7 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
                 # include_exts / include_mime, and a handler to read it with.
                 # The same rule is applied to archive members.
                 if select_handler(ext, mime, config.include_exts, config.include_mime) is None:
+                    unsupported[ext.lower() or "(no extension)"] += 1
                     continue
 
                 try:
@@ -319,6 +391,7 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
             "dirs_found": dirs_found,
             "files_found": files_found,
             "bytes_found": bytes_found,
+            **{f"{UNSUPPORTED_BY_TYPE}{kind}": count for kind, count in unsupported.items()},
         },
         worker_pid=os.getpid(),
     )

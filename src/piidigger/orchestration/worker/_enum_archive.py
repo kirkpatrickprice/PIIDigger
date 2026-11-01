@@ -14,6 +14,7 @@ from piidigger.exceptions import ArchivePartlyReadError, ArchiveReadError
 from piidigger.models.payloads import EnumArchiveMembersPayload
 from piidigger.models.tasks import Task, TaskResult, TaskType
 from piidigger.orchestration.context import WorkerContext
+from piidigger.orchestration.counters import type_tally_text
 from piidigger.orchestration.worker._reporter import ProgressReporter
 
 # Extensions of archive formats we recognise as nested archives (skip for now).
@@ -24,6 +25,12 @@ _DRIVE_PREFIX: re.Pattern[str] = re.compile(r"^[A-Za-z]:")
 
 # How many member names a skip report lists before "and N more".
 _EXAMPLE_NAMES: int = 3
+
+# macOS metadata: AppleDouble files named "._<original>", binary and never the
+# user's content.  Finder's zips keep them in a top-level folder of this name, and
+# tar stores them beside the original.
+_MACOS_FOLDER: str = "__MACOSX"
+_APPLEDOUBLE_PREFIX: str = "._"
 
 
 @dataclass(slots=True)
@@ -40,6 +47,7 @@ class _SkipTally:
 
     level: int
     reason: str
+    counter: str | None = None  # the summary counter these members add to, if any
     count: int = 0
     examples: list[str] = field(default_factory=list)
 
@@ -57,6 +65,20 @@ class _SkipTally:
         logger.log(
             self.level, "archive %s: %d member(s) not scanned: %s (%s)", archive_path, self.count, self.reason, names
         )
+
+
+def _is_macos_metadata(parts: list[str], names: set[str]) -> bool:
+    """Return True only for the shapes macOS writes, so a user's file with a similar name is still scanned.
+
+    parts is the member's name split into path components; names is every member
+    name in the archive, with backslashes normalised.
+    """
+    if not parts[-1].startswith(_APPLEDOUBLE_PREFIX):
+        return False
+    if parts[0] == _MACOS_FOLDER:
+        return True
+    original = parts[-1].removeprefix(_APPLEDOUBLE_PREFIX)
+    return "/".join([*parts[:-1], original]) in names
 
 
 def batch_count(n_members: int, total_bytes: int, n_workers: int, max_batch_bytes: int) -> int:
@@ -101,22 +123,23 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
 
     Checks applied per member (in order):
       1. Path traversal (../ or absolute), whatever the member's type: it is a
-         sign of a hostile archive, so it counts as an archive error
-      2. Nested archive (deferred — skipped in milestone 1)
-      3. include_exts and a file handler for the extension (case-insensitive),
+         sign of a hostile archive, so it counts as unsafe
+      2. macOS metadata (see _is_macos_metadata()), which is not counted
+      3. Nested archive (deferred — skipped in milestone 1)
+      4. include_exts and a file handler for the extension (case-insensitive),
          by the same rule as files on disk; see filehandlers.select_handler()
-      4. Repeated path
-      5. Encryption flag
-      6. Individual uncompressed size limit
-      7. Compression ratio > 1000:1 (bomb heuristic)
-      8. How deep in the archive the member sits (its decompress_offset),
-         against the total size limit
-      9. Running total uncompressed size limit
-     10. Member count limit
+      5. Repeated path
+      6. Encryption flag
+      7. Individual uncompressed size limit
+      8. Compression ratio > 1000:1 (bomb heuristic)
+      9. How deep in the archive the member sits (its decompress_offset),
+         against max_decompress_depth_mb
+     10. Running total uncompressed size limit
+     11. Member count limit
 
-    Members that could never be scanned are filtered out by checks 2 and 3,
+    Members that could never be scanned are filtered out by checks 2 to 4,
     before the limits.  So they do not use up the member count or the size
-    budget, and cannot crowd out scannable members later in the archive.  Check 8
+    budget, and cannot crowd out scannable members later in the archive.  Check 9
     is the exception by design: unscannable members stored ahead of a member
     still have to be decompressed to reach it.  The member count comes last,
     so it counts only members that would otherwise be scanned.
@@ -154,7 +177,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             task_type=task.task_type,
             status="error",
             error_message=f"no handler for archive_type={archive_type!r}",
-            counters={"files_scanned": 1, "archive_errors": 1},
+            counters={"files_not_scanned": 1},
             worker_pid=os.getpid(),
         )
 
@@ -175,33 +198,52 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             task_type=task.task_type,
             status="error",
             error_message=str(exc),
-            counters={"files_scanned": 1, "archive_errors": 1},
+            counters={"files_not_scanned": 1},
             worker_pid=os.getpid(),
         )
 
     max_member_bytes = arc_cfg.max_member_uncompressed_size_mb * 1024 * 1024
     max_total_bytes = arc_cfg.max_total_uncompressed_size_mb * 1024 * 1024
+    max_depth_bytes = arc_cfg.max_decompress_depth_mb * 1024 * 1024
     total_mb = arc_cfg.max_total_uncompressed_size_mb
     total_uncompressed: int = 0
     accepted: list[tuple[str, int]] = []
     seen: set[str] = set()
     not_selected: Counter[str] = Counter()
 
-    traversal = _SkipTally(logging.WARNING, "path traversal rejected")
-    nested = _SkipTally(logging.DEBUG, "nested archive (nested archives are deferred to a future milestone)")
-    repeated = _SkipTally(logging.WARNING, "path appears earlier in the archive; only its first copy is considered")
-    encrypted = _SkipTally(logging.WARNING, "encrypted")
+    traversal = _SkipTally(logging.WARNING, "path traversal rejected", "archive_members_unsafe")
+    macos = _SkipTally(logging.DEBUG, "macOS metadata")
+    nested = _SkipTally(
+        logging.INFO, "nested archive (nested archives are deferred to a future milestone)", "archive_members_nested"
+    )
+    repeated = _SkipTally(
+        logging.WARNING,
+        "path appears earlier in the archive; only its first copy is considered",
+        "archive_members_repeated",
+    )
+    encrypted = _SkipTally(logging.WARNING, "encrypted", "archive_members_encrypted")
     oversize = _SkipTally(
         logging.WARNING,
         f"larger than max_member_uncompressed_size_mb ({arc_cfg.max_member_uncompressed_size_mb:,} MB)",
+        "archive_members_limited",
     )
-    bomb = _SkipTally(logging.WARNING, "compression ratio over 1000:1, rejected as a likely archive bomb")
+    bomb = _SkipTally(
+        logging.WARNING, "compression ratio over 1000:1, rejected as a likely archive bomb", "archive_members_unsafe"
+    )
     too_deep = _SkipTally(
-        logging.WARNING, f"reaching them means decompressing more than max_total_uncompressed_size_mb ({total_mb:,} MB)"
+        logging.WARNING,
+        f"reaching them means decompressing more than max_decompress_depth_mb ({arc_cfg.max_decompress_depth_mb:,} MB)",
+        "archive_members_too_deep",
     )
-    over_total = _SkipTally(logging.WARNING, f"max_total_uncompressed_size_mb ({total_mb:,} MB) reached")
-    over_count = _SkipTally(logging.WARNING, f"max_members ({arc_cfg.max_members:,}) reached")
-    tallies = [traversal, nested, repeated, encrypted, oversize, bomb, too_deep, over_total, over_count]
+    over_total = _SkipTally(
+        logging.WARNING, f"max_total_uncompressed_size_mb ({total_mb:,} MB) reached", "archive_members_over_total"
+    )
+    over_count = _SkipTally(
+        logging.WARNING, f"max_members ({arc_cfg.max_members:,}) reached", "archive_members_limited"
+    )
+    tallies = [traversal, macos, nested, repeated, encrypted, oversize, bomb, too_deep, over_total, over_count]
+
+    member_names = {member.name.replace("\\", "/") for member in member_list}
 
     for member in member_list:
         member_name = member.name
@@ -222,54 +264,62 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             traversal.add(member_name)
             continue
 
-        # 2. Nested archive — deferred to a future milestone
+        # 2. macOS metadata.  After the traversal check, so a hostile name
+        # cannot hide behind this folder name.
+        if _is_macos_metadata(parts, member_names):
+            macos.add(member_name)
+            continue
+
+        # 3. Nested archive — deferred to a future milestone
         if ext.lower() in _NESTED_ARCHIVE_EXTS:
             nested.add(member_name)
             continue
 
-        # 3. include_exts / include_mime, and a handler to read it with — the
+        # 4. include_exts / include_mime, and a handler to read it with — the
         # same rule handle_enum_dir applies to files on disk.  Members have no
         # detected MIME type, so only their extension can qualify them.
         if select_handler(ext, None, ctx.config.include_exts, ctx.config.include_mime) is None:
             not_selected[ext.lower() or "(no extension)"] += 1
             continue
 
-        # 4. A batch names its members by path, so only the first copy of a
+        # 5. A batch names its members by path, so only the first copy of a
         # path is considered.
         if member_name in seen:
             repeated.add(member_name)
             continue
         seen.add(member_name)
 
-        # 5. Encryption
+        # 6. Encryption
         if member.is_encrypted:
             encrypted.add(member_name)
             continue
 
-        # 6. Individual size limit
+        # 7. Individual size limit
         if uncompressed_size > max_member_bytes:
             oversize.add(member_name)
             continue
 
-        # 7. Compression ratio bomb heuristic
+        # 8. Compression ratio bomb heuristic
         if compressed_size > 0 and uncompressed_size > compressed_size * 1000:
             bomb.add(member_name)
             continue
 
-        # 8. How deep the member sits: in a compressed tar or solid 7z,
+        # 9. How deep the member sits: in a compressed tar or solid 7z,
         # reaching it means decompressing every byte stored before it, skipped
-        # members included.  Capped by the same limit as the running total.
-        if member.decompress_offset + uncompressed_size > max_total_bytes:
+        # members included.  This limit controls time, where the running total
+        # below controls how much is scanned.  The member's own size has its own
+        # limit, in check 7.
+        if member.decompress_offset > max_depth_bytes:
             too_deep.add(member_name)
             continue
 
-        # 9. Running total size limit, over scannable members only.
+        # 10. Running total size limit, over scannable members only.
         candidate_total = total_uncompressed + uncompressed_size
         if candidate_total > max_total_bytes:
             over_total.add(member_name)
             continue
 
-        # 10. Member count limit, last, so it counts only members that would
+        # 11. Member count limit, last, so it counts only members that would
         # otherwise be scanned.
         if files_found >= arc_cfg.max_members:
             over_count.add(member_name)
@@ -287,13 +337,17 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             "archive %s: %d member(s) not scanned, by type (no file handler, or excluded by include_exts): %s",
             archive_path,
             sum(not_selected.values()),
-            ", ".join(f"{ext} ×{count}" for ext, count in not_selected.most_common()),
+            type_tally_text(not_selected),
         )
     for tally in tallies:
         tally.report(logger, archive_path)
 
-    members_skipped = sum(not_selected.values()) + sum(tally.count for tally in tallies)
-    archive_errors = traversal.count + bomb.count + (1 if read_error else 0)
+    skip_counters: Counter[str] = Counter()
+    for tally in tallies:
+        if tally.counter is not None and tally.count:
+            skip_counters[tally.counter] += tally.count
+    if not_selected:
+        skip_counters["archive_members_unsupported"] = sum(not_selected.values())
 
     k = batch_count(len(accepted), bytes_found, ctx.n_workers, arc_cfg.max_batch_mb * 1024 * 1024)
     new_tasks: list[dict[str, Any]] = [
@@ -317,11 +371,10 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
         error_message=read_error,
         new_tasks=new_tasks,
         counters={
-            "files_scanned": 1,
+            "archives_opened": 1,
             "files_found": files_found,
             "bytes_found": bytes_found,
-            "archive_members_skipped": members_skipped,
-            "archive_errors": archive_errors,
+            **skip_counters,
         },
         worker_pid=os.getpid(),
     )

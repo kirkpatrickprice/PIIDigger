@@ -7,7 +7,6 @@ from pypdf import PdfReader
 from pypdf.errors import (
     EmptyFileError,
     FileNotDecryptedError,
-    PdfReadError,
     PyPdfError,
 )
 
@@ -21,13 +20,15 @@ except ImportError:
 
 # What pypdf can raise, even with strict=False, on a malformed content stream,
 # font or metadata dictionary, or on a page over one of its safety limits.  One
-# bad page is skipped rather than costing the text of every page around it.
+# bad page is skipped rather than costing the text of every page around it.  The
+# same errors from the document as a whole keep whatever was read before them.
 _PAGE_ERRORS = (PyPdfError, ValueError, KeyError, IndexError, TypeError, RecursionError)
 
 # Fonts a document keeps parsed.  Real PDFs were measured using up to 18 on one
 # page, and a page using more than this parses them all again each time.  An
-# identity ToUnicode map costs 10-20 MB, so this stays well under the default
-# 1 GB worker memory limit.
+# identity ToUnicode map was measured at about 11 MB, so a full cache costs about
+# 350 MB.  A 131 MB document peaked at about 250 MB of its own, so the two together
+# stay under the default 1 GB worker memory limit.
 _MAX_CACHED_FONTS = 32
 
 HANDLES = {
@@ -103,24 +104,49 @@ class _FontCache:
                 gc.collect()
 
 
+def _metadata_values(document: PdfReader) -> tuple[list[str], bool]:
+    """The document's metadata as text, and whether any of it could not be read.
+
+    Each entry is guarded on its own, so one bad /Title does not lose /Author.
+    """
+    values: list[str] = []
+    unread = False
+    try:
+        metadata = document.metadata
+        keys = list(metadata.keys()) if metadata else []
+    except _PAGE_ERRORS:
+        return values, True
+    for key in keys:
+        try:
+            val = metadata.get(key)
+            if val:
+                values.append(str(val))
+        except _PAGE_ERRORS:
+            unread = True
+    return values, unread
+
+
 class PdfHandler:
     """FileHandler for PDF files.
 
     Reads via source.open_stream() — PdfReader accepts an IO[bytes] directly.
     pypdf's log level is set by orchestration.logging_setup, not here.
-    Pages that could not be read go to source.report_unread(), so a partly read
-    document keeps its findings without looking fully scanned.
+    Anything that could not be read goes to source.report_unread(): skipped
+    pages, metadata, a locked or damaged document, a file that only claims to be
+    a PDF.  So it keeps its findings without looking fully scanned.  Only an
+    empty file is silent, because it holds nothing to miss.
     """
 
     def read(self, source, config: Config) -> Iterator[str]:  # source: ScannableItem
         stream = source.open_stream()
         content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
+        pages_seen = 0
+        pages_unread = 0
+        text_read = False
         try:
             try:
                 document = PdfReader(stream, strict=False)
                 fonts = _FontCache()
-                pages_seen = 0
-                pages_unread = 0
 
                 for page in document.pages:
                     pages_seen += 1
@@ -137,29 +163,36 @@ class PdfHandler:
                         # by the content buffer, so a match is never split at a
                         # page break; pypdf stuck inside one page reports nothing.
                         source.report_progress()
+                    text_read = True
                     for line in page_content.split("\n"):
                         content_buffer.append_content(line)
                         if content_buffer.content_buffer_full():
                             yield content_buffer.get_content()
 
-                if pages_unread:
-                    source.report_unread(f"{pages_unread:,} of {pages_seen:,} PDF pages could not be read")
+                values, metadata_unread = _metadata_values(document)
+                for value in values:
+                    content_buffer.append_content(value)
+                    if content_buffer.content_buffer_full():
+                        yield content_buffer.get_content()
+                if metadata_unread:
+                    source.report_unread("PDF metadata could not be fully read")
 
-                try:
-                    metadata = document.metadata
-                    if metadata:
-                        for key in metadata.keys():
-                            val = metadata.get(key)
-                            if val:
-                                content_buffer.append_content(str(val))
-                                if content_buffer.content_buffer_full():
-                                    yield content_buffer.get_content()
-                except _PAGE_ERRORS:
-                    pass
-
-            except EmptyFileError, PdfReadError:
-                # Falls through: any text read before the failure is still scanned.
+            # All of these fall through: any text read before the failure is
+            # still scanned.
+            except EmptyFileError:
                 pass
+            except FileNotDecryptedError:
+                source.report_unread("PDF is password protected", nothing_read=not text_read)
+            except _PAGE_ERRORS as exc:
+                stopped = f" after page {pages_seen:,}" if pages_seen else ""
+                source.report_unread(
+                    f"PDF could not be read{stopped}: {type(exc).__name__}: {exc}", nothing_read=not text_read
+                )
+
+            if pages_unread:
+                source.report_unread(
+                    f"{pages_unread:,} of {pages_seen:,} PDF pages could not be read", nothing_read=not text_read
+                )
 
             final = content_buffer.finalize_content()
             if final:

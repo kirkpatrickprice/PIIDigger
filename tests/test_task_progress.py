@@ -148,7 +148,8 @@ def test_batch_result_counts_unreported_members_as_failed() -> None:
 
     assert len(registry) == 0
     assert progress.incomplete.failed == 2
-    assert progress._counters["files_scanned"] == 3, "unreported members still count as scanned"
+    assert progress._counters["files_scanned"] == 1
+    assert progress._counters["files_not_scanned"] == 2, "unreported members were not scanned"
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +233,7 @@ def test_batch_error_with_no_member_in_progress_fails_what_is_left() -> None:
     assert len(registry) == 0
     assert dispatched == [task]
     assert progress.incomplete.failed == 2
-    assert progress._counters["files_scanned"] == 2, "files_scanned must still reach files_found"
+    assert progress._counters["files_not_scanned"] == 2, "the files bar must still reach files_found"
     assert list(progress._events) == [("ERROR", "Error: archive.7z — CRC error")], "every task type's error is shown"
 
 
@@ -259,3 +260,21 @@ def test_batch_error_from_a_superseded_copy_is_not_requeued() -> None:
     _handle_message(_error(task, pid=_PID + 1), registry, [], ProgressDisplay(), _LOG)
 
     assert dispatched == [task]
+
+
+@pytest.mark.unit
+def test_partly_read_member_gets_the_same_error_line_as_a_file() -> None:
+    registry, task, sink, progress = _setup("a", "b")
+
+    done = _done(task, "a")
+    _handle_message(
+        done.model_copy(update={"error_message": "1 of 2 PDF pages could not be read"}),
+        registry,
+        [sink],
+        progress,
+        _LOG,
+    )
+
+    assert list(progress._events)[-1][0] == "ERROR"
+    assert "::a — 1 of 2 PDF pages could not be read" in list(progress._events)[-1][1]
+    assert [r.source_member_path for r in sink.records] == ["a"], "its findings are still kept"

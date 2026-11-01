@@ -128,24 +128,27 @@ Each module in `archivehandlers/` declares `ARCHIVE_TYPE: str` and `HANDLES = {"
 ### Enumeration — `handle_enum_archive_members()`
 [orchestration/worker/_enum_archive.py](../../../src/piidigger/orchestration/worker/_enum_archive.py) applies, per member, in order:
 
-1. Path traversal (`../` or absolute), whatever the member's type: it marks a hostile archive, so it counts as an archive error
-2. Nested archive (deferred — skipped for now)
-3. `include_exts` and a registered `FileHandler` for the member's extension, through `filehandlers.select_handler()` — the same rule `ENUM_DIR` applies to files on disk. Extensions match regardless of case. Members are never MIME-detected, so a member with no or an unrecognized extension is not scanned. Members skipped here are reported in one INFO line per archive, grouped by extension.
-4. Repeated path: a path that appears twice in one archive (`tar -r` appends) is enumerated once, at its first occurrence, because a batch names its members by path. A later copy is skipped even when the first copy fails a later check: extraction takes the first entry for a name, so a later copy could never be scanned in its place.
-5. Encryption flag
-6. Individual uncompressed-size limit
-7. Compression-ratio bomb heuristic (skipped when `compressed_size == 0`, which is always true for tar and solid 7z)
-8. The **traversal cap** (below)
-9. Running total uncompressed-size limit
-10. Member count limit
+1. Path traversal (`../` or absolute), whatever the member's type: it marks a hostile archive, so it counts as unsafe
+2. macOS metadata: a `._*` AppleDouble file in a top-level `__MACOSX/` folder, or beside the member it describes. Not counted, and logged at DEBUG, because it holds none of the user's content. Other names are not assumed to be metadata.
+3. Nested archive (deferred — skipped for now)
+4. `include_exts` and a registered `FileHandler` for the member's extension, through `filehandlers.select_handler()` — the same rule `ENUM_DIR` applies to files on disk. Extensions match regardless of case. Members are never MIME-detected, so a member with no or an unrecognized extension is not scanned. Members skipped here are reported in one INFO line per archive, grouped by extension, listing the 15 most common.
+5. Repeated path: a path that appears twice in one archive (`tar -r` appends) is enumerated once, at its first occurrence, because a batch names its members by path. A later copy is skipped even when the first copy fails a later check: extraction takes the first entry for a name, so a later copy could never be scanned in its place.
+6. Encryption flag
+7. Individual uncompressed-size limit
+8. Compression-ratio bomb heuristic (skipped when `compressed_size == 0`, which is always true for tar and solid 7z)
+9. The **traversal cap** (below)
+10. Running total uncompressed-size limit
+11. Member count limit
 
-Checks 2 and 3 filter out members that could never be scanned before any limit applies. So a video or image does not use up the member count or the size budget, and cannot crowd out a scannable member later in the archive. Repeated unscannable members are not reported either. The member count comes last, so it counts only members that would otherwise be scanned.
+Checks 2 to 4 filter out members that could never be scanned before any limit applies. So a video or image does not use up the member count or the size budget, and cannot crowd out a scannable member later in the archive. Repeated unscannable members are not reported either. The member count comes last, so it counts only members that would otherwise be scanned.
 
-Enumeration checks every member, including those past the member count limit; it reads only the archive's listing, so this is cheap. Each skip reason is logged **once per archive**, with the count and the first three member names, never once per member: a hostile archive with a million bad entries costs one log line per reason. Check 3's line is INFO and grouped by extension; the nested-archive line is DEBUG; the rest are WARNING.
+Enumeration checks every member, including those past the member count limit; it reads only the archive's listing, so this is cheap. Each skip reason is logged **once per archive**, with the count and the first three member names, never once per member: a hostile archive with a million bad entries costs one log line per reason. Check 4's line and the nested-archive line are INFO, the macOS line is DEBUG, and the rest are WARNING. Each reason except macOS metadata also has a counter, so the end-of-scan summary can tell a member lost to a limit from one of an unsupported type.
 
 Check 1 normalises backslashes first, and also rejects names that start with a drive letter, so a name such as `\x\y.txt` or `C:x.txt` never reaches extraction.
 
-**Traversal cap.** In a compressed tar or a solid 7z, reaching a member means decompressing every byte stored before it, skipped members included. Unscannable members still count here, because they still have to be decompressed. `MemberInfo.decompress_offset` records that amount. Check 8 skips a member whose `decompress_offset + uncompressed_size` exceeds `max_total_uncompressed_size_mb`. So no scan task has to decompress an unbounded amount of data to reach a member, and no extra setting is needed. Zip and uncompressed tar report offset 0 and are unaffected.
+**Traversal cap.** In a compressed tar or a solid 7z, reaching a member means decompressing every byte stored before it, skipped members included. Unscannable members still count here, because they still have to be decompressed. `MemberInfo.decompress_offset` records that amount. Check 9 skips a member whose `decompress_offset` exceeds `max_decompress_depth_mb` (default 32 GiB). The member's own size is not part of this, because check 7 limits it. So no scan task has to decompress an unbounded amount of data to reach a member. Zip and uncompressed tar report offset 0 and are unaffected.
+
+This limit is separate from `max_total_uncompressed_size_mb` (default 8 GiB), because they control different costs. The depth limit controls decompression time, and the total controls how many bytes get scanned per archive. The total can still fill up first, so later members in a large archive may be rejected as over the total. The summary reports both reasons.
 
 Accepted members, in archive order, are then split into batches (below). Each batch becomes one `SCAN_ARCHIVE_MEMBERS` task whose `Task.items` lists its member paths.
 
@@ -254,7 +257,7 @@ To add a fourth archive format:
 ## Performance Considerations
 
 - **Batching** keeps decompression linear in archive size; see [Batching: the trade-offs](#batching-the-trade-offs).
-- **Bomb defense without per-member compressed size**: tar and solid 7z report `compressed_size` as `0`, which disables the ratio check (check 7) for those members. `max_total_uncompressed_size_mb` (which also caps `decompress_offset`) and `max_members` are the primary defenses in that case.
+- **Bomb defense without per-member compressed size**: tar and solid 7z report `compressed_size` as `0`, which disables the ratio check (check 8) for those members. `max_total_uncompressed_size_mb`, `max_decompress_depth_mb` (which caps `decompress_offset`) and `max_members` are the primary defenses in that case.
 - **Streaming extraction for zip**: each member is copied to disk in chunks instead of being read into memory whole.
 - **Lazy `py7zr` import**: `_7z.py` only imports `py7zr` inside its methods, so processes that never encounter a `.7z` file never pay that import cost.
 

@@ -93,13 +93,45 @@ Generate and edit a config file with `piidigger config generate`, then point `sc
 
 While attached to an interactive terminal, `scan` shows a live three-panel display:
 
-- **Scan Configuration** — the performance preset and worker count, the directories being scanned, whether OS sleep-prevention is active, and a reminder that Ctrl+C stops the scan.
+- **Scan Configuration** — the performance preset and worker count, the directories being scanned, the log file, whether OS sleep-prevention is active, and a reminder that Ctrl+C stops the scan.
 - **Progress** — three bars (Dirs, Files, Bytes: scanned vs. found, with percentage and elapsed time), a running "Results Found" counter, and an ETA once at least 200 tasks have completed. The ETA reads `--:--` before that threshold — that's expected on short scans, not a stall.
 - **Events** — the most recent warnings and errors (timeouts, unreadable files, skipped archive members), newest additions at the bottom.
 
-When `scan`'s output isn't a terminal — e.g. piped to a file, redirected in CI, etc. — the live display is skipped entirely, and a single plain-text summary line is printed at the end instead (e.g. `Scan complete. dirs_scanned=1,204  files_scanned=38,502  ...  run_time=0:31:28`).
+When `scan`'s output isn't a terminal — e.g. piped to a file, redirected in CI, etc. — the live display is skipped entirely. The summary below is still printed at the end.
 
-The same summary is written to the end of the log file. Its totals line is logged at INFO. A "Not fully scanned" line, or a line for a results file that stopped after an error, is logged at WARNING.
+### The End-of-Scan Summary
+
+Every scan ends with a short summary, one fact per line:
+
+```text
+Scan complete in 0:41:13. Found 108,108 results: 60,735 pan, 47,373 email.
+  Scanned: 28,036 folders, 108,826 files, 6.4 GB
+
+Not fully scanned. See the log for details: logs/piidigger-20261031-153257.log
+       51  files, folders or archive members: 41 errors, 10 over the memory limit
+      562  files not read: content looks binary
+       16  archive members rejected: 12 too deep to reach, 3 over the archive's total size, 1 unsafe
+        5  archive members encrypted
+        7  nested archives not opened
+
+Skipped by design:
+      120  files of unsupported types
+   13,787  archive members of unsupported types
+```
+
+Rows with nothing to report are left out, so a clean run is just the first two lines.
+
+- **Scanned** counts only what was actually read.
+- **Not fully scanned** lists content that might hold PII but wasn't read. A file with an error may still have been partly read, and anything found in the part that was read stays in your results.
+- **Skipped by design** lists file types PIIDigger has no reader for, or that `include_exts` left out. It isn't a problem unless you expected those types to be scanned.
+
+A scan with rows under "Not fully scanned" still exits with code 0, as long as it ran to the end. A full-disk scan nearly always meets a locked file, so the exit code wouldn't tell you much. Check the summary or the log when you need to know what was missed.
+
+The same summary is written to the end of the log file. The log also lists the unsupported file types, largest first. The totals, and anything skipped by design, are logged at INFO. Everything under "Not fully scanned", and any results file that stopped after an error, is logged at WARNING.
+
+PIIDigger leaves a few things out of the counts altogether, because they hold no content of their own: symlinks, and the `$I` metadata files in a Windows Recycle Bin. The deleted files themselves are scanned. A Windows junction such as `Application Data` that refuses access isn't reported as a failure when its target is inside the folders being scanned, because the target is scanned under its real name. Any other folder that refuses access, including a folder-mounted volume, is reported. A junction that can be read is scanned like any other folder, even when it leads outside your start directories, so its contents may appear twice in your results. A junction pointing back at a folder the scan came through is skipped, which stops loops. Many folders that all link to each other can still be listed many times over, and findings repeat with each listing.
+
+An archive counts as opened, not as a scanned file. Its members count as files.
 
 ### Output Files
 

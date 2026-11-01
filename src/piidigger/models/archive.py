@@ -14,8 +14,8 @@ class MemberInfo(PiiDiggerModel):
     stop logic counts non-directory members correctly.
 
     decompress_offset is how many uncompressed bytes a reader must get through
-    before reaching this member's data: its offset in a compressed tar stream,
-    or in its 7z folder.  It is 0 for zip and for an uncompressed tar, which
+    before reaching this member: where it starts in a compressed tar stream, or
+    in its 7z folder, so the first member's is 0.  It is 0 for zip and for an uncompressed tar, which
     reach any member without decompressing anything.  Enumeration
     caps it, so no scan task has to decompress an unbounded amount of data to
     reach a member.

@@ -12,6 +12,7 @@ from piidigger.models.payloads import ScanArchiveMembersPayload
 from piidigger.models.results import ResultRecord
 from piidigger.models.tasks import Task, TaskResult
 from piidigger.orchestration.context import WorkerContext
+from piidigger.orchestration.counters import result_counters
 from piidigger.orchestration.secure_delete import secure_delete
 from piidigger.orchestration.sources import FilesystemItem
 from piidigger.orchestration.worker._content import scan_content
@@ -70,7 +71,7 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
     def failed(member: str, reason: str) -> None:
         logger.error("error scanning archive member %s::%s: %s", payload.archive_path, member, reason)
         reported.add(member)
-        reporter.item_done(member, [], {"files_scanned": 1, "tasks_failed": 1})
+        reporter.item_done(member, [], {"files_not_scanned": 1, "tasks_failed": 1}, error_message=reason)
 
     def discard(member: str, path: Path) -> None:
         # The file is overwritten and removed with the rest of task_temp when
@@ -101,11 +102,11 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
                 member, path, payload, ctx.config, enabled_handlers, reporter.alive
             )
         except UndetectableEncodingError as exc:
-            # As in handle_scan_file: logged, counted as scanned, not a failure.
+            # As in handle_scan_file: logged and counted, not a failure.
             discard(member, path)
             logger.info("skipping archive member %s::%s: %s", payload.archive_path, member, exc)
             reported.add(member)
-            reporter.item_done(member, [], {"files_scanned": 1})
+            reporter.item_done(member, [], {"files_unreadable": 1})
             return
         except Exception as exc:  # noqa: BLE001
             discard(member, path)
@@ -117,7 +118,7 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             # As in handle_scan_file: not fully scanned, but keep what was found.
             logger.error("error scanning archive member %s::%s: %s", payload.archive_path, member, unread_reason)
             counters["tasks_failed"] = 1
-        reporter.item_done(member, findings, counters)
+        reporter.item_done(member, findings, counters, error_message=unread_reason)
 
     try:
         archive_handler.extract_members(
@@ -137,7 +138,6 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             task_type=task.task_type,
             status="error",
             error_message=str(exc),
-            counters={"archive_errors": 1},
             worker_pid=os.getpid(),
         )
 
@@ -197,5 +197,6 @@ def _scan_member(
         ).model_dump()
         for handler_name, match_dict in per_handler.items()
     ]
-    results_found = sum(len(values) for f in findings for values in f.get("matches", {}).values())
-    return findings, {"files_scanned": 1, "bytes_scanned": size, "results_found": results_found}, item.unread_reason
+    read_counters = {"files_not_scanned": 1} if item.nothing_read else {"files_scanned": 1, "bytes_scanned": size}
+    counters = {**read_counters, **result_counters(findings)}
+    return findings, counters, item.unread_reason
