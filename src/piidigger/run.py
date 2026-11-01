@@ -6,6 +6,7 @@ import logging
 import math
 import multiprocessing as mp
 import os
+import platform
 import queue
 import re
 import socket
@@ -177,6 +178,20 @@ def _check_memory(warning: str | None, logger: logging.Logger) -> bool:
     return False
 
 
+def _describe_platform() -> str:
+    """Name the operating system for the log, with the distribution on Linux.
+
+    Not platform.platform(): on Linux it adds the C library version, which in a
+    PyInstaller bundle describes the build image rather than this machine.
+    """
+    base = f"{platform.system()} {platform.release()}, {platform.machine()}"
+    try:
+        distribution = platform.freedesktop_os_release()["PRETTY_NAME"]
+    except OSError, KeyError:  # not Linux, or no usable os-release file
+        return base
+    return f"{distribution} ({base})"
+
+
 def _emit_startup_info(
     progress: ProgressDisplay,
     logger: logging.Logger,
@@ -197,6 +212,7 @@ def _emit_startup_info(
     dirs = ", ".join(str(d) for d in config.start_dirs)
 
     log_entries = [
+        f"Platform: {_describe_platform()}",
         f"Performance: {config.performance} — {worker_count} worker process{plural}",
         f"Memory limit: {memory_limit}",
         f"Scan directories: {dirs}",

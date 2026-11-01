@@ -28,6 +28,7 @@ from piidigger.run import (
     EXIT_OK,
     _build_sinks,
     _check_memory,
+    _describe_platform,
     _emit_startup_info,
     _is_broad_folder,
     _memory_budget,
@@ -681,6 +682,42 @@ def test_startup_info_reports_sleep_status(
     with console.capture() as captured:
         console.print(progress._build_config_panel())
     assert text in captured.get()
+
+
+@pytest.mark.unit
+def test_startup_log_names_the_platform(caplog: pytest.LogCaptureFixture) -> None:
+    logger = logging.getLogger("tests.startup")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        _emit_startup_info(
+            ProgressDisplay(), logger, Config(start_dirs=[]), 1, SleepStatus.ACTIVE, "1,024 MB per worker", None
+        )
+
+    assert f"Platform: {_describe_platform()}" in caplog.messages
+
+
+@pytest.mark.unit
+def test_describe_platform_adds_the_linux_distribution(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(run_mod.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(run_mod.platform, "release", lambda: "7.0.0-generic")
+    monkeypatch.setattr(run_mod.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(run_mod.platform, "freedesktop_os_release", lambda: {"PRETTY_NAME": "Ubuntu 24.04 LTS"})
+
+    assert _describe_platform() == "Ubuntu 24.04 LTS (Linux 7.0.0-generic, x86_64)"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("error", [OSError("no os-release file"), KeyError("PRETTY_NAME")])
+def test_describe_platform_without_a_distribution_name(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
+    def no_release() -> dict[str, str]:
+        raise error
+
+    monkeypatch.setattr(run_mod.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(run_mod.platform, "release", lambda: "11")
+    monkeypatch.setattr(run_mod.platform, "machine", lambda: "AMD64")
+    monkeypatch.setattr(run_mod.platform, "freedesktop_os_release", no_release)
+
+    assert _describe_platform() == "Windows 11, AMD64"
 
 
 # ---------------------------------------------------------------------------
