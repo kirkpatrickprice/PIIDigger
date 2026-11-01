@@ -184,6 +184,22 @@ Note: For a full-disk scan on Windows, it's necessary to start the Powershell pr
 
 **Solutions:** A single file, directory, or archive member that doesn't finish within `default_timeout_seconds` (default 30s) is terminated and replaced automatically — the scan keeps going, and that one item is recorded as timed out rather than scanned. If you're seeing many of these, the timeout may be too short for your storage (e.g. a slow network share); raise `default_timeout_seconds` in the config. See [Advanced Configuration](advanced-configuration.md).
 
+### Sleep prevention shows "Unavailable"
+
+PIIDigger asks the operating system to stay awake during a scan. The Scan Configuration panel shows the result:
+
+- **Active** — the desktop or operating system accepted the request.
+- **Active (logind)** — on Linux, the desktop could not take the request, so PIIDigger holds a lock from `logind` instead. This is normal under `sudo`. Run `systemd-inhibit --list` to see the lock.
+- **Unavailable (no desktop session or logind lock)** — on Linux, neither route worked. This is common in containers, and for a standard user over SSH, whom `logind` usually refuses. Running with `sudo` avoids the refusal. The log file records the reason.
+- **Unavailable** — on Windows or macOS, the request failed. The log file records the reason.
+
+A scan runs the same either way, but the machine may go to sleep and pause it. Change the machine's power settings for a long scan if the status is unavailable.
+
+The machine can still suspend while the status is active:
+
+- Closing a laptop's lid usually still suspends it. Most Linux desktops set `LidSwitchIgnoreInhibited=yes`.
+- On older systemd releases, such as 255, a `logind` lock does not stop a suspend requested by the same user. A desktop's idle timer running as that user may do this, so check its power settings. This does not apply under `sudo`, where root holds the lock.
+
 ### Stopping a scan early
 
 Press **Ctrl+C** once. PIIDigger stops feeding new work to the workers, lets in-flight tasks wind down, flushes whatever results have been found so far to the output sinks, and exits. Output files up to that point are valid and usable — they just won't include anything past the point of interruption.

@@ -19,7 +19,6 @@ from typing import Any, TextIO
 
 import psutil
 from rich.markup import escape
-from wakepy import keep
 
 from piidigger.models.config import Config
 from piidigger.orchestration.context import WorkerContext
@@ -35,6 +34,7 @@ from piidigger.orchestration.logging_setup import (
 from piidigger.orchestration.pool import WorkerPool, spawn_worker
 from piidigger.orchestration.progress import ProgressDisplay
 from piidigger.orchestration.secure_delete import secure_rmtree
+from piidigger.orchestration.sleep import SleepStatus, prevent_sleep
 from piidigger.orchestration.worker import resolve_exclude_dirs
 from piidigger.outputhandlers import HANDLER_REGISTRY, CsvSink, JsonSink, TextSink
 
@@ -182,7 +182,7 @@ def _emit_startup_info(
     logger: logging.Logger,
     config: Config,
     worker_count: int,
-    wake_mode: Any,
+    sleep_status: SleepStatus,
     memory_limit: str,
     memory_warning: str | None,
 ) -> None:
@@ -192,9 +192,8 @@ def _emit_startup_info(
     once in run_scan() and shared with _check_memory().
     """
     plural = "es" if worker_count != 1 else ""
-    sleep_active = getattr(wake_mode, "active", False)
-    sleep_status = "Active" if sleep_active else "Unavailable on this platform"
-    sleep_markup = "[green]Active[/green]" if sleep_active else "[yellow]Unavailable on this platform[/yellow]"
+    sleep_active = sleep_status in (SleepStatus.ACTIVE, SleepStatus.ACTIVE_LOGIND)
+    sleep_markup = f"[green]{sleep_status}[/green]" if sleep_active else f"[yellow]{sleep_status}[/yellow]"
     dirs = ", ".join(str(d) for d in config.start_dirs)
 
     log_entries = [
@@ -505,8 +504,8 @@ def run_scan(config: Config) -> int:
         pool = WorkerPool(lambda: spawn_worker(worker_ctx), logger=build_worker_logger(log_queue, "pool"))
         pool.start(worker_count)
         progress.start()
-        with keep.running(on_fail="pass") as wake_mode:
-            _emit_startup_info(progress, run_logger, config, worker_count, wake_mode, memory_limit, memory_warning)
+        with prevent_sleep(run_logger) as sleep_status:
+            _emit_startup_info(progress, run_logger, config, worker_count, sleep_status, memory_limit, memory_warning)
             handed_off = True
             outcome = run_coordinator(worker_ctx, pool, listener, sinks, progress)
     except BaseException as exc:

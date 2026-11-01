@@ -18,6 +18,7 @@ from piidigger.models.config import Config, ResultsConfig
 from piidigger.orchestration.coordinator import CoordinatorResult
 from piidigger.orchestration.pool import WorkerPool
 from piidigger.orchestration.progress import ProgressDisplay
+from piidigger.orchestration.sleep import SleepStatus
 from piidigger.outputhandlers import TextSink
 from piidigger.outputhandlers.json import JsonSink
 from piidigger.run import (
@@ -642,13 +643,44 @@ def test_startup_panel_shows_windows_drive_roots_intact() -> None:
     progress = ProgressDisplay()
     config = Config(start_dirs=["C:\\", "D:\\"])
 
-    _emit_startup_info(progress, logging.getLogger("tests.startup"), config, 4, None, "1,024 MB per worker", None)
+    _emit_startup_info(
+        progress, logging.getLogger("tests.startup"), config, 4, SleepStatus.ACTIVE, "1,024 MB per worker", None
+    )
 
     console = Console(width=200, color_system=None)
     with console.capture() as captured:
         console.print(progress._build_config_panel())
     assert "Scan directories: C:\\, D:\\ " in captured.get()
     assert "[/cyan]" not in captured.get()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("status", "text", "colour"),
+    [
+        (SleepStatus.ACTIVE, "Sleep prevention: Active", "green"),
+        (SleepStatus.ACTIVE_LOGIND, "Sleep prevention: Active (logind)", "green"),
+        (SleepStatus.UNAVAILABLE, "Sleep prevention: Unavailable", "yellow"),
+        (SleepStatus.UNAVAILABLE_LINUX, "Sleep prevention: Unavailable (no desktop session or logind lock)", "yellow"),
+    ],
+)
+def test_startup_info_reports_sleep_status(
+    status: SleepStatus, text: str, colour: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    from rich.console import Console
+
+    progress = ProgressDisplay()
+    logger = logging.getLogger("tests.startup")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        _emit_startup_info(progress, logger, Config(start_dirs=[]), 1, status, "1,024 MB per worker", None)
+
+    assert text in caplog.messages
+    assert f"[{colour}]{status}[/{colour}]" in progress._startup_lines[-2]
+    console = Console(width=200, color_system=None)
+    with console.capture() as captured:
+        console.print(progress._build_config_panel())
+    assert text in captured.get()
 
 
 # ---------------------------------------------------------------------------
@@ -693,7 +725,7 @@ def test_startup_info_logs_the_memory_limit_and_shows_its_warning(caplog: pytest
     progress = ProgressDisplay()
 
     with caplog.at_level(logging.INFO, logger=logger.name):
-        _emit_startup_info(progress, logger, Config(start_dirs=[]), 3, None, description, warning)
+        _emit_startup_info(progress, logger, Config(start_dirs=[]), 3, SleepStatus.ACTIVE, description, warning)
 
     messages = [(r.levelno, r.getMessage()) for r in caplog.records]
     assert (logging.INFO, "Memory limit: 1,024 MB per worker (up to ~3.0 GB for 3 workers)") in messages
