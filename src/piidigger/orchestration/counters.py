@@ -11,6 +11,8 @@ from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 
+from piidigger.orchestration.escaping import utf8_escaped
+
 # What each progress bar counts as finished.
 DIRS_DONE: tuple[str, ...] = ("dirs_scanned", "dirs_not_scanned")
 # An archive counts as a file found, but only its members are scanned as files.
@@ -46,9 +48,7 @@ def _tally_text(ranked: list[tuple[str, int]], limit: int) -> str:
     An extension comes from a file name, so it may hold surrogates from a name
     that is not valid UTF-8, which the UTF-8 log file could not write.
     """
-    listed = ", ".join(
-        f"{kind.encode('utf-8', 'backslashreplace').decode('utf-8')} ×{count:,}" for kind, count in ranked[:limit]
-    )
+    listed = ", ".join(f"{utf8_escaped(kind)} ×{count:,}" for kind, count in ranked[:limit])
     hidden = len(ranked) - limit
     return f"{listed} and {hidden:,} more types" if hidden > 0 else listed
 

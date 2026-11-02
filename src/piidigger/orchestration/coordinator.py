@@ -84,8 +84,8 @@ class CoordinatorResult:
     a failure on one file, this is a failure of the whole run.
 
     sinks_failed names each results file that stopped receiving findings after
-    an I/O error.  The scan itself may have finished, but its results did not
-    all reach disk.
+    an error, or that received fewer results than were found.  The scan itself
+    may have finished, but its results did not all reach disk.
     """
 
     interrupted: bool = False
@@ -545,7 +545,7 @@ def run_coordinator(
         unfinished=unfinished,
         workers_failed=workers_failed,
         # After teardown, so a sink that fails while closing is counted too.
-        sinks_failed=tuple(sink.label for sink in guarded if sink.failed),
+        sinks_failed=progress.short_results_files,
     )
 
 
@@ -694,7 +694,7 @@ def _requeue_failed_batch(
         return False
     member = f"{path}::{culprit}"
     msg = result.error_message or "(no message)"
-    logger.error("[%s] %r failed: %s%s", result.task_type.value, member, msg, _requeue_clause(record))
+    logger.error("[%s] path=%r: %s%s", result.task_type.value, member, msg, _requeue_clause(record))
     progress.log_event("ERROR", f"Error: {_truncate_path(member)} — {_short_error(msg)}")
     update = {"files_not_scanned": 1, "tasks_failed": 1, "tasks_pending": len(registry)}
     if result.task_id not in registry:
@@ -933,6 +933,11 @@ def _route_to_sinks(findings: list[dict[str, Any]], sinks: list[Any], logger: lo
             sink.write(record)
 
 
+def _report_results_files(sinks: list[GuardedSink], progress: ProgressDisplay) -> None:
+    """Hand the summary what each results file received, to check against the results found."""
+    progress.report_results_files([sink.results_file() for sink in sinks])
+
+
 def _flush_sinks(sinks: list[Any], logger: logging.Logger) -> None:
     """Close every output sink, logging rather than raising on failure."""
     for sink in sinks:
@@ -981,7 +986,7 @@ def _teardown(
     ctx: WorkerContext,
     pool: WorkerPool,
     listener: logging.handlers.QueueListener,
-    sinks: list[Any],
+    sinks: list[GuardedSink],
     progress: ProgressDisplay,
     logger: logging.Logger,
     *,
@@ -1001,6 +1006,7 @@ def _teardown(
         if interrupted:
             progress.log_event("INFO", "Saving results to output files…")
         _flush_sinks(sinks, logger)
+        _report_results_files(sinks, progress)
         # After the flush, so a results file that fails while closing is in
         # the summary; before the listener stops, so the summary reaches the log.
         for level, line in progress.summary_lines(for_log=True):
@@ -1014,6 +1020,9 @@ def _teardown(
         ctx.result_queue.cancel_join_thread()
         ctx.log_queue.cancel_join_thread()
         progress.log_event("WARNING", "Force-quit — remaining output abandoned")
+        # The flush may not have run.  A file that failed mid-scan is still
+        # named, and one never closed is reported as not saved, not as complete.
+        _report_results_files(sinks, progress)
 
     finally:
         progress.stop()

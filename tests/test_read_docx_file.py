@@ -146,6 +146,33 @@ def _docx_with_rewritten_parts(tmp_path: Path, rewrites: dict[str, tuple[bytes, 
 
 
 @pytest.mark.filehandlers
+def test_docx_without_core_properties_reads_quietly(tmp_path: Path) -> None:
+    """Google Docs writes no docProps/core.xml.  docx2python's warning about it once reached the log with no file name."""
+    path = tmp_path / "google-docs.docx"
+    with (
+        zipfile.ZipFile("testdata/docx/lorem-ipsum-1line.docx") as source,
+        zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as target,
+    ):
+        for info in source.infolist():
+            if info.filename == "docProps/core.xml":
+                continue
+            data = source.read(info.filename)
+            if info.filename == "_rels/.rels":
+                data, count = re.subn(rb"<Relationship [^>]*core-properties[^>]*/>", b"", data)
+                assert count == 1
+            target.writestr(info, data)
+    item = FilesystemItem(path)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        content = " ".join(DocxHandler().read(item, Config()))
+
+    assert "Lorem ipsum dolor sit amet" in content
+    assert item.unread_reason is None, "a missing core-properties file loses nothing"
+    assert not [w for w in caught if "core-properties" in str(w.message)]
+
+
+@pytest.mark.filehandlers
 def test_docx_comment_with_no_date_keeps_the_body_and_reports_comments(tmp_path: Path) -> None:
     """docx2python reads w:date unconditionally, and the body is still only buffered when it raises."""
     path = _docx_with_rewritten_parts(

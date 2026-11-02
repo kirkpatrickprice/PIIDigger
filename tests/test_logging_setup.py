@@ -96,6 +96,32 @@ def test_log_file_keeps_each_message_on_one_line(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_log_file_keeps_a_record_naming_a_non_utf8_file(tmp_path: Path) -> None:
+    """A POSIX file name that is not valid UTF-8 arrives as surrogate escapes.
+
+    Strict UTF-8 would make logging drop the record, the only report of that file.
+    """
+    log_q: queue.Queue[logging.LogRecord] = queue.Queue()
+    log_file = tmp_path / "run.log"
+    listener = start_listener(log_q, log_file, "INFO")  # type: ignore[arg-type]
+    logger = logging.getLogger("tests.surrogate_path")
+    logger.propagate = False
+    handler = logging.handlers.QueueHandler(log_q)
+    logger.addHandler(handler)
+    try:
+        # %s, not %r: repr() would escape the surrogate before the handler saw it.
+        logger.warning("skipping %s: text encoding could not be detected", "/data/caf\udce9.txt")
+        logger.error("next record")
+    finally:
+        logger.removeHandler(handler)
+        stop_listener(listener)
+
+    lines = log_file.read_bytes().decode("utf-8").splitlines()
+    assert lines[0].endswith("skipping /data/caf\\udce9.txt: text encoding could not be detected")
+    assert lines[1].endswith("next record")
+
+
+@pytest.mark.unit
 def test_mime_detection_does_not_emit_syntax_warnings(tmp_path: Path) -> None:
     """puremagic ast.parse()s text files; their invalid escapes must not flood the log."""
     # Parses as Python, so the scanner's ast.parse() gets far enough to warn.

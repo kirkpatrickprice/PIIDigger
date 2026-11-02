@@ -118,17 +118,26 @@ Not fully scanned. See the log for details: logs/piidigger-20261031-153257.log
 Skipped by design:
       120  files of unsupported types
    13,787  archive members of unsupported types
+
+Results files: all 108,108 results written to every results file.
 ```
 
-Rows with nothing to report are left out, so a clean run is just the first two lines.
+Rows with nothing to report are left out. So a clean run is just the first two lines, plus the results files line when it found something.
 
 - **Scanned** counts only what was actually read.
 - **Not fully scanned** lists content that might hold PII but wasn't read. A file with an error may still have been partly read, and anything found in the part that was read stays in your results. A PDF with no extractable text opened without error but held no text, usually because its pages are scanned images. PIIDigger doesn't read text from images, so it counts these under "Scanned" and lists them here too. If this section lists rejected archive members, see [The summary says archive members were rejected](troubleshooting.md#the-summary-says-archive-members-were-rejected).
 - **Skipped by design** lists file types PIIDigger has no reader for, or that `include_exts` left out. It isn't a problem unless you expected those types to be scanned.
+- **Results files** checks each results file against the number of results found. If any file received fewer, for example because the disk filled up, the line becomes a "Results files incomplete" block instead. It lists every file with its count and what it is missing:
 
-A scan with rows under "Not fully scanned" still exits with code 0, as long as it ran to the end. A full-disk scan nearly always meets a locked file, so the exit code wouldn't tell you much. Check the summary or the log when you need to know what was missed.
+  ```text
+  Results files incomplete (88,441 results found). See the log for details: logs/piidigger-20261101-224139.log
+     43,735  piidigger-results/laptop-20261101-224139.csv  (44,706 missing: stopped after an error: [Errno 28] No space left on device)
+     88,441  piidigger-results/laptop-20261101-224139.json, piidigger-results/laptop-20261101-224139.jsonl
+  ```
 
-The same summary is written to the end of the log file. The log also lists the unsupported file types: common document types such as `.doc` and `.pptx` first, then up to 15 others, largest first. The totals, and anything skipped by design, are logged at INFO. Everything under "Not fully scanned", and any results file that stopped after an error, is logged at WARNING. The per-file lines for undetected text encodings and PDFs with no extractable text are logged at INFO, so with `log_level = "WARNING"` the summary counts them but the log doesn't name them.
+A scan with rows under "Not fully scanned" still exits with code 0, as long as it ran to the end. An incomplete results file is different: it exits with code 2, because the results you would read are not the results the scan found. A full-disk scan nearly always meets a locked file, so the exit code wouldn't tell you much. Check the summary or the log when you need to know what was missed.
+
+The same summary is written to the end of the log file. The log also lists the unsupported file types: common document types such as `.doc` and `.pptx` first, then up to 15 others, largest first. The totals, and anything skipped by design, are logged at INFO. Everything under "Not fully scanned", and an incomplete results file, is logged at WARNING. The per-file lines for undetected text encodings and PDFs with no extractable text are logged at INFO, so with `log_level = "WARNING"` the summary counts them but the log doesn't name them.
 
 PIIDigger leaves a few things out of the counts altogether, because they hold no content of their own: symlinks, and the `$I` metadata files in a Windows Recycle Bin. The deleted files themselves are scanned. A Windows junction such as `Application Data` that refuses access isn't reported as a failure when its target is inside the folders being scanned, because the target is scanned under its real name. Any other folder that refuses access, including a folder-mounted volume, is reported. A junction that can be read is scanned like any other folder, even when it leads outside your start directories, so its contents may appear twice in your results. A junction pointing back at a folder the scan came through is skipped, which stops loops. Many folders that all link to each other can still be listed many times over, and findings repeat with each listing.
 

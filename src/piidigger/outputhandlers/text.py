@@ -10,6 +10,9 @@ class TextSink:
     Archive lineage fields (source_member_path, source_depth, source_container_type)
     are appended as key=value tokens when non-null / non-zero.
 
+    Text that is not valid UTF-8, such as a POSIX file name holding surrogate
+    escapes, is written with backslash escapes, so it cannot fail a write.
+
     I/O errors propagate as OSError; the caller decides how to report them.
     """
 
@@ -22,7 +25,7 @@ class TextSink:
         return (self.path,)
 
     def open(self) -> None:
-        self._file = open(self.path, "w", encoding="utf-8")
+        self._file = open(self.path, "w", encoding="utf-8", errors="backslashreplace")
 
     def write(self, record: ResultRecord) -> None:
         if self._file is None:

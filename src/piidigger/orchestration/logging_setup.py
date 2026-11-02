@@ -119,7 +119,10 @@ def start_listener(
     # non-ASCII character logged (e.g. a path) raised UnicodeEncodeError in
     # the listener thread, dropping the record and corrupting the rich.Live
     # display.
-    handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+    # errors="backslashreplace": a POSIX file name that is not valid UTF-8
+    # arrives as surrogate escapes, which strict UTF-8 cannot encode.  logging
+    # would drop that record, and with it the only report of that file.
+    handler = logging.FileHandler(log_file, mode="w", encoding="utf-8", errors="backslashreplace")
     handler.setLevel(level)
     handler.setFormatter(_SingleLineFormatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
     listener = logging.handlers.QueueListener(

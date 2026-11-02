@@ -6,7 +6,13 @@ import logging
 
 import pytest
 
-from piidigger.orchestration.progress import IncompleteWork, ProgressDisplay, _fmt_duration, describe_incomplete
+from piidigger.orchestration.progress import (
+    IncompleteWork,
+    ProgressDisplay,
+    ResultsFile,
+    _fmt_duration,
+    describe_incomplete,
+)
 
 
 @pytest.mark.unit
@@ -206,7 +212,7 @@ def test_summary_lines_for_the_log_drop_the_pointer_to_the_log(monkeypatch: pyte
     display = _non_tty(monkeypatch)
     display.update({"tasks_failed": 1})
     display.report_incomplete(timed_out=0, abandoned=0, over_memory=0, unfinished=0, interrupted=False)
-    display.report_output_failure("results.csv", "disk full")
+    display.report_results_files([ResultsFile("results.csv", 0, problem="stopped after an error: disk full")])
 
     screen = display.summary_lines()
     log = display.summary_lines(for_log=True)
@@ -216,12 +222,14 @@ def test_summary_lines_for_the_log_drop_the_pointer_to_the_log(monkeypatch: pyte
         "Not fully scanned. See the log for details.",
         "        1  file, folder or archive member: 1 error",
         "",
-        "Results incomplete: results.csv stopped after an error (disk full). See the log for details.",
+        "Results files incomplete (0 results found). See the log for details.",
+        "        0  results.csv  (stopped after an error: disk full)",
     ]
     assert log[1:] == [
         (logging.WARNING, "Not fully scanned."),
         (logging.WARNING, "        1  file, folder or archive member: 1 error"),
-        (logging.WARNING, "Results incomplete: results.csv stopped after an error (disk full)."),
+        (logging.WARNING, "Results files incomplete (0 results found)."),
+        (logging.WARNING, "        0  results.csv  (stopped after an error: disk full)"),
     ]
 
 

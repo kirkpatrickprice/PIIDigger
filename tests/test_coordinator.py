@@ -31,9 +31,10 @@ from piidigger.orchestration.coordinator import (
     build_seed_tasks,
     run_coordinator,
 )
-from piidigger.orchestration.logging_setup import start_listener
+from piidigger.orchestration.logging_setup import start_listener, stop_listener
 from piidigger.orchestration.pool import WorkerPool
 from piidigger.orchestration.progress import ProgressDisplay
+from piidigger.orchestration.sinks import GuardedSink
 from piidigger.orchestration.worker import worker_loop
 
 # ---------------------------------------------------------------------------
@@ -392,6 +393,7 @@ def test_deadline_detection_replaces_hung_worker(tmp_path: Path) -> None:
 
 class _ListSink:
     path = Path("in-memory")  # OutputSink names its file in error messages
+    paths = (path,)
 
     def __init__(self) -> None:
         self.records: list[ResultRecord] = []
@@ -925,6 +927,45 @@ def test_interrupt_asks_workers_to_stop_rather_than_killing_them(tmp_path: Path)
 
     assert ctx.stop_event.is_set()
     assert worker.exitcode == 0, f"worker was killed (exit code {worker.exitcode}) instead of stopping cleanly"
+
+
+@pytest.mark.integration
+def test_force_quit_still_names_a_results_file_that_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second CTRL-C skips the flush.  A file that failed is still named, and none is called saved."""
+
+    class _FullDisk:
+        path = tmp_path / "out.csv"
+        paths = (path,)
+
+        def write(self, record: object) -> None:
+            raise OSError(28, "No space left on device")
+
+        def close(self) -> None:
+            pass
+
+    def second_ctrl_c(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    ctx, pool, listener = _teardown_fixture(tmp_path)
+    progress = _non_tty_progress()
+    progress.update({"results_found": 1})
+    record = ResultRecord(source_path="/data/a.txt", handler="pan", matches={"visa": ["4111 11** **** 1111"]})
+    failed = GuardedSink(_FullDisk(), _POOL_LOG, progress)
+    healthy = GuardedSink(_ListSink(), _POOL_LOG, progress)
+    for sink in (failed, healthy):
+        sink.write(record)
+    monkeypatch.setattr(coord_mod, "stop_workers", second_ctrl_c)
+
+    try:
+        coord_mod._teardown(ctx, pool, listener, [failed, healthy], progress, _POOL_LOG, interrupted=True)
+    finally:
+        stop_listener(listener)
+
+    # The healthy sink took the record but was never closed, so nothing says it was saved.
+    assert progress.short_results_files == (str(tmp_path / "out.csv"), "in-memory")
+    rows = [text for _, text in progress.summary_lines(for_log=True)]
+    assert not any(row.startswith("Results files: all") for row in rows)
+    assert "        1  in-memory  (not saved: the scan was force-quit before the file was closed)" in rows
 
 
 @pytest.mark.integration

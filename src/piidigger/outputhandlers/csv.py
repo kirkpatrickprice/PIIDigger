@@ -20,6 +20,9 @@ class CsvSink:
     Each (match_type, value) pair in a ResultRecord becomes one row.
     Lineage fields are written even when null (on-disk files).
 
+    Text that is not valid UTF-8, such as a POSIX file name holding surrogate
+    escapes, is written with backslash escapes, so it cannot fail a write.
+
     I/O errors propagate as OSError; the caller decides how to report them.
     """
 
@@ -33,7 +36,7 @@ class CsvSink:
         return (self.path,)
 
     def open(self) -> None:
-        self._file = open(self.path, "w", newline="", encoding="utf-8")
+        self._file = open(self.path, "w", newline="", encoding="utf-8", errors="backslashreplace")
         try:
             self._writer = csv.DictWriter(self._file, fieldnames=_FIELDNAMES)
             self._writer.writeheader()

@@ -186,6 +186,37 @@ def test_run_scan_aborts_when_results_cannot_be_opened(tmp_path: Path, capsys: p
 
 
 @pytest.mark.integration
+@pytest.mark.skipif(os.name == "nt", reason="NTFS file names are UTF-16, so they cannot hold an invalid UTF-8 byte")
+def test_run_scan_writes_findings_from_a_non_utf8_file_name_to_every_results_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A file name that is not valid UTF-8 once stopped the CSV and text files for the rest of the run."""
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    try:
+        (scan_root / os.fsdecode(b"caf\xe9.txt")).write_text("card 4111111111111111")
+    except OSError, UnicodeEncodeError:
+        pytest.skip("this file system rejects file names that are not valid UTF-8")
+    (scan_root / "plain.txt").write_text("card 5555555555554444")
+    results_dir = tmp_path / "results"
+
+    rc = run_scan(
+        Config(
+            start_dirs=[scan_root],
+            log_file=tmp_path / "test.log",
+            results=ResultsConfig(path=results_dir, formats=["text", "csv", "json"]),
+        )
+    )
+
+    assert rc == EXIT_OK
+    assert "Results files: all 2 results written to every results file." in capsys.readouterr().out
+    for pattern in ("*.csv", "*.txt"):
+        text = next(results_dir.glob(pattern)).read_bytes().decode("utf-8")  # valid UTF-8 throughout
+        assert "caf\\udce9.txt" in text
+        assert "plain.txt" in text
+
+
+@pytest.mark.integration
 def test_run_scan_reports_incomplete_when_a_sink_fails_mid_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -215,7 +246,9 @@ def test_run_scan_reports_incomplete_when_a_sink_fails_mid_scan(
     assert rc == EXIT_INCOMPLETE
     log_text = _written_log(log_file).read_text()
     assert log_text.count("write failed, no further results written to it") == 1
-    assert "Results incomplete: TextSink" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Results files incomplete (3 results found)." in out
+    assert "(3 missing: stopped after an error: [Errno 28] No space left on device)" in out
     csv_rows = next(results_dir.glob("*.csv")).read_text().splitlines()
     assert len(csv_rows) == 1 + 3, "the healthy CSV sink still received every finding"
 

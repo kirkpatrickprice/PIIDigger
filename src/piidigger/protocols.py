@@ -65,8 +65,9 @@ class OutputSink(Protocol):
     Sinks never log.  open(), write() and close() let OSError propagate.
     run_scan treats a failed open() as fatal.  The coordinator wraps each sink
     in a GuardedSink, which logs a write or close failure once and stops
-    writing to that sink.  path names the file in those messages.  paths lists
-    every file the sink writes, so the scan can skip them.
+    writing to that sink, and counts what it received for the end-of-scan
+    check.  path names the file in those messages.  paths lists every file the
+    sink writes, so the scan can skip them.
     """
 
     path: Path

@@ -129,7 +129,12 @@ class DocxHandler:
                         yield content_buffer.get_content()
 
             try:
-                content_buffer.append_content(str(docx_content.core_properties))
+                # A missing docProps/core.xml is normal, as in files from Google
+                # Docs, and nothing is lost.  docx2python warns from inside our
+                # call, so the module filter above does not catch it.
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message="Could not find core-properties file")
+                    content_buffer.append_content(str(docx_content.core_properties))
             except Exception:  # noqa: BLE001
                 unread.append("document properties")
 

@@ -69,7 +69,8 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
     reported: set[str] = set()
 
     def failed(member: str, reason: str) -> None:
-        logger.error("error scanning archive member %s::%s: %s", payload.archive_path, member, reason)
+        # The coordinator's form for a failed task, so one search finds every error.
+        logger.error("[%s] path=%r: %s", task.task_type.value, f"{payload.archive_path}::{member}", reason)
         reported.add(member)
         reporter.item_done(member, [], {"files_not_scanned": 1, "tasks_failed": 1}, error_message=reason)
 
@@ -118,7 +119,7 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             logger.info("no extractable text in PDF %s::%s", payload.archive_path, member)
         if unread_reason is not None:
             # As in handle_scan_file: not fully scanned, but keep what was found.
-            logger.error("error scanning archive member %s::%s: %s", payload.archive_path, member, unread_reason)
+            logger.error("[%s] path=%r: %s", task.task_type.value, f"{payload.archive_path}::{member}", unread_reason)
             counters["tasks_failed"] = 1
         reporter.item_done(member, findings, counters, error_message=unread_reason)
 

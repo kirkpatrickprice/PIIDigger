@@ -99,6 +99,23 @@ class IncompleteWork:
         return self.failed + self.timed_out + self.abandoned + self.over_memory + self.unfinished
 
 
+@dataclass(frozen=True, slots=True)
+class ResultsFile:
+    """What one results file received, for the end-of-scan check against the results found.
+
+    * path: the file, as its sink names it.
+    * written: results that reached it, counted as result_counters() counts them.
+    * problem: why it is incomplete, as the summary words it, or None if it is complete.
+
+    A dataclass rather than a Pydantic model: GuardedSink counts every field
+    itself, in the coordinator process.
+    """
+
+    path: str
+    written: int
+    problem: str | None = None
+
+
 def _row(count: int, text: str) -> str:
     """One line of a summary block: the count in its own column, then what it counts."""
     return f"{count:>9,}  {text}"
@@ -185,8 +202,8 @@ class ProgressDisplay:
         self._unfinished: int = 0
         self._interrupted: bool = False
         self._workers_failed: bool = False
-        # Results files that stopped receiving findings, as (label, error).
-        self._output_failures: list[tuple[str, str]] = []
+        # What each results file received, known once the sinks are closed.
+        self._results_files: list[ResultsFile] = []
         self._scan_start: float = time.monotonic()
         # Set by the first summary_lines() call, so the log and the screen
         # report the same run time.
@@ -430,13 +447,20 @@ class ProgressDisplay:
         self._interrupted = interrupted
         self._workers_failed = workers_failed
 
-    def report_output_failure(self, label: str, error: str) -> None:
-        """Record a results file that stopped receiving findings, for the summary stop() prints.
+    def report_results_files(self, files: list[ResultsFile]) -> None:
+        """Record what each results file received, for the summary stop() prints.
 
-        Called by GuardedSink when it happens, which may be during teardown, so
-        it is not part of report_incomplete().
+        Called by the coordinator after it closes the sinks, so a file that
+        fails while closing is included.  That is during teardown, so it is not
+        part of report_incomplete().
         """
-        self._output_failures.append((label, error))
+        self._results_files = list(files)
+
+    @property
+    def short_results_files(self) -> tuple[str, ...]:
+        """Each results file that failed or did not receive every result found."""
+        total = self._counters["results_found"]
+        return tuple(f.path for f in self._results_files if f.problem is not None or f.written != total)
 
     @property
     def incomplete(self) -> IncompleteWork:
@@ -521,8 +545,11 @@ class ProgressDisplay:
         "Not fully scanned" block appears only for content that was not read and
         might hold PII, so a partial scan cannot be mistaken for a full one.  A
         "Skipped by design" block stays apart from it, so an unsupported type does
-        not read as a problem.  Then one line per results file that failed.  Rows
-        with a zero count are left out.
+        not read as a problem.  Rows with a zero count are left out.
+
+        Last comes the check of each results file against the results found.  When
+        every file received them all, that is one line.  Otherwise a "Results files
+        incomplete" block lists every file with its count and what it is missing.
 
         for_log leaves out the screen's "See the log for details." pointer and its
         blank lines, and adds the unsupported file types, which are too long a
@@ -564,13 +591,31 @@ class ProgressDisplay:
         block(logging.INFO, "Skipped by design:", self._skipped_by_design_rows())
         if for_log and (by_type := self._by_prefix(UNSUPPORTED_BY_TYPE)):
             lines.append((logging.INFO, f"Files of unsupported types, by type: {unsupported_tally_text(by_type)}"))
-        if self._output_failures and not for_log:
-            lines.append((logging.WARNING, ""))
-        lines.extend(
-            (logging.WARNING, f"Results incomplete: {label} stopped after an error ({error}).{see_log}")
-            for label, error in self._output_failures
-        )
+        found = self._counters["results_found"]
+        results = _plural(found, "result", "results")
+        if self.short_results_files:
+            title = f"Results files incomplete ({found:,} {results} found).{see_log}"
+            block(logging.WARNING, title, [self._results_file_row(f, found) for f in self._results_files])
+        elif found and self._results_files:
+            if not for_log:
+                lines.append((logging.INFO, ""))
+            lines.append((logging.INFO, f"Results files: all {found:,} {results} written to every results file."))
         return lines
+
+    @staticmethod
+    def _results_file_row(results_file: ResultsFile, found: int) -> str:
+        """One results file's count, and what it is missing, if anything."""
+        missing = found - results_file.written
+        if results_file.problem is not None:
+            shortfall = f"{missing:,} missing: " if missing > 0 else ""
+            note = f"  ({shortfall}{results_file.problem})"
+        elif missing > 0:
+            note = f"  ({missing:,} missing)"
+        elif missing < 0:
+            note = f"  ({-missing:,} more than found)"
+        else:
+            note = ""
+        return _row(results_file.written, f"{results_file.path}{note}")
 
     def stop(self, *, summary: bool = True) -> None:
         """Close the rich.Live display and print the summary_lines() to stdout.

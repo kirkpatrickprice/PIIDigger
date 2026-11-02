@@ -226,19 +226,27 @@ Stopping the log listener is itself bounded: `stop_listener(listener, timeout=5.
 `run_coordinator()` returns a `CoordinatorResult` (`interrupted`, `unfinished`, `workers_failed`, `sinks_failed`) that `run_scan()` maps to a process exit code: 
 
 * `EXIT_INTERRUPTED` (EXITCODE 130) if the user pressed Ctrl-C, 
-* `EXIT_INCOMPLETE` (EXITCODE 2) if any task was left outstanding, the pool ran out of workers, or a results file stopped receiving findings
+* `EXIT_INCOMPLETE` (EXITCODE 2) if any task was left outstanding, the pool ran out of workers, or a results file stopped receiving findings or received fewer results than were found
 * `EXIT_ABORTED` (EXITCODE 1) if the scan failed to start; e.g. Admin check was declined, or a results file could not be opened
 * `EXIT_OK` (EXITCODE 0). 
 
 ### Output sink failures
-Sinks never log; they raise `OSError`. `run_scan()` treats a failed `open()` as fatal. During the scan, `run_coordinator()` wraps each sink in a `GuardedSink` ([sinks.py](../../../src/piidigger/orchestration/sinks.py)). On a sink's first write or close failure, the guard does the following:
+Sinks never log; they raise `OSError`. `run_scan()` treats a failed `open()` as fatal. During the scan, `run_coordinator()` wraps each sink in a `GuardedSink` ([sinks.py](../../../src/piidigger/orchestration/sinks.py)). On a sink's first `OSError` from a write or close, the guard does the following:
 
 1. Logs the error once, through the coordinator logger.
 2. Shows it in the progress display's events panel.
 3. Stops writing to that sink. A full disk would otherwise log once per finding.
-4. Adds a "Results incomplete" line to the end-of-run summary and records the sink in `sinks_failed`.
 
 The other sinks keep receiving findings, and the scan carries on. `close()` is still called on a failed sink to release its file handle.
+
+A `ValueError` belongs to one record, not to the sink, so the guard writes that record again with every string backslash-escaped. Only a second failure stops the sink. The CSV and text sinks and the log file open with `errors="backslashreplace"`, so text UTF-8 cannot encode, such as a POSIX file name holding surrogate escapes, does not fail a write in the first place. The JSON sink escapes it already.
+
+Each guard counts the results its sink received. After closing the sinks, the coordinator hands those counts to the progress display. A second CTRL-C during teardown skips the close, and the counts are handed over anyway. A file that was never closed is then reported as not saved, because its buffered results never reached disk. The end-of-run summary checks each results file against the number of results found:
+
+- When every file received them all, it adds one line: `Results files: all N results written to every results file.`
+- Otherwise it adds a "Results files incomplete" block. The block lists every file with its count and what it is missing, and the file is recorded in `sinks_failed`.
+
+The count of results found comes from the workers' counters, which travel with the findings. So the check also catches a finding the coordinator could not deserialize and a sink that failed while closing.
 
 A per-file failure (an access-denied error, a single timeout) does not by itself change the exit code — only a run that could not really scan anything, or one interrupted mid-scan, does. A file read only in part follows the same rule, as do binary files and rejected archive members. A full-disk scan nearly always meets a locked file, so a non-zero exit code here would tell automation nothing. The summary reports them instead.
 

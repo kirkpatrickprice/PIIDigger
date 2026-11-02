@@ -3099,3 +3099,22 @@ def test_scan_archive_counts_a_pdf_member_with_no_text(tmp_path: Path, caplog: p
     assert done[-1].counters["files_scanned"] == 1
     assert "tasks_failed" not in done[-1].counters
     assert f"no extractable text in PDF {zp}::scan.pdf" in caplog.text
+
+
+@pytest.mark.unit
+def test_scan_archive_logs_a_member_error_in_the_coordinator_form(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every error line reads "[task_type] path=...: reason", so one search of the log finds them all."""
+    zp = tmp_path / "docs.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr("bad.docx", b"not a word document")
+
+    logger = logging.getLogger("tests.archives.member_error")
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+    with caplog.at_level(logging.ERROR, logger=logger.name):
+        handle_scan_archive_members(_scan_archive_task(zp, "bad.docx"), ctx, logger)
+
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert errors[0].startswith(f"[scan_archive_members] path={f'{zp}::bad.docx'!r}: ")
