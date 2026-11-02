@@ -307,6 +307,7 @@ def _laptop_run(monkeypatch: pytest.MonkeyPatch) -> ProgressDisplay:
             "bytes_scanned": 6_871_947_673,
             "tasks_failed": 41,
             "files_unreadable": 562,
+            "pdfs_no_text": 14,
             "bytes_not_scanned": 999,
             "archive_members_too_deep": 15_696,
             "archive_members_over_total": 3,
@@ -332,7 +333,8 @@ def test_summary_block_on_screen(monkeypatch: pytest.MonkeyPatch) -> None:
         "",
         "Not fully scanned. See the log for details.",
         "       51  files, folders or archive members: 41 errors, 10 over the memory limit",
-        "      562  files not read: content looks binary",
+        '      562  files not read: text encoding could not be detected (search the log for "text encoding")',
+        '       14  PDFs with no extractable text (search the log for "no extractable text")',
         "   15,703  archive members rejected: 15,696 too deep to reach, 3 over the archive's total size, "
         "2 over a member size or count limit, 1 unsafe, 1 repeated",
         "        5  archive members encrypted",
@@ -362,7 +364,10 @@ def test_summary_log_adds_the_types_and_leaves_out_the_screen_formatting(monkeyp
 def test_summary_levels_tell_a_problem_from_a_design_choice(monkeypatch: pytest.MonkeyPatch) -> None:
     levels = {text: level for level, text in _laptop_run(monkeypatch).summary_lines()}
 
-    assert levels["      562  files not read: content looks binary"] == logging.WARNING
+    assert (
+        levels['      562  files not read: text encoding could not be detected (search the log for "text encoding")']
+        == logging.WARNING
+    )
     assert levels["   13,787  archive members of unsupported types"] == logging.INFO
 
 
@@ -471,3 +476,28 @@ def test_config_panel_shows_a_path_literally() -> None:
         console.print(display._build_config_panel())
 
     assert "logs/:warning:/piidigger.log" in captured.get()
+
+
+@pytest.mark.unit
+def test_summary_end_of_scan_tally_lists_every_document_type_ahead_of_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    display = _non_tty(monkeypatch)
+    noise = {f"files_unsupported_by_type:.n{i:02d}": 1_000 + i for i in range(20)}
+    documents = {f"files_unsupported_by_type:{ext}": 5 for ext in (".doc", ".msg", ".ppt", ".pptx", ".rtf")}
+    display.update({**noise, **documents})
+
+    line = display.summary_lines(for_log=True)[-1][1]
+
+    tally = line.removeprefix("Files of unsupported types, by type: ")
+    assert tally.split(", ")[:5] == [f"{ext} ×5" for ext in (".doc", ".msg", ".ppt", ".pptx", ".rtf")]
+    assert tally.count("×") == 20, "all five documents, then the usual 15 others"
+    assert tally.endswith("and 5 more types")
+
+
+@pytest.mark.unit
+def test_summary_no_text_row_is_singular_for_one_pdf(monkeypatch: pytest.MonkeyPatch) -> None:
+    display = _non_tty(monkeypatch)
+    display.update({"pdfs_no_text": 1})
+
+    rows = [text for _, text in display.summary_lines()]
+
+    assert '        1  PDF with no extractable text (search the log for "no extractable text")' in rows

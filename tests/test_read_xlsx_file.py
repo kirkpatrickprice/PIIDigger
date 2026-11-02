@@ -1,3 +1,5 @@
+import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import openpyxl
@@ -187,3 +189,84 @@ def test_xlsx_without_an_excel_extension_is_read(tmp_path: Path) -> None:
     chunks = _read(path)
 
     assert any("4111111111111111" in chunk for chunk in chunks)
+
+
+@pytest.mark.filehandlers
+def test_xlsx_zero_bytes_is_not_reported(tmp_path: Path) -> None:
+    path = tmp_path / "zero.xlsx"
+    path.write_bytes(b"")
+    item = FilesystemItem(path)
+
+    assert list(XlsxHandler().read(item, Config())) == []
+    assert item.unread_reason is None
+    assert not item.nothing_read
+
+
+@pytest.mark.filehandlers
+def test_xlsx_not_a_workbook_is_reported_in_the_shared_wording(tmp_path: Path) -> None:
+    path = tmp_path / "bad.xlsx"
+    path.write_bytes(b"not a workbook 4111111111111111")
+    item = FilesystemItem(path)
+
+    assert list(XlsxHandler().read(item, Config())) == []
+    assert (item.unread_reason or "").startswith("Excel workbook could not be read: ")
+    assert "4111111111111111" not in (item.unread_reason or ""), "parser text can quote the file"
+    assert item.nothing_read
+
+
+def _rewrite_part(path: Path, part: str, rewrite: Callable[[bytes], bytes]) -> None:
+    copy = path.with_suffix(".tmp")
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(copy, "w") as target:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            target.writestr(info, rewrite(data) if info.filename == part else data)
+    copy.replace(path)
+
+
+@pytest.mark.filehandlers
+def test_xlsx_sheet_damaged_part_way_keeps_its_rows_and_the_other_sheets(tmp_path: Path) -> None:
+    path = tmp_path / "bad-sheet.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.append(["FIRSTSHEET"])
+    wb.create_sheet("Second").append(["SECONDSHEET"])
+    wb.create_sheet("Third").append(["THIRDSHEET"])
+    wb.save(path)
+    _rewrite_part(path, "xl/worksheets/sheet2.xml", lambda data: data.replace(b"</sheetData>", b"<broken"))
+    item = FilesystemItem(path)
+
+    content = " ".join(XlsxHandler().read(item, Config()))
+
+    assert "FIRSTSHEET" in content
+    assert "SECONDSHEET" in content, "rows read before the damage were still only buffered"
+    assert "THIRDSHEET" in content
+    assert (item.unread_reason or "").startswith("1 of 3 Excel sheets could not be read, first sheet 2: ")
+    assert not item.nothing_read
+
+
+@pytest.mark.filehandlers
+def test_xlsx_malformed_sheet_that_stops_the_load_is_reported(tmp_path: Path) -> None:
+    path = tmp_path / "bad-sheet.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.append(["FIRSTSHEET"])
+    wb.save(path)
+    _rewrite_part(path, "xl/worksheets/sheet1.xml", lambda _data: b"<worksheet><broken")
+    item = FilesystemItem(path)
+
+    assert list(XlsxHandler().read(item, Config())) == []
+    assert item.unread_reason == "Excel workbook could not be read: ParseError"
+    assert item.nothing_read
+
+
+@pytest.mark.filehandlers
+def test_xlsx_access_denied_still_reaches_the_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "locked.xlsx"
+    openpyxl.Workbook().save(path)
+    item = FilesystemItem(path)
+
+    def denied() -> None:
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(item, "open_stream", denied)
+
+    with pytest.raises(PermissionError):
+        list(XlsxHandler().read(item, Config()))

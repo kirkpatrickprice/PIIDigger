@@ -72,6 +72,10 @@ class DocxHandler:
     .rels file stops docx2python reading any part at all, and is reported the
     same way as a file that is not a real docx.  Only an empty file is silent,
     because it holds nothing to miss.
+
+    docx2python only warns when comment ranges and comments do not match, and
+    returns no comments, so that warning is raised here to be reported like any
+    other comment failure.  The filter is never held across a yield.
     """
 
     def read(self, source, config: Config) -> Iterator[str]:  # source: ScannableItem
@@ -108,7 +112,9 @@ class DocxHandler:
                 return
 
             try:
-                comments = docx_content.comments
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("error", message="comment_ranges and comment_elements")
+                    comments = docx_content.comments
             # Any failure here, from a comment with no w:date to a bad CRC or
             # malformed XML, is reported rather than costing the body text,
             # which may still only be buffered at this point.

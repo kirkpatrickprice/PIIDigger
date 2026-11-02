@@ -726,3 +726,120 @@ def test_pdf_collects_the_document_when_it_finishes(monkeypatch: pytest.MonkeyPa
         chunks.close()
 
     assert alive_after_collect[-1] is False
+
+
+def _pdf_of_blank_pages(tmp_path: Path, pages: int = 2) -> Path:
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(100, 100)
+    path = tmp_path / "scanned.pdf"
+    writer.write(path)
+    return path
+
+
+@pytest.mark.filehandlers
+def test_pdf_with_pages_but_no_text_is_reported_and_is_not_an_error(tmp_path: Path) -> None:
+    item = FilesystemItem(_pdf_of_blank_pages(tmp_path))
+
+    list(PdfHandler().read(item, Config()))
+
+    assert item.no_text
+    assert item.unread_reason is None
+    assert not item.nothing_read
+
+
+@pytest.mark.filehandlers
+def test_pdf_metadata_alone_does_not_count_as_page_text(tmp_path: Path) -> None:
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+    writer.add_metadata({"/Title": "A scanned form"})
+    path = tmp_path / "titled.pdf"
+    writer.write(path)
+    item = FilesystemItem(path)
+
+    content = " ".join(PdfHandler().read(item, Config()))
+
+    assert "A scanned form" in content
+    assert item.no_text
+
+
+@pytest.mark.filehandlers
+def test_pdf_with_text_is_not_reported_as_having_none() -> None:
+    item = FilesystemItem(Path("testdata/pdf/lorem-ipsum.pdf"))
+
+    assert " ".join(PdfHandler().read(item, Config())).strip()
+    assert not item.no_text
+
+
+@pytest.mark.filehandlers
+def test_pdf_with_every_page_failing_is_an_error_not_no_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pypdf import PageObject
+
+    def fail(*_a: object, **_k: object) -> str:
+        raise ValueError("bad page")
+
+    monkeypatch.setattr(PageObject, "extract_text", fail)
+    item = FilesystemItem(_pdf_of_blank_pages(tmp_path))
+
+    list(PdfHandler().read(item, Config()))
+
+    assert not item.no_text
+    assert item.nothing_read
+
+
+@pytest.mark.filehandlers
+def test_pdf_zero_bytes_is_not_reported_as_having_no_text() -> None:
+    item = FilesystemItem(Path("testdata/pdf/mislabled-pdf-file.pdf"))
+
+    list(PdfHandler().read(item, Config()))
+
+    assert not item.no_text
+
+
+@pytest.mark.filehandlers
+def test_pdf_with_a_blank_page_and_a_failed_page_is_an_error_not_no_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pypdf import PageObject
+
+    calls = iter(["", ValueError("bad page")])
+
+    def extract(*_a: object, **_k: object) -> str:
+        result = next(calls)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(PageObject, "extract_text", extract)
+    item = FilesystemItem(_pdf_of_blank_pages(tmp_path))
+
+    list(PdfHandler().read(item, Config()))
+
+    assert not item.no_text
+    assert (item.unread_reason or "").startswith("1 of 2 PDF pages could not be read")
+
+
+@pytest.mark.filehandlers
+def test_pdf_stopping_after_a_blank_page_is_an_error_not_no_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pypdf._page import _VirtualList
+
+    real_iter = _VirtualList.__iter__
+
+    def stops_after_first(self: _VirtualList) -> object:
+        pages = real_iter(self)
+        yield next(pages)
+        raise ValueError("bad page tree")
+
+    monkeypatch.setattr(_VirtualList, "__iter__", stops_after_first)
+    item = FilesystemItem(_pdf_of_blank_pages(tmp_path))
+
+    list(PdfHandler().read(item, Config()))
+
+    assert not item.no_text
+    assert (item.unread_reason or "").startswith("PDF could not be read after page 1")

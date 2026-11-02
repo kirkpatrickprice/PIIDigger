@@ -244,10 +244,10 @@ A per-file failure (an access-denied error, a single timeout) does not by itself
 
 The progress display's end-of-run summary has one fact per line. Its first lines give the run time, the results per data handler, and what was scanned. Its heading reads `Scan interrupted` or `Scan stopped early` instead of `Scan complete` when appropriate, so a truncated run is never described the same way as a full one. Two blocks follow, each only when it has a row and with zero rows left out:
 
-- **Not fully scanned** lists content that was not read and might hold PII: failures, timeouts, crashes, memory kills, unfinished work, binary-looking files, rejected and encrypted archive members, and nested archives.
-- **Skipped by design** lists files and archive members of types PIIDigger has no reader for, or was told to leave out. The log also gets the unsupported file types, largest first.
+- **Not fully scanned** lists content that was not read and might hold PII: failures, timeouts, crashes, memory kills, unfinished work, files whose text encoding could not be detected, PDFs with no extractable text, rejected and encrypted archive members, and nested archives.
+- **Skipped by design** lists files and archive members of types PIIDigger has no reader for, or was told to leave out. The log also gets the unsupported file types: common document types first, then up to 15 others, largest first.
 
-A `*_scanned` counter means the content was read. Work finished without being read has counters of its own (`files_unreadable`, `files_not_scanned`, `archives_opened`, `dirs_not_scanned`, `bytes_not_scanned`), so the "Scanned" row stays truthful. The progress bars add them all up, so they still reach their totals. [orchestration/counters.py](../../../src/piidigger/orchestration/counters.py) holds the shared names.
+A `*_scanned` counter means the content was read. Work finished without being read has counters of its own (`files_unreadable`, `files_not_scanned`, `archives_opened`, `dirs_not_scanned`, `bytes_not_scanned`), so the "Scanned" row stays truthful. The progress bars add them all up, so they still reach their totals. `pdfs_no_text` is different: it marks a PDF already counted in `files_scanned`, because the PDF was read and held no text, so the progress bars leave it out. [orchestration/counters.py](../../../src/piidigger/orchestration/counters.py) holds the shared names.
 
 ## Protocols
 

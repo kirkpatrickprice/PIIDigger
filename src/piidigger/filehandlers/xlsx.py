@@ -46,59 +46,88 @@ class XlsxHandler:
     extension, so a workbook MIME detection found under another name would
     never be read.  read_only reads lazily, so the stream stays open until the
     book is closed.
+
+    A workbook or sheet that cannot be read goes to source.report_unread(), naming
+    only the exception type because parser messages can quote the file.  A sheet
+    that fails while its rows are read keeps those rows and the other sheets, but
+    one that stops load_workbook costs the whole workbook.  An OSError still reaches
+    the worker, and only an empty file is silent, because it holds nothing to miss.
     """
 
     def read(self, source, config: Config) -> Iterator[str]:  # source: ScannableItem
-        data = source.open_bytes()
         stream = None
-        if data is not None:
-            book = openpyxl.load_workbook(filename=BytesIO(data), read_only=False, data_only=True)
-        else:
-            stream = source.open_stream()
-            try:
-                book = openpyxl.load_workbook(filename=stream, read_only=True, data_only=True)
-            except BaseException:
-                stream.close()
-                raise
+        try:
+            data = source.open_bytes()
+            if data is not None:
+                book = openpyxl.load_workbook(filename=BytesIO(data), read_only=False, data_only=True)
+            else:
+                stream = source.open_stream()
+                try:
+                    book = openpyxl.load_workbook(filename=stream, read_only=True, data_only=True)
+                except BaseException:
+                    stream.close()
+                    raise
+        except OSError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if source.size:
+                source.report_unread(f"Excel workbook could not be read: {type(exc).__name__}", nothing_read=True)
+            return
         try:
             # worksheets, not sheetnames: a chart sheet has no cells to read.
-            for active_sheet in book.worksheets:
+            sheets = book.worksheets
+            sheets_unread = 0
+            first_unread = ""
+            text_read = False
+            for sheet_number, active_sheet in enumerate(sheets, start=1):
                 content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
                 blank_row_count = 0
                 row_count = 0
 
-                for row in active_sheet.iter_rows(values_only=True):
-                    row_count += 1
-                    row_has_data = False
-                    line = ""
-                    blank_col_count = 0
+                try:
+                    for row in active_sheet.iter_rows(values_only=True):
+                        row_count += 1
+                        row_has_data = False
+                        line = ""
+                        blank_col_count = 0
 
-                    for item in row:
-                        if isinstance(item, MergedCell):
-                            continue
-                        if item is None or item == "":
-                            blank_col_count += 1
-                            if blank_col_count > config.spreadsheet.blank_col_limit:
+                        for item in row:
+                            if isinstance(item, MergedCell):
+                                continue
+                            if item is None or item == "":
+                                blank_col_count += 1
+                                if blank_col_count > config.spreadsheet.blank_col_limit:
+                                    break
+                                continue
+                            blank_col_count = 0  # the limit is on consecutive blanks
+                            line += str(item) + " "
+                            row_has_data = True
+
+                        text_read = text_read or row_has_data
+                        content_buffer.append_content(line)
+                        if row_has_data:
+                            blank_row_count = 0
+                        else:
+                            blank_row_count += 1
+                            if blank_row_count > config.spreadsheet.blank_row_limit:
                                 break
-                            continue
-                        blank_col_count = 0  # the limit is on consecutive blanks
-                        line += str(item) + " "
-                        row_has_data = True
 
-                    content_buffer.append_content(line)
-                    if row_has_data:
-                        blank_row_count = 0
-                    else:
-                        blank_row_count += 1
-                        if blank_row_count > config.spreadsheet.blank_row_limit:
-                            break
-
-                    if content_buffer.content_buffer_full():
-                        yield content_buffer.get_content()
+                        if content_buffer.content_buffer_full():
+                            yield content_buffer.get_content()
+                except OSError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    sheets_unread += 1
+                    first_unread = first_unread or f"sheet {sheet_number:,}: {type(exc).__name__}"
 
                 final = content_buffer.finalize_content()
                 if final:
                     yield final
+            if sheets_unread:
+                source.report_unread(
+                    f"{sheets_unread:,} of {len(sheets):,} Excel sheets could not be read, first {first_unread}",
+                    nothing_read=sheets_unread == len(sheets) and not text_read,
+                )
         finally:
             book.close()
             if stream is not None:

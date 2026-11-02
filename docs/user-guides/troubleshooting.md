@@ -84,6 +84,33 @@ Very complex pages also take longer. If the log then shows the file timing out, 
 
 If you want the details, including the measurements behind the limits, see [PDF Memory Limits](../architecture/filehandlers/pdf-memory-limits.md).
 
+### The summary says archive members were rejected
+
+**Symptoms:** The end-of-scan summary has a row like `20,571  archive members rejected: 20,571 over a member size or count limit`.
+
+**Find it:** Search the log for `member(s) not scanned`. Each archive and limit gets its own WARNING line, which names the archive, the setting and a few example members:
+
+```text
+archive /backups/home.tar.gz: 20571 member(s) not scanned: max_members (10,000) reached ('home/a.yml', 'home/b.yml', 'home/c.yml' and 20,568 more)
+```
+
+**Explanation:** These limits protect the scan from hostile archives and control how long a large archive takes. PIIDigger checks an archive's members in the order they are stored, so third-party files stored early can use up a limit before your own files are reached.
+
+| Summary wording | Setting named in the log line |
+|---|---|
+| `over a member size or count limit` | `max_members` or `max_member_uncompressed_size_mb` |
+| `over the archive's total size` | `max_total_uncompressed_size_mb` |
+| `too deep to reach` | `max_decompress_depth_mb` |
+
+**Solutions:** Raise the setting in the `[archives]` section of a [custom config](advanced-configuration.md) for a run against that archive. For `max_members`, go above the members scanned plus those rejected. In a 10,000-member scan with 20,571 rejected, that means more than 30,571:
+
+```toml
+[archives]
+max_members = 31000
+```
+
+Expect a longer run. Another limit may apply once this one is out of the way, and the log names it in the same way. Only raise these limits for archives you trust. The `unsafe` wording means path traversal or a likely archive bomb, and no setting changes those checks.
+
 ### A scan appears hung
 
 **Symptoms:** No progress-bar movement for a long time, and the log file shows nothing new.

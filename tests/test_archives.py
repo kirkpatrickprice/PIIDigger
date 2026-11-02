@@ -2546,6 +2546,26 @@ def test_enum_archive_type_line_lists_the_top_types_only(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("metadata", "original"),
+    [("./._a.txt", "a.txt"), ("._a.txt", "./a.txt"), ("./._a.txt", "./a.txt"), ("./docs/._a.txt", "docs/a.txt")],
+)
+def test_enum_archive_ignores_macos_metadata_with_a_leading_dot_slash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, metadata: str, original: str
+) -> None:
+    result = _enum_listed(monkeypatch, tmp_path, [_member(metadata), _member(original)], _logger(), {})
+
+    assert _member_paths(result) == [original]
+
+
+@pytest.mark.unit
+def test_enum_archive_scans_a_dot_slash_name_with_no_original(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    result = _enum_listed(monkeypatch, tmp_path, [_member("./._ledger.csv")], _logger(), {})
+
+    assert _member_paths(result) == ["./._ledger.csv"]
+
+
+@pytest.mark.unit
 def test_enum_archive_logs_each_skip_reason_once_per_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -3052,3 +3072,30 @@ def test_scan_member_reports_progress_while_reading(tmp_path: Path) -> None:
     _scan_member("m.pdf", path, payload, Config(start_dirs=[]), [], lambda: calls.append(1))
 
     assert calls, "on_progress was never called"
+
+
+@pytest.mark.unit
+def test_scan_archive_counts_a_pdf_member_with_no_text(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    from io import BytesIO
+
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+    pdf = BytesIO()
+    writer.write(pdf)
+    zp = tmp_path / "scans.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr("scan.pdf", pdf.getvalue())
+
+    logger = logging.getLogger("tests.archives.no_text")
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = handle_scan_archive_members(_scan_archive_task(zp, "scan.pdf"), ctx, logger)
+    done = [m for m in _drain(ctx) if isinstance(m, TaskProgress) and m.item == "scan.pdf"]
+
+    assert result.status == "ok"
+    assert done[-1].counters["pdfs_no_text"] == 1
+    assert done[-1].counters["files_scanned"] == 1
+    assert "tasks_failed" not in done[-1].counters
+    assert f"no extractable text in PDF {zp}::scan.pdf" in caplog.text

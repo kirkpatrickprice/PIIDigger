@@ -171,7 +171,9 @@ class PdfHandler:
     Anything that could not be read goes to source.report_unread(): skipped
     pages, metadata, a locked or damaged document, a file that only claims to be
     a PDF.  So it keeps its findings without looking fully scanned.  Only an
-    empty file is silent, because it holds nothing to miss.
+    empty file is silent, because it holds nothing to miss.  Pages that read
+    without error but hold no text, as in a scanned document, go to
+    source.report_no_text().
     """
 
     def read(self, source, config: Config) -> Iterator[str]:  # source: ScannableItem
@@ -181,6 +183,7 @@ class PdfHandler:
         pages_unread = 0
         first_unread = ""
         text_read = False
+        text_found = False
         token_limit = _parsing_limit(config.max_worker_memory_mb, _MB_PER_MILLION_TOKENS)
         xref_limit = _parsing_limit(config.max_worker_memory_mb, _MB_PER_MILLION_XREF_ENTRIES)
         try:
@@ -207,6 +210,7 @@ class PdfHandler:
                         # page break; pypdf stuck inside one page reports nothing.
                         source.report_progress()
                     text_read = True
+                    text_found = text_found or bool(page_content.strip())
                     for line in page_content.split("\n"):
                         content_buffer.append_content(line)
                         if content_buffer.content_buffer_full():
@@ -219,6 +223,10 @@ class PdfHandler:
                         yield content_buffer.get_content()
                 if metadata_unread:
                     source.report_unread("PDF metadata could not be fully read")
+                # Here only when the whole document was opened.  A page that could
+                # not be read may hold text, so that case is an error alone.
+                if pages_seen and not pages_unread and not text_found:
+                    source.report_no_text()
 
             # All of these fall through: any text read before the failure is
             # still scanned.

@@ -108,6 +108,19 @@ def test_other_platforms_log_why_wakepy_failed(
     assert "wakepy inline" in caplog.text
 
 
+def test_wakepy_failure_is_only_a_diagnostic_once_logind_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    lock_fd = os.open(tmp_path / "lock", os.O_CREAT | os.O_RDWR)
+    _set_wakepy(monkeypatch, active=False)
+    monkeypatch.setattr(sleep_mod, "_take_logind_lock", lambda: lock_fd)
+    monkeypatch.setattr(sleep_mod.sys, "platform", "linux")
+
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER.name), prevent_sleep(_LOGGER) as status:
+        assert status is SleepStatus.ACTIVE_LOGIND
+    assert [r.levelno for r in caplog.records if "wakepy inline" in r.getMessage()] == [logging.DEBUG]
+
+
 def test_a_scan_failure_is_not_mistaken_for_a_failed_lock(monkeypatch: pytest.MonkeyPatch) -> None:
     def no_bus() -> int:
         raise FileNotFoundError("no system bus socket")

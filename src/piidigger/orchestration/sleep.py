@@ -26,6 +26,8 @@ from wakepy import keep
 # whole attempt too: jeepney's opening Hello call takes no timeout.
 _LOGIND_REPLY_TIMEOUT_SECONDS: float = 5.0
 
+_WAKEPY_FAILURE: str = "sleep prevention: wakepy not active: %s"
+
 
 class SleepStatus(StrEnum):
     """What the startup summary reports; the value is the text shown."""
@@ -117,22 +119,28 @@ def prevent_sleep(logger: logging.Logger) -> Iterator[SleepStatus]:
             yield SleepStatus.ACTIVE
             return
         # wakepy logs this itself, but below the level library logs are routed at.
-        logger.info("sleep prevention: wakepy not active: %s", wake_mode.result.get_failure_text(style="inline"))
+        wakepy_failure = wake_mode.result.get_failure_text(style="inline")
         if sys.platform != "linux":
+            logger.info(_WAKEPY_FAILURE, wakepy_failure)
             yield SleepStatus.UNAVAILABLE
             return
 
         # Broad on purpose: no bus, a refusal, a timeout and an unexpected
         # reply all mean the same thing here.
         lock_fd: int | None = None
+        lock_error: Exception | None = None
         try:
             lock_fd = _take_logind_lock_bounded()
         except Exception as exc:
-            logger.info("sleep prevention: logind lock not available: %r", exc)
+            lock_error = exc
         # Outside the except, so a scan failure is not chained to the bus error.
         if lock_fd is None:
+            logger.info(_WAKEPY_FAILURE, wakepy_failure)
+            logger.info("sleep prevention: logind lock not available: %r", lock_error)
             yield SleepStatus.UNAVAILABLE_LINUX
             return
+        # The fallback worked, so wakepy's long failure text is only a diagnostic.
+        logger.debug(_WAKEPY_FAILURE, wakepy_failure)
         try:
             yield SleepStatus.ACTIVE_LOGIND
         finally:

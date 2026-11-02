@@ -112,3 +112,66 @@ def test_xls_blank_col_limit_counts_consecutive_blanks_only(tmp_path: Path, monk
     content = " ".join(_read(path, Config(spreadsheet=SpreadsheetConfig(blank_col_limit=2))))
 
     assert content.split() == ["A", "B", "C", "4111111111111111"]
+
+
+@pytest.mark.filehandlers
+def test_xls_zero_bytes_is_not_reported(tmp_path: Path) -> None:
+    path = tmp_path / "zero.xls"
+    path.write_bytes(b"")
+    item = FilesystemItem(path)
+
+    assert list(XlsHandler().read(item, Config())) == []
+    assert item.unread_reason is None
+    assert not item.nothing_read
+
+
+@pytest.mark.filehandlers
+def test_xls_not_a_workbook_is_reported_in_the_shared_wording(tmp_path: Path) -> None:
+    path = tmp_path / "bad.xls"
+    path.write_bytes(b"not a workbook 4111111111111111")
+    item = FilesystemItem(path)
+
+    assert list(XlsHandler().read(item, Config())) == []
+    assert (item.unread_reason or "").startswith("Excel workbook could not be read: ")
+    assert "4111111111111111" not in (item.unread_reason or ""), "parser text can quote the file"
+    assert item.nothing_read
+
+
+class _BookWithABadSheet(_FakeBook):
+    def __init__(self) -> None:
+        super().__init__(_FakeSheet([["KEPT"]]))
+
+    def sheet_names(self) -> list[str]:
+        return ["Bad", "Good"]
+
+    def sheet_by_name(self, name: str) -> _FakeSheet:
+        if name == "Bad":
+            raise xls_mod.xlrd.XLRDError("damaged")
+        return self._sheet
+
+
+@pytest.mark.filehandlers
+def test_xls_bad_sheet_keeps_the_other_sheets_and_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(xls_mod.xlrd, "open_workbook", lambda *_a, **_k: _BookWithABadSheet())
+    path = tmp_path / "fake.xls"
+    path.write_bytes(b"x")
+    item = FilesystemItem(path)
+
+    assert list(XlsHandler().read(item, Config())) == ["KEPT"]
+    assert item.unread_reason == "1 of 2 Excel sheets could not be read, first sheet 1: XLRDError"
+    assert not item.nothing_read
+
+
+@pytest.mark.filehandlers
+def test_xls_password_protected_is_named_as_such(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def encrypted(*_a: object, **_k: object) -> None:
+        raise xls_mod.xlrd.XLRDError("Workbook is encrypted")
+
+    monkeypatch.setattr(xls_mod.xlrd, "open_workbook", encrypted)
+    path = tmp_path / "locked.xls"
+    path.write_bytes(b"x")
+    item = FilesystemItem(path)
+
+    assert list(XlsHandler().read(item, Config())) == []
+    assert item.unread_reason == "Excel workbook is password protected"
+    assert item.nothing_read

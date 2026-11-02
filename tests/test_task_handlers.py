@@ -1175,3 +1175,26 @@ def test_enum_dir_follows_a_junction_to_a_folder_above_the_start_dir(
     result = handle_enum_dir(_enum_dir_task(docs), _make_ctx(tmp_path, start_dirs=[docs]), _logger())
 
     assert _names(result) == ["up"]
+
+
+@pytest.mark.unit
+def test_scan_file_counts_a_pdf_with_no_text_without_failing_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+    path = tmp_path / "scan.pdf"
+    writer.write(path)
+    logger = logging.getLogger("tests.scan_file.no_text")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = handle_scan_file(_scan_file_task(path, ext=".pdf"), _make_ctx(tmp_path), logger)
+
+    assert result.status == "ok"
+    assert result.counters["pdfs_no_text"] == 1
+    assert result.counters["files_scanned"] == 1
+    assert f"no extractable text in PDF {path}" in caplog.text

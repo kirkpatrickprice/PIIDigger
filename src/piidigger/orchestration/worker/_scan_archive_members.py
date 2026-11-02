@@ -114,6 +114,8 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             return
         discard(member, path)
         reported.add(member)
+        if counters.get("pdfs_no_text"):
+            logger.info("no extractable text in PDF %s::%s", payload.archive_path, member)
         if unread_reason is not None:
             # As in handle_scan_file: not fully scanned, but keep what was found.
             logger.error("error scanning archive member %s::%s: %s", payload.archive_path, member, unread_reason)
@@ -199,4 +201,6 @@ def _scan_member(
     ]
     read_counters = {"files_not_scanned": 1} if item.nothing_read else {"files_scanned": 1, "bytes_scanned": size}
     counters = {**read_counters, **result_counters(findings)}
+    if item.no_text:
+        counters["pdfs_no_text"] = 1
     return findings, counters, item.unread_reason

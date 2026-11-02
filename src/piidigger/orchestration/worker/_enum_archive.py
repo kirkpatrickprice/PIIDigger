@@ -67,11 +67,17 @@ class _SkipTally:
         )
 
 
+def _comparable_name(name: str) -> str:
+    """A member name in the form macOS metadata and its original are compared in."""
+    return name.replace("\\", "/").removeprefix("./")
+
+
 def _is_macos_metadata(parts: list[str], names: set[str]) -> bool:
     """Return True only for the shapes macOS writes, so a user's file with a similar name is still scanned.
 
     parts is the member's name split into path components; names is every member
-    name in the archive, with backslashes normalised.
+    name in the archive.  Both come from _comparable_name(), since "tar -C dir ."
+    stores "./a" and some tools store "a", and an archive may hold one of each.
     """
     if not parts[-1].startswith(_APPLEDOUBLE_PREFIX):
         return False
@@ -243,7 +249,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
     )
     tallies = [traversal, macos, nested, repeated, encrypted, oversize, bomb, too_deep, over_total, over_count]
 
-    member_names = {member.name.replace("\\", "/") for member in member_list}
+    member_names = {_comparable_name(member.name) for member in member_list}
 
     for member in member_list:
         member_name = member.name
@@ -266,7 +272,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
 
         # 2. macOS metadata.  After the traversal check, so a hostile name
         # cannot hide behind this folder name.
-        if _is_macos_metadata(parts, member_names):
+        if _is_macos_metadata(_comparable_name(member_name).split("/"), member_names):
             macos.add(member_name)
             continue
 

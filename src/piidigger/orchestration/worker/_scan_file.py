@@ -99,6 +99,9 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
         read_counters = {"files_not_scanned": 1, "bytes_not_scanned": payload.size}
     else:
         read_counters = {"files_scanned": 1, "bytes_scanned": payload.size}
+    if item.no_text:
+        logger.info("no extractable text in PDF %s", payload.display_path)
+        read_counters["pdfs_no_text"] = 1
     return TaskResult(
         task_id=task.task_id,
         task_type=task.task_type,

@@ -1,4 +1,5 @@
 import re
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -381,3 +382,38 @@ def test_docx_with_a_bad_footnote_still_read_text(tmp_path: Path) -> None:
 
     assert item.unread_reason
     assert not item.nothing_read
+
+
+@pytest.mark.filehandlers
+def test_docx_comment_range_mismatch_is_reported_and_keeps_the_body(tmp_path: Path) -> None:
+    """docx2python warns and returns no comments, which used to look fully read."""
+    path = _docx_with_rewritten_parts(
+        tmp_path,
+        {
+            "word/comments.xml": (rb"</w:comments>", b'<w:comment w:id="99"/></w:comments>'),
+        },
+    )
+    item = FilesystemItem(path)
+
+    content = " ".join(DocxHandler().read(item, Config()))
+
+    assert "Lorem ipsum" in content
+    assert item.unread_reason == "Word comments could not be read"
+    assert not item.nothing_read
+
+
+@pytest.mark.filehandlers
+def test_docx_other_warnings_are_not_turned_into_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from docx2python.docx_output import DocxContent
+
+    def warns(_self: object) -> list[tuple[str, str, str, str]]:
+        warnings.warn("something else", UserWarning, stacklevel=2)
+        return []
+
+    monkeypatch.setattr(DocxContent, "comments", property(warns))
+    item = FilesystemItem(Path("testdata/docx/lorem-ipsum-1line-comments.docx"))
+
+    with pytest.warns(UserWarning, match="something else"):
+        list(DocxHandler().read(item, Config()))
+
+    assert item.unread_reason is None

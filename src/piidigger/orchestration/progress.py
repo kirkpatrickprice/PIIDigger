@@ -20,7 +20,7 @@ from piidigger.orchestration.counters import (
     FILES_DONE,
     RESULTS_BY_HANDLER,
     UNSUPPORTED_BY_TYPE,
-    type_tally_text,
+    unsupported_tally_text,
 )
 
 # Counter keys accumulated into self._counters (display values only).
@@ -482,7 +482,16 @@ class ProgressDisplay:
             rows.append(incomplete)
         count = self._counters.get
         if unreadable := count("files_unreadable", 0):
-            rows.append(_row(unreadable, f"{_plural(unreadable, 'file', 'files')} not read: content looks binary"))
+            noun = _plural(unreadable, "file", "files")
+            rows.append(
+                _row(
+                    unreadable,
+                    f'{noun} not read: text encoding could not be detected (search the log for "text encoding")',
+                )
+            )
+        if no_text := count("pdfs_no_text", 0):
+            noun = _plural(no_text, "PDF", "PDFs")
+            rows.append(_row(no_text, f'{noun} with no extractable text (search the log for "no extractable text")'))
         rejected = [(count(key, 0), words) for key, words in _REJECTED_MEMBERS]
         if total := sum(n for n, _ in rejected):
             detail = ", ".join(f"{n:,} {words}" for n, words in rejected if n)
@@ -554,7 +563,7 @@ class ProgressDisplay:
         block(logging.WARNING, f"Not fully scanned.{see_log}", self._not_fully_scanned_rows())
         block(logging.INFO, "Skipped by design:", self._skipped_by_design_rows())
         if for_log and (by_type := self._by_prefix(UNSUPPORTED_BY_TYPE)):
-            lines.append((logging.INFO, f"Files of unsupported types, by type: {type_tally_text(by_type)}"))
+            lines.append((logging.INFO, f"Files of unsupported types, by type: {unsupported_tally_text(by_type)}"))
         if self._output_failures and not for_log:
             lines.append((logging.WARNING, ""))
         lines.extend(

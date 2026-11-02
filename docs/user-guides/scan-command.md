@@ -109,7 +109,8 @@ Scan complete in 0:41:13. Found 108,108 results: 60,735 pan, 47,373 email.
 
 Not fully scanned. See the log for details: logs/piidigger-20261031-153257.log
        51  files, folders or archive members: 41 errors, 10 over the memory limit
-      562  files not read: content looks binary
+      562  files not read: text encoding could not be detected (search the log for "text encoding")
+       14  PDFs with no extractable text (search the log for "no extractable text")
        16  archive members rejected: 12 too deep to reach, 3 over the archive's total size, 1 unsafe
         5  archive members encrypted
         7  nested archives not opened
@@ -122,12 +123,12 @@ Skipped by design:
 Rows with nothing to report are left out, so a clean run is just the first two lines.
 
 - **Scanned** counts only what was actually read.
-- **Not fully scanned** lists content that might hold PII but wasn't read. A file with an error may still have been partly read, and anything found in the part that was read stays in your results.
+- **Not fully scanned** lists content that might hold PII but wasn't read. A file with an error may still have been partly read, and anything found in the part that was read stays in your results. A PDF with no extractable text opened without error but held no text, usually because its pages are scanned images. PIIDigger doesn't read text from images, so it counts these under "Scanned" and lists them here too. If this section lists rejected archive members, see [The summary says archive members were rejected](troubleshooting.md#the-summary-says-archive-members-were-rejected).
 - **Skipped by design** lists file types PIIDigger has no reader for, or that `include_exts` left out. It isn't a problem unless you expected those types to be scanned.
 
 A scan with rows under "Not fully scanned" still exits with code 0, as long as it ran to the end. A full-disk scan nearly always meets a locked file, so the exit code wouldn't tell you much. Check the summary or the log when you need to know what was missed.
 
-The same summary is written to the end of the log file. The log also lists the unsupported file types, largest first. The totals, and anything skipped by design, are logged at INFO. Everything under "Not fully scanned", and any results file that stopped after an error, is logged at WARNING.
+The same summary is written to the end of the log file. The log also lists the unsupported file types: common document types such as `.doc` and `.pptx` first, then up to 15 others, largest first. The totals, and anything skipped by design, are logged at INFO. Everything under "Not fully scanned", and any results file that stopped after an error, is logged at WARNING. The per-file lines for undetected text encodings and PDFs with no extractable text are logged at INFO, so with `log_level = "WARNING"` the summary counts them but the log doesn't name them.
 
 PIIDigger leaves a few things out of the counts altogether, because they hold no content of their own: symlinks, and the `$I` metadata files in a Windows Recycle Bin. The deleted files themselves are scanned. A Windows junction such as `Application Data` that refuses access isn't reported as a failure when its target is inside the folders being scanned, because the target is scanned under its real name. Any other folder that refuses access, including a folder-mounted volume, is reported. A junction that can be read is scanned like any other folder, even when it leads outside your start directories, so its contents may appear twice in your results. A junction pointing back at a folder the scan came through is skipped, which stops loops. Many folders that all link to each other can still be listed many times over, and findings repeat with each listing.
 

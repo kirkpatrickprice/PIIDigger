@@ -47,6 +47,11 @@ class ScannableItem(Protocol):
     # counted as scanned.
     def report_unread(self, reason: str, *, nothing_read: bool = False) -> None: ...
 
+    # A file handler calls this when it read a document without error and found
+    # no text, as with a scanned PDF.  It is not an error, but the document may
+    # still hold PII, so the scan summary counts it.
+    def report_no_text(self) -> None: ...
+
 
 @runtime_checkable
 class FileHandler(Protocol):

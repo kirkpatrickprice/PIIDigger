@@ -32,6 +32,8 @@ class FilesystemItem:
     to read back from unread_reason once the handler has finished.  A file can
     have several reasons; unread_reason gives them all.  nothing_read says the
     handler could read none of it, so the worker does not count it as scanned.
+    report_no_text() records a document read without error that held no text, for
+    the worker to read back from no_text.
     """
 
     def __init__(
@@ -50,6 +52,7 @@ class FilesystemItem:
         self._on_progress = on_progress
         self._unread_reasons: list[str] = []
         self._nothing_read = False
+        self._no_text = False
 
     @property
     def display_path(self) -> str:
@@ -96,6 +99,9 @@ class FilesystemItem:
         self._unread_reasons.append(reason)
         self._nothing_read = self._nothing_read or nothing_read
 
+    def report_no_text(self) -> None:
+        self._no_text = True
+
     @property
     def unread_reason(self) -> str | None:
         return "; ".join(self._unread_reasons) or None
@@ -103,3 +109,7 @@ class FilesystemItem:
     @property
     def nothing_read(self) -> bool:
         return self._nothing_read
+
+    @property
+    def no_text(self) -> bool:
+        return self._no_text
