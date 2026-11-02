@@ -38,11 +38,11 @@ Known gaps we chose not to fix yet. Each entry says what is wrong, why it was de
 - **Where:** `filehandlers/docx.py`, `filehandlers/xls.py`.
 - **Suggested fix:** docx could read through `source.open_stream()`. `docx2python` calls `zipfile.ZipFile()` on whatever it's given, despite its `BytesIO` type hint, so the decompression reads would count. The lxml parse that follows would still be silent. xlrd loads the whole file before parsing, so a read signal cannot help it; only yielding per sheet or per row block would.
 
-### A slow directory listing is abandoned with its whole subtree
-- **What:** `ENUM_DIR` never sends `TaskProgress`, and a timed-out task is never retried. `get_mime()` opens every file, so a very large directory on slow storage can run past 2× `default_timeout_seconds`. Examples are ~100k files on an HDD, on a network share, or under antivirus scanning. The deadline sweep then kills the worker and abandons the task as `timed_out`. No file or subdirectory under it is enqueued, and the summary shows only "1 timed out". 1.x had no such limit.
-- **Why deferred:** Rare. It needs a single directory big and slow enough to take more than a minute to list.
-- **Where:** `orchestration/worker/_enum_dir.py` (`handle_enum_dir`), `orchestration/coordinator.py` (deadline sweep).
-- **Suggested fix:** Send a `ProgressReporter.alive()` heartbeat every few hundred entries so the deadline keeps moving while the listing makes progress. Alternatively, emit the subdirectories found so far before the MIME pass, so a timeout loses only this directory's files.
+### One slow MIME sniff can lose a whole directory
+- **What:** puremagic's text scan calls `csv.Sniffer` on up to 1 MB, and that is quadratic on some content. Lines like `export const k = 'v';` took about 33 s at 200 KB and pass the 60 s deadline at about 270 KB on a laptop. A single sniff sends no heartbeat, so `ENUM_DIR` is killed and the folder's files and subfolders are lost, reported as one timeout. Any other long stall between heartbeats does the same, such as a read on a hung share or a slow directory read before the loop starts; those are traced from the code, not observed. Registered text extensions such as `.js` skip the sniff; `.mjs`, other unregistered extensions and files with no extension don't.
+- **Why deferred:** 13 real files of these types took 0.2 s or less. Bounding the sniff isn't a simple read limit: puremagic's zip scan needs the central directory at the file's end, so a truncated `.xlsx` with no extension sniffs as Word. Only the text scan can be bounded.
+- **Where:** `getmime.py` (`get_mime`), `orchestration/worker/_enum_dir.py`.
+- **Suggested fix:** Keep the signature match and zip scan over the whole file, and skip only puremagic's text scan above a size limit. Check real Office files against the result.
 
 ### A poison file can trip the startup-failure breaker
 - **What:** `WorkerPool.reap_dead()` counts a dead worker as a startup failure if the coordinator has not yet processed its `WorkerReady`. On a busy scan that message can sit behind a result backlog, or be lost in the feeder thread when the process dies. A file that crashes a C parser kills each replacement right after it checks in. Three such deaths turn `replacing` off. Later retries of the same task then kill workers that are not replaced, which can end in `workers_failed` and `EXIT_INCOMPLETE` for the whole scan.
@@ -88,11 +88,47 @@ Known gaps we chose not to fix yet. Each entry says what is wrong, why it was de
 
 ## File handlers
 
+### A document with a plain-text extension goes to the text handler
+- **What:** A plain-text extension always chooses the text handler, even when the content is another type. A real PDF or Word document named `report.txt` goes to the text handler. It is usually counted as a file not read, because its compressed content looks binary, but a PDF with uncompressed text can be read as raw text and count as scanned. This rule is what stops text holding `%PDF` from being sent to the PDF handler and going unread. Other extensions still go by MIME type first, so text starting with `%PDF` and named `.pdf`, or with an unrecognized or no extension, still reaches the PDF handler and is reported as unread.
+- **Why deferred:** A retry needs a new task for the second handler, which is a feature for 2.1.
+- **Where:** `filehandlers/__init__.py` (`get_handler_for`, `select_handler`).
+- **Suggested fix:** When the text handler can't read the file and the sniffed MIME type points to a different handler, send the file back to the task registry as a new task for that handler.
+
 ### A NUL next to a UTF-16 run can lose or corrupt the value beside it
 - **What:** `remove_nuls()` removes the NULs inside UTF-16-style runs and turns other NULs into spaces. A delimiter NUL that follows a printable character can look like the start of a run. So `alice@example.com\0a\0b\0c\0` reports the wrong domain, and `name\0` followed by a UTF-16 email reports the wrong local part. A PAN next to such a run is lost. All of these report as scanned and clean.
 - **Why deferred:** These need unusual adjacency, and such files were skipped entirely before the fallback. Only synthetic files have shown it; real LevelDB files are untested. A length byte in the digit range just before a UTF-16 value may be truly ambiguous.
 - **Where:** `getencoding.py` (`remove_nuls`, `_UTF16_RUN_TEXT`).
 - **Suggested fix:** When a run's first character directly follows another printable character, treat the NUL after that character as a delimiter. Take care that the big-endian branch doesn't consume the same NUL.
+
+### Encoded mail is read as raw text
+- **What:** `.eml` files and detected mail go through the text handler, so base64 bodies, quoted-printable soft line breaks and attachments are never decoded. A card number in such a body or a `.docx` attachment is missed, and nothing reports it. Only headers and unencoded bodies are searched. Mail with no recognized extension, such as `.bak` or none, now counts as scanned on the same terms. Before `message/rfc822` was registered, it wasn't read at all and counted as unsupported.
+- **Why deferred:** Decoding mail and extracting its attachments is a new file handler, which is 2.1 work.
+- **Where:** `filehandlers/plaintext.py`.
+- **Suggested fix:** Add a mail handler using the standard `email` package that yields decoded bodies, and treat attachments like archive members.
+
+### A Word main part without the `w:` prefix loses its body with no report
+- **What:** docx2python looks for the `w` prefix, so a valid document re-serialized with another prefix or a default namespace yields little text and reports nothing. It looks scanned. Seen only on synthetic files; tools such as ElementTree could write them.
+- **Why deferred:** No real file has shown it, and the behaviour is inside docx2python.
+- **Where:** `filehandlers/docx.py`.
+- **Suggested fix:** Report a file whose `word/document.xml` has text nodes when docx2python returned no body text.
+
+### A Word zip with no main relationship loses its header text
+- **What:** A zip whose `_rels/.rels` lacks the main relationship is reported as `Word document could not be read`, and none of its parts are read. docx2python could still find a card number in a header part of such a file. Reported, not silent. Seen only on a synthetic file.
+- **Why deferred:** This is the cost of reporting other zips named `.docx` as unread rather than scanned and clean.
+- **Where:** `filehandlers/docx.py` (`_is_another_office_file`).
+- **Suggested fix:** Read the text parts anyway, and report the file as partly read when any part yields text.
+
+### Macro-enabled Word files and Word templates are not scanned
+- **What:** `.docm`, `.dotx` and `.dotm` have no registered extension or MIME type, so they count as unsupported. The Word handler reads them when they are named `.docx`.
+- **Why deferred:** A new supported type is 2.1 work.
+- **Where:** `filehandlers/docx.py` (`HANDLES`).
+- **Suggested fix:** Register the extensions and MIME types, and test real files from Word.
+
+### Text with no recognized extension can go undetected
+- **What:** A file with no recognized extension is only scanned if puremagic gives a MIME type with a handler. Prose starting `This is ` matches a GNU Info signature and returns an empty type, and prose starting `From the` sniffs as `application/mbox`. About 30 other text-like MIME types in puremagic's data have no handler, such as `message/news`, `text/x-patch`, `text/vtt` and `application/x-yaml`. These count as unsupported types in the log, not as unread files.
+- **Why deferred:** It needs a guess about what is text beyond what puremagic reports, and `.bak`-style files are a small share of what a scan reads.
+- **Where:** `filehandlers/__init__.py` (`select_handler`), `getmime.py`.
+- **Suggested fix:** When puremagic reports nothing useful, test the file with `detect_file_encoding()` and treat a confident result as `text/plain`.
 
 ### A value split by the 1 MiB read boundary is missed
 - **What:** `PlaintextHandler` reads a line of over 1 MiB in pieces. A PAN or email that straddles a cut is usually missed, in plain ASCII as well as UTF-16.

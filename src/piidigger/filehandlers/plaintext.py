@@ -62,6 +62,7 @@ HANDLES = {
         ".tsv",
         ".txt",
         ".vb",
+        ".vcf",
         ".xml",
         ".yaml",
         ".yml",
@@ -71,8 +72,14 @@ HANDLES = {
         "application/json",
         "application/toml",
         "application/xml",
+        "message/rfc822",
+        "text/calendar",
+        "text/csv",
         "text/html",
         "text/plain",
+        "text/vcard",
+        "text/x-ldif",
+        "text/x-python",
     ],
 }
 
@@ -97,7 +104,7 @@ class PlaintextHandler:
     before scanning, so a real path is always available.
 
     The encoding comes from detect_file_encoding(), which samples the start of
-    the file — the same answer `piidigger inspect encoding` reports.  Reading
+    the file — the same answer `piidigger inspect file` reports.  Reading
     stops once config.plaintext.max_scan_bytes of text has been read.
 
     Raises UndetectableEncodingError for a non-empty file whose encoding

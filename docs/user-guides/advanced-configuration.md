@@ -116,14 +116,28 @@ All settings live in one TOML file. Root-level settings must appear *above* any 
 - If the extension isn't recognized — no extension, or one like `.bak` — PIIDigger detects the file's MIME type, and `include_mime` decides.
 - Archive members are never MIME-detected, so a member is scanned only when its extension is recognized and allowed by `include_exts`.
 
-So to scan only PDFs and Word documents, set just `include_exts`:
+Those rules decide *whether* a file is scanned. Once it is, the reader is chosen like this:
+
+- A plain-text extension (`.txt`, `.csv`, `.py`, and so on) is always read as text, even if the content looks like another type. So a real PDF or Word document renamed `report.txt` is read as text, and its text is usually missed. PIIDigger normally reports such a file as not read (`text encoding could not be detected`).
+- Any other file is read according to its detected MIME type when that has a reader, and otherwise by its extension. So an HTML table exported as `report.xls` is read as text.
+
+**NOTE:** To check these rules against a real file, run `piidigger inspect file <path>`. It shows the file's extension, detected MIME type and text encoding, then whether a scan under that configuration would read it, with which handler, or why not. See the [Inspect Command Guide](inspect-command.md) for details.
+
+**Setting only `include_exts` doesn't limit a scan to those types.** With `include_mime = ["all"]`, a file without a recognized extension is still scanned if it is detected as *any* supported type, not only the ones you listed. Detection can miss, so a text file without a recognized extension isn't always scanned; `inspect file` shows the result for a particular file:
 
 ```toml
 include_exts = [".pdf", ".docx"]
-include_mime = ["all"]   # still lets an extensionless file in if it is detected as a supported type
+include_mime = ["all"]   # skips notes.txt, but scans notes.bak if it is detected as text
 ```
 
-Set `include_mime = []` as well if files without a recognized extension should never be scanned:
+To scan only PDFs and Word documents, including ones with no extension or an unrecognized one, list their MIME types as well:
+
+```toml
+include_exts = [".pdf", ".docx"]
+include_mime = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]
+```
+
+Set `include_mime = []` if files without a recognized extension should never be scanned:
 
 ```toml
 include_exts = [".pdf", ".docx"]

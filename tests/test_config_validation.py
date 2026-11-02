@@ -398,14 +398,14 @@ def test_mixed_case_archive_format_is_matched_by_the_worker(spelling: str, tmp_p
     It lowercases defensively, so this passed before the fix too.  Kept so the
     archive side is pinned the same way as the results side.
     """
-    from piidigger.orchestration.worker._enum_dir import _detect_archive_type
+    from piidigger.orchestration.worker._enum_dir import configured_archive_type
 
     config = Config(
         start_dirs=[],
         log_file=tmp_path / "test.log",
         archives=ArchiveConfig(formats=[spelling]),
     )
-    assert _detect_archive_type("payload.zip", config) == "zip"
+    assert configured_archive_type("payload.zip", config) == "zip"
 
 
 @pytest.mark.unit

@@ -2123,6 +2123,11 @@ def test_enum_archive_does_not_skip_deep_members_of_an_uncompressed_tar(tmp_path
         (".bak", "application/pdf", ["all"], ["application/pdf"], True),
         ("", None, ["all"], ["all"], False),  # no extension and no MIME: nothing to go on
         (".png", "image/png", ["all"], ["all"], False),  # no handler either way
+        ("", "text/plain", [".pdf"], ["all"], True),  # include_exts alone does not limit MIME-detected files
+        (".bak", "text/plain", [".pdf"], ["all"], True),
+        (".bak", "text/plain", [".pdf"], ["application/pdf"], False),  # naming the MIME types does
+        ("", "application/pdf", [".pdf"], ["application/pdf"], True),
+        ("", "application/pdf", [".pdf"], [], False),
     ],
 )
 def test_select_handler_rule(
@@ -2134,11 +2139,67 @@ def test_select_handler_rule(
 
 
 @pytest.mark.unit
-def test_select_handler_keeps_mime_first_handler_choice() -> None:
-    """When a file is scanned, a known MIME type still picks the handler, as before."""
+@pytest.mark.parametrize("ext", [".txt", ".csv", ".log", ".py", ".TXT"])
+def test_text_extension_picks_the_text_handler_over_a_sniffed_mime(ext: str) -> None:
+    """puremagic calls a file a PDF when %PDF appears near its start; that must not take it from its text handler."""
     from piidigger.filehandlers import get_handler_for, select_handler
 
-    assert select_handler(".txt", "application/pdf", ["all"], ["all"]) is get_handler_for(".pdf", None)
+    text_handler = get_handler_for(".txt", None)
+    assert select_handler(ext, "application/pdf", ["all"], ["all"]) is text_handler
+    assert get_handler_for(ext, "application/pdf") is text_handler
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("ext", "mime", "expected_ext"),
+    [
+        (".docx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"),
+        (".xls", "text/html", ".txt"),
+        (".xlsx", "text/html", ".txt"),
+        (".pdf", "text/plain", ".txt"),
+        (".xls", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"),
+        (".docx", "application/zip", ".docx"),  # no handler for the MIME type: the extension still reads it
+        (".pdf", None, ".pdf"),
+    ],
+)
+def test_document_extension_goes_by_mime_first(ext: str, mime: str | None, expected_ext: str) -> None:
+    from piidigger.filehandlers import get_handler_for, select_handler
+
+    expected = get_handler_for(expected_ext, None)
+    assert get_handler_for(ext, mime) is expected
+    assert select_handler(ext, mime, ["all"], ["all"]) is expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "mime", ["message/rfc822", "text/calendar", "text/csv", "text/vcard", "text/x-ldif", "text/x-python"]
+)
+def test_text_like_mime_types_go_to_the_text_handler(mime: str) -> None:
+    from piidigger.filehandlers import get_handler_for
+
+    assert get_handler_for("", mime) is get_handler_for(".txt", None)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("ext", "needed"), [(".txt", False), (".CSV", False), (".js", False), (".pdf", True), (".XLS", True), ("", True)]
+)
+def test_mime_can_change_handler(ext: str, needed: bool) -> None:
+    from piidigger.filehandlers import mime_can_change_handler
+
+    assert mime_can_change_handler(ext) is needed
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("ext", ["", ".bak"])
+def test_unrecognised_extension_picks_the_handler_by_mime(ext: str) -> None:
+    from piidigger.filehandlers import get_handler_for, select_handler
+
+    pdf_handler = get_handler_for(".pdf", None)
+    assert select_handler(ext, "application/pdf", ["all"], ["all"]) is pdf_handler
+    assert get_handler_for(ext, "application/pdf") is pdf_handler
+    assert get_handler_for(ext, None) is None
+    assert get_handler_for(ext, "image/png") is None
 
 
 @pytest.mark.unit
@@ -2200,7 +2261,7 @@ def test_scan_batch_reads_an_upper_case_member(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("name", "include_exts", "include_mime", "scanned"),
     [
-        ("NOTES.CSV", ["all"], ["all"], True),  # text/csv has no handler, so only the extension can qualify it
+        ("NOTES.CSV", ["all"], ["all"], True),  # the extension qualifies it, whatever its MIME type
         ("notes.txt", [".pdf"], ["all"], False),  # include_exts alone now narrows the scan
         ("notes.txt", [".pdf", ".docx"], [], False),  # the documented workaround still works
         ("report.pdf", [".pdf"], ["all"], True),

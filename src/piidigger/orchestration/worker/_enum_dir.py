@@ -93,7 +93,7 @@ def resolve_exclude_dirs(exclude_dirs: list[str]) -> list[str]:
     return resolved
 
 
-def _detect_archive_type(filename: str, config: Config) -> str | None:
+def configured_archive_type(filename: str, config: Config) -> str | None:
     """Return the archive_type for filename, or None if not a configured archive format."""
     if not config.archives.enabled:
         return None
@@ -223,7 +223,11 @@ def _is_junction_to_scanned_folder(path: Path, start_dirs: list[Path]) -> bool:
 
 def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> TaskResult:
     """Enumerate one directory: produce ENUM_DIR tasks for subdirs and SCAN_FILE tasks for files."""
-    from piidigger.filehandlers import file_ext, select_handler  # lazy: xlrd import triggers SyntaxWarning
+    from piidigger.filehandlers import (  # lazy: xlrd import triggers SyntaxWarning
+        file_ext,
+        mime_can_change_handler,
+        select_handler,
+    )
 
     payload = EnumDirPayload(**task.payload)
     path = payload.path
@@ -328,12 +332,11 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
                 if _is_recycle_bin_stub(entry):
                     continue
                 ext = file_ext(entry.name)
-                mime: str | None = get_mime(str(entry)) if test_magic() else None
 
                 # Archive files are enumerated separately — emit before the regular
                 # handler check so they are not silently skipped (no FileHandler
                 # is registered for .zip, .tar.gz, etc.).
-                archive_type = _detect_archive_type(entry.name, config)
+                archive_type = configured_archive_type(entry.name, config)
                 if archive_type is not None:
                     new_tasks.append(
                         {
@@ -350,6 +353,8 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
                     # bytes_found for archive members is counted in _enum_archive.py
                     # using uncompressed member sizes — not the compressed on-disk size here.
                     continue
+
+                mime: str | None = get_mime(str(entry)) if test_magic() and mime_can_change_handler(ext) else None
 
                 # include_exts / include_mime, and a handler to read it with.
                 # The same rule is applied to archive members.

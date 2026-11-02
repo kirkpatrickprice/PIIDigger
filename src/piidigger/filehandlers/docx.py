@@ -27,6 +27,25 @@ handles = HANDLES
 # own .document property concatenates them.
 _TEXT_PARTS = ("header", "body", "footer", "footnotes", "endnotes")
 
+# Root element of a Word main part, in lower case.
+_WORD_ROOTS = {"document", "doc"}
+
+
+def _is_another_office_file(docx_content) -> bool:  # docx_content: DocxContent
+    """True when no main part of the zip is a Word document: a workbook, a presentation, or a plain zip.
+
+    docx2python finds no Word parts in such a file and returns nothing, without
+    an error, so it would look scanned and clean.  Damage, such as a main part
+    that is listed but missing, is left for the part reads to report.
+    """
+    try:
+        main_parts = docx_content.docx_reader.files_of_type("officeDocument")
+        return not any(part.root_element.tag.rpartition("}")[2].lower() in _WORD_ROOTS for part in main_parts)
+    except OSError:
+        raise
+    except Exception:  # noqa: BLE001
+        return False
+
 
 def _joined(parts: list[str]) -> str:
     """Parts as a phrase: "a", "a and b", "a, b and c"."""
@@ -61,6 +80,9 @@ class DocxHandler:
         docx_content = docx2python(docx_arg)
         try:
             if source.size == 0:
+                return
+            if _is_another_office_file(docx_content):
+                source.report_unread("Word document could not be read", nothing_read=True)
                 return
             content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
 

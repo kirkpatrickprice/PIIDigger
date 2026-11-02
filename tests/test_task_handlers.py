@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import io
 import multiprocessing as mp
 import os
 import stat
 import sys
 import types
 import unittest.mock
+import zipfile
 from pathlib import Path
 
 import pytest
 
+from piidigger.getmime import get_mime
 from piidigger.models.config import Config
 from piidigger.models.tasks import Task, TaskProgress, TaskType
 from piidigger.orchestration.context import WorkerContext
@@ -270,6 +273,227 @@ def test_scan_file_txt_finds_pan(tmp_path: Path) -> None:
     finding = result.findings[0]
     assert finding["source_path"] == str(f)
     assert finding["handler"] == "pan"
+
+
+def _enumerate_and_scan(tmp_path: Path, name: str, content: bytes, **config_kwargs: object) -> object:
+    """Send one file down the real route: enumeration detects its MIME type, then the scan task reads it."""
+    root = tmp_path / "scan"
+    root.mkdir()
+    (root / name).write_bytes(content)
+    ctx = _make_ctx(tmp_path, **config_kwargs)
+
+    tasks = handle_enum_dir(_enum_dir_task(root), ctx, _logger()).new_tasks
+    assert len(tasks) == 1
+
+    return handle_scan_file(Task(**tasks[0]), ctx, _logger())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["customers.csv", "app.log"])
+def test_scan_file_text_that_sniffs_as_pdf_is_read_as_text(tmp_path: Path, name: str) -> None:
+    content = b"%PDF-1.4,name\nalice@example.com,Alice\n"
+    probe = tmp_path / "probe"
+    probe.write_bytes(content)
+    assert get_mime(str(probe)) == "application/pdf", "the sniff this test guards against no longer happens"
+
+    result = _enumerate_and_scan(tmp_path, name, content, data_handlers=["email"])
+
+    assert result.status == "ok"
+    assert [finding["handler"] for finding in result.findings] == ["email"]
+
+
+@pytest.mark.unit
+def test_scan_file_extensionless_real_pdf_reaches_the_pdf_handler(tmp_path: Path) -> None:
+    content = Path("testdata/pan/sample-pans.pdf").read_bytes()
+
+    result = _enumerate_and_scan(tmp_path, "scanned-report", content, data_handlers=["pan"])
+
+    assert result.status == "ok"
+    assert result.counters.get("files_scanned") == 1
+    assert result.findings
+
+
+@pytest.mark.unit
+def test_scan_file_real_workbook_named_docx_is_read_as_a_workbook(tmp_path: Path) -> None:
+    """The Word handler would call this file scanned and clean: it has no Word parts to fail on."""
+    content = Path("testdata/pan/Excel Sheet.xlsx").read_bytes()
+
+    result = _enumerate_and_scan(tmp_path, "r.docx", content, data_handlers=["pan"])
+
+    assert result.status == "ok"
+    assert result.findings
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["report.xls", "report.xlsx"])
+def test_scan_file_html_exported_as_a_spreadsheet_is_read(tmp_path: Path, name: str) -> None:
+    content = b"<html><body><table><tr><td>alice@example.com</td></tr></table></body></html>\n"
+
+    result = _enumerate_and_scan(tmp_path, name, content, data_handlers=["email"])
+
+    assert result.status == "ok"
+    assert result.findings
+
+
+@pytest.mark.unit
+def test_scan_file_csv_text_with_an_unrecognised_extension_is_read(tmp_path: Path) -> None:
+    content = b"name,email\nAlice,alice@example.com\nBob,bob@example.com\n"
+
+    result = _enumerate_and_scan(tmp_path, "customers.bak", content, data_handlers=["email"])
+
+    assert result.status == "ok"
+    assert result.findings
+
+
+def _zip_bytes(members: dict[str, bytes]) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    return out.getvalue()
+
+
+def _rewrite_zip(path: str, edit: dict[str, tuple[bytes, bytes]], extra: dict[str, bytes]) -> bytes:
+    """A copy of the zip at path, with (old, new) replaced in the named members and extra members added."""
+    with zipfile.ZipFile(path) as source:
+        members = {info.filename: source.read(info) for info in source.infolist()}
+    for name, (old, new) in edit.items():
+        assert old in members[name]
+        members[name] = members[name].replace(old, new)
+    return _zip_bytes(members | extra)
+
+
+@pytest.mark.unit
+def test_docx_handler_reads_a_word_file_with_an_unusual_root_or_second_main_part(tmp_path: Path) -> None:
+    """Only a file with no Word main part at all is turned away: docx2python reads the others."""
+    docx = "testdata/pan/sample-pans.docx"
+    workbook_rel = (
+        b'<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        b'<Relationship Id="rId1" Target="/aaa/x.xml" '
+        b'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"/></Relationships>'
+    )
+    variants = {
+        "renamed-root.docx": _rewrite_zip(docx, {"word/document.xml": (b"w:document", b"w:Document")}, {}),
+        "short-root.docx": _rewrite_zip(docx, {"word/document.xml": (b"w:document", b"w:doc")}, {}),
+        "second-part.docx": _rewrite_zip(docx, {}, {"aaa/_rels/x.xml.rels": workbook_rel, "aaa/x.xml": b"<workbook/>"}),
+    }
+    for name, content in variants.items():
+        f = tmp_path / name
+        f.write_bytes(content)
+        task = _scan_file_task(f, ext=".docx")
+        result = handle_scan_file(task, _make_ctx(tmp_path, data_handlers=["pan"]), _logger())
+        assert result.findings, name
+        assert result.counters.get("files_scanned") == 1, name
+
+
+@pytest.mark.unit
+def test_vcf_file_is_read_as_text(tmp_path: Path) -> None:
+    f = tmp_path / "contacts.VCF"
+    f.write_text("BEGIN:VCARD\nFN:Alice\nEMAIL:alice@example.com\nEND:VCARD\n")
+
+    tasks = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger()).new_tasks
+    assert len(tasks) == 1
+
+    result = handle_scan_file(Task(**tasks[0]), _make_ctx(tmp_path, data_handlers=["email"]), _logger())
+    assert result.findings
+
+
+def _workbook_with_content_type(content_type: str) -> bytes:
+    """The workbook fixture, declaring itself as another workbook type, as a macro-enabled file or template does."""
+    sheet_type = b"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile("testdata/pan/Excel Sheet.xlsx") as source,
+        zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dest,
+    ):
+        for info in source.infolist():
+            data = source.read(info)
+            if info.filename == "[Content_Types].xml":
+                assert sheet_type in data
+                data = data.replace(sheet_type, content_type.encode())
+            dest.writestr(info, data)
+    return out.getvalue()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "application/vnd.ms-excel.sheet.macroEnabled.main+xml",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml",
+        "application/vnd.ms-excel.template.macroEnabled.main+xml",
+    ],
+)
+def test_scan_file_other_workbook_types_with_no_extension_are_read(tmp_path: Path, content_type: str) -> None:
+    content = _workbook_with_content_type(content_type)
+
+    result = _enumerate_and_scan(tmp_path, "workbook.bak", content, data_handlers=["pan"])
+
+    assert result.status == "ok"
+    assert result.findings
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"From: Alice <alice@example.com>\nTo: bob@example.com\nSubject: Hello\nMessage-ID: <1@example.com>\n\nHi\n",
+        b"BEGIN:VCARD\nVERSION:3.0\nFN:Alice\nEMAIL:alice@example.com\nEND:VCARD\n",
+    ],
+)
+def test_scan_file_mail_and_contacts_with_no_extension_are_read(tmp_path: Path, content: bytes) -> None:
+    result = _enumerate_and_scan(tmp_path, "message", content, data_handlers=["email"])
+
+    assert result.status == "ok"
+    assert result.findings
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "content",
+    [
+        Path("testdata/pan/Excel Sheet.xlsx").read_bytes(),
+        Path("testdata/pan/sample-pans.pptx").read_bytes(),
+        _zip_bytes({"data.txt": b"card 4111111111111111"}),
+    ],
+    ids=["workbook", "presentation", "plain-zip"],
+)
+def test_docx_handler_reports_another_office_file_rather_than_clean(tmp_path: Path, content: bytes) -> None:
+    """Archive members go by extension alone, so this reaches the Word handler, which would find nothing to fail on."""
+    f = tmp_path / "book.docx"
+    f.write_bytes(content)
+
+    result = handle_scan_file(_scan_file_task(f, ext=".docx"), _make_ctx(tmp_path, data_handlers=["pan"]), _logger())
+
+    assert result.status == "error"
+    assert result.error_message == "Word document could not be read"
+    assert "files_scanned" not in result.counters
+
+
+@pytest.mark.unit
+def test_enum_dir_does_not_sniff_a_text_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sniffing one JavaScript file can outlast the listing's deadline, losing the whole folder."""
+    sniffed: list[str] = []
+    monkeypatch.setattr("piidigger.orchestration.worker._enum_dir.get_mime", lambda p: sniffed.append(p))
+    (tmp_path / "constants.js").write_text("export const k1 = 'value1';\n")
+    (tmp_path / "a.pdf").write_bytes(b"%PDF-1.4\n")
+
+    tasks = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger()).new_tasks
+
+    assert len(tasks) == 2
+    assert sniffed == [str(tmp_path / "a.pdf")]
+
+
+@pytest.mark.unit
+def test_scan_file_real_pdf_named_txt_is_reported_as_not_read(tmp_path: Path) -> None:
+    """The known limit in TECHNICAL_DEBT.md: a text extension is trusted, so the PDF's text is missed, but not silently."""
+    content = Path("testdata/pan/sample-pans.pdf").read_bytes()
+
+    result = _enumerate_and_scan(tmp_path, "report.txt", content, data_handlers=["pan"])
+
+    assert not result.findings
+    assert result.counters.get("files_unreadable") == 1
+    assert "files_scanned" not in result.counters
 
 
 @pytest.mark.unit

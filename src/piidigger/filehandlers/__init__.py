@@ -28,13 +28,30 @@ def file_ext(name: str) -> str:
 def get_handler_for(ext: str, mime: str | None):
     """Return the FileHandler for a given extension and/or MIME type.
 
-    MIME type is checked first (more specific); extension is the fallback.
+    A plain-text extension always gets the text handler.  Content sniffing calls
+    a file a PDF when %PDF appears near its start, so a CSV or source file
+    holding that text would otherwise go to the PDF handler and go unread.
+
+    Any other file goes by its MIME type first, then its extension.  A document's
+    extension is less reliable than its content: applications export HTML as .xls,
+    and a workbook named .docx would otherwise read as an empty Word document.
+
     Extensions match regardless of case, so REPORT.PDF finds the PDF handler.
     Returns None if no handler is registered for either.
     """
-    if mime and mime in _MIME_REGISTRY:
-        return _MIME_REGISTRY[mime]
-    return _EXT_REGISTRY.get(ext.lower())
+    handler = _EXT_REGISTRY.get(ext.lower())
+    if handler is plaintext.handler or not mime:
+        return handler
+    return _MIME_REGISTRY.get(mime, handler)
+
+
+def mime_can_change_handler(ext: str) -> bool:
+    """Whether a file's MIME type could affect how it is scanned.  False for a plain-text extension.
+
+    Sniffing one JavaScript file can outlast a directory listing's whole deadline,
+    so the listing skips it when the answer can't matter.
+    """
+    return _EXT_REGISTRY.get(ext.lower()) is not plaintext.handler
 
 
 def select_handler(ext: str, mime: str | None, include_exts: list[str], include_mime: list[str]):
@@ -50,8 +67,7 @@ def select_handler(ext: str, mime: str | None, include_exts: list[str], include_
       ["all"].  Archive members have no detected MIME type, so an archive
       member with an unrecognised extension is never scanned.
 
-    When a file is scanned, the handler is chosen as get_handler_for() chooses
-    it: by MIME type first, when that is known, then by extension.
+    When a file is scanned, get_handler_for() chooses its handler.
     """
     ext = ext.lower()
     if ext in _EXT_REGISTRY:

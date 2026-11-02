@@ -46,7 +46,7 @@ def detect_file_encoding(path: Path) -> str | None:
     """Return the encoding PIIDigger uses to read the text file at path.
 
     The single source of truth for both the plaintext file handler and
-    `piidigger inspect encoding`, so the two can never disagree.
+    `piidigger inspect file`, so the two can never disagree.
 
     Only the first _ENCODING_SAMPLE_BYTES are examined.  Two adjustments make
     that sample safe to guess from:

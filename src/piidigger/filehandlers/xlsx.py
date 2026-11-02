@@ -21,7 +21,10 @@ HANDLES = {
     "mime": [
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "application/vnd.ms-excel.sheet.macroEnabled",
+        "application/vnd.ms-excel.sheet.macroEnabled.12",
         "application/vnd.ms-excel.template",
+        "application/vnd.ms-excel.template.macroEnabled.12",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.template",
     ],
 }
 
