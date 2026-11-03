@@ -1,31 +1,38 @@
-name: Release - Build Standalone Binaries
+name: Release - Build
 
+# Called from release.yml only. A dry run starts the Release workflow by hand.
 on:
   workflow_call:
-  workflow_dispatch:
+    inputs:
+      artifact_base:
+        description: piidigger-<version>-<commit>, or piidigger-<version>-dev-<commit> for a dry run
+        required: true
+        type: string
+      commit:
+        description: Short commit ID each build's --version must report
+        required: true
+        type: string
 
-permissions: {}
+# Every job is read-only and only uploads workflow artifacts. _release-assets.yml
+# attaches them to the release once every build and smoke test has passed.
+permissions:
+  contents: read
 
-# The build jobs run unlocked third-party code (pip installs, the manylinux
-# image's tooling), so they get a read-only token and only upload workflow
-# artifacts. The `attach` job alone holds contents: write, and it runs no
-# third-party code: it uses `gh release upload`, preinstalled on every runner.
+# Every job installs from uv.lock with the uv cache off, so a poisoned cache
+# cannot reach a release artifact. Each smoke test runs the built bundle from
+# outside the checkout, so src/ cannot stand in for a missing module.
 jobs:
   linux:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Resolve release tag
-        id: tag
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name || 'dev' }}
-        run: echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      # The container has no git, so record the commit on the host first.
+      - name: Write build info
+        run: python3 .github/scripts/write_build_info.py
 
       # The build itself runs *inside* the manylinux2014 container (glibc 2.17)
       # via `docker run`, rather than as a job-level `container:`. GitHub's own
@@ -39,66 +46,76 @@ jobs:
       # https://quay.io/api/v1/repository/pypa/manylinux2014_x86_64/tag/?specificTag=latest
       - name: Build inside manylinux2014
         env:
-          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          ARTIFACT_BASE: ${{ inputs.artifact_base }}
         run: |
-          docker run --rm \
+          docker run --rm --user "$(id -u):$(id -g)" \
             -v "$GITHUB_WORKSPACE:/io" -w /io \
-            -e RELEASE_TAG \
+            -e ARTIFACT_BASE \
             quay.io/pypa/manylinux2014_x86_64@sha256:dc58399aca4cfb0de257f92e2de71b4f8421e60cce8542fcd5e28df0c0760942 \
             bash /io/.github/scripts/build-linux-standalone.sh
 
+      - name: Smoke test
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: python3 .github/scripts/smoke_test.py --expect-commit "$COMMIT" -- "$GITHUB_WORKSPACE/dist/piidigger/piidigger"
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: piidigger-${{ steps.tag.outputs.tag }}-linux-x86_64-manylinux2014
-          path: dist/piidigger-${{ steps.tag.outputs.tag }}-linux-x86_64-manylinux2014.tar.gz
+          name: ${{ inputs.artifact_base }}-linux-x86_64-manylinux2014
+          path: dist/${{ inputs.artifact_base }}-linux-x86_64-manylinux2014.tar.gz
+          if-no-files-found: error
 
   windows:
     runs-on: windows-latest
     timeout-minutes: 30
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Resolve release tag
-        id: tag
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name || 'dev' }}
-        run: echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-
       # .python-version pins only major.minor; check-latest resolves it to the
       # newest patch release instead of whatever the runner image has cached.
-      # The resolved version is reused for the embedded Python download so the
-      # venv's compiled packages match the bundled interpreter exactly.
+      # The resolved version is reused for the venv and the embedded Python
+      # download, so the venv's compiled packages match the bundled interpreter.
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         id: setup-python
         with:
           python-version-file: .python-version
           check-latest: true
 
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.13.6"
+          enable-cache: false
+
+      # The project itself isn't installed: the bundle copies src\. The build
+      # script runs write_build_info.py before it copies src\.
       - name: Install and build
         env:
           PY_VERSION: ${{ steps.setup-python.outputs.python-version }}
         run: |
-          python -m venv .venv
-          .venv\Scripts\activate
-          pip install -e .[win]
+          # pwsh stops on cmdlet errors only; a failing native command or script exit code must be checked.
+          uv sync --locked --no-dev --extra win --no-install-project --python $env:PY_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           .\.github\scripts\build-windows-embedded.ps1 -arch amd64 -pyVersion $env:PY_VERSION -venv .venv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Package artifact
-        shell: pwsh
         env:
-          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          ARTIFACT_BASE: ${{ inputs.artifact_base }}
         run: |
-          Compress-Archive -Path dist\piidigger-amd64 -DestinationPath "dist\piidigger-$env:RELEASE_TAG-windows-amd64.zip"
+          Compress-Archive -Path dist\piidigger-amd64 -DestinationPath "dist\$env:ARTIFACT_BASE-windows-amd64.zip"
+
+      - name: Smoke test
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: python .github\scripts\smoke_test.py --expect-commit $env:COMMIT --cwd dist\piidigger-amd64 -- piidigger.cmd
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: piidigger-${{ steps.tag.outputs.tag }}-windows-amd64
-          path: dist/piidigger-${{ steps.tag.outputs.tag }}-windows-amd64.zip
+          name: ${{ inputs.artifact_base }}-windows-amd64
+          path: dist/${{ inputs.artifact_base }}-windows-amd64.zip
+          if-no-files-found: error
 
   macos:
     strategy:
@@ -111,25 +128,25 @@ jobs:
             arch: x86_64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
-    permissions:
-      contents: read
+    env:
+      UV_PROJECT_ENVIRONMENT: .venv-build
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Resolve release tag
-        id: tag
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name || 'dev' }}
-        run: echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      # uv installs the .python-version interpreter itself.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          python-version-file: .python-version
+          version: "0.13.6"
+          enable-cache: false
 
+      - name: Write build info
+        run: uv run --no-project python .github/scripts/write_build_info.py
+
+      # --reinstall-package: never reuse a cached build of piidigger, which could carry a stale _build_info.py.
       - name: Install dependencies
-        run: python -m pip install .[build]
+        run: uv sync --locked --no-dev --extra build --no-editable --reinstall-package piidigger
 
       # No -i icon flag here: the repo only ships a Windows .ico; PyInstaller
       # wants a .icns on macOS. Add one later if a signed/branded app bundle
@@ -137,7 +154,9 @@ jobs:
       - name: Build standalone binary
         # Entry is the package's __main__.py: a repo-root piidigger.py shadows
         # the piidigger package during PyInstaller analysis.
-        run: pyinstaller --onedir --distpath dist --name piidigger --collect-submodules wakepy src/piidigger/__main__.py
+        run: >
+          uv run --no-sync pyinstaller --noconfirm --onedir --distpath dist --name piidigger
+          --collect-submodules wakepy src/piidigger/__main__.py
 
       # Unsigned/unnotarized build: macOS Gatekeeper will show an
       # "unidentified developer" warning. Code-signing needs a paid Apple
@@ -145,40 +164,63 @@ jobs:
       # limitation in docs/user-guides/installation.md instead.
       - name: Package artifact
         env:
-          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          ARTIFACT_BASE: ${{ inputs.artifact_base }}
           ARCH: ${{ matrix.arch }}
-        run: |
-          cd dist
-          tar -czf "piidigger-$RELEASE_TAG-macos-$ARCH.tar.gz" piidigger
+        run: tar -C dist -czf "dist/$ARTIFACT_BASE-macos-$ARCH.tar.gz" piidigger
+
+      - name: Smoke test
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: >
+          uv run --no-project python .github/scripts/smoke_test.py
+          --expect-commit "$COMMIT" -- "$GITHUB_WORKSPACE/dist/piidigger/piidigger"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: piidigger-${{ steps.tag.outputs.tag }}-macos-${{ matrix.arch }}
-          path: dist/piidigger-${{ steps.tag.outputs.tag }}-macos-${{ matrix.arch }}.tar.gz
+          name: ${{ inputs.artifact_base }}-macos-${{ matrix.arch }}
+          path: dist/${{ inputs.artifact_base }}-macos-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
 
-  # Runs only when every build succeeded, so a release never gets a partial set.
-  attach:
-    if: github.event_name == 'release'
-    needs: [linux, windows, macos]
+  # Built once here, so the files on PyPI are exactly the ones that were
+  # smoke-tested and attached to the release. `uv build` runs unlocked
+  # build-backend code, so it never shares a job with the PyPI OIDC token.
+  python:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write # gh release upload
+    timeout-minutes: 15
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          pattern: piidigger-${{ github.event.release.tag_name }}-*
-          path: artifacts
-          merge-multiple: true
+          persist-credentials: false
 
-      - name: Generate checksums
-        run: |
-          cd artifacts
-          sha256sum * > checksums.txt
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.13.6"
+          enable-cache: false
 
-      # --clobber replaces same-named assets, so a re-run is safe.
-      - name: Attach binaries and checksums to release
+      - name: Write build info
+        run: uv run --no-project python .github/scripts/write_build_info.py
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      # The wheel's smoke test proves its copy; the sdist is checked by listing.
+      - name: Check the sdist carries the build info
+        run: tar -tzf dist/piidigger-*.tar.gz | grep -q '/src/piidigger/_build_info.py$'
+
+      # Installs the wheel the way a user would (dependencies resolved from
+      # PyPI), into a throwaway environment outside the checkout.
+      - name: Smoke test the wheel
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" artifacts/* --clobber --repo "$GITHUB_REPOSITORY"
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          wheel="$(echo "$GITHUB_WORKSPACE"/dist/piidigger-*.whl)"
+          uv run --no-project python .github/scripts/smoke_test.py --expect-commit "$COMMIT" -- \
+            uvx --python "$(tr -d '[:space:]' < .python-version)" --from "$wheel" piidigger
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: python-dists
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error

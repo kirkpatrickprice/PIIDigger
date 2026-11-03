@@ -1,48 +1,117 @@
 name: Release
 
+# A published GitHub Release is the real thing. Starting this workflow by hand
+# (workflow_dispatch) is a dry run: it builds, smoke-tests and assembles every
+# asset as workflow artifacts, and attaches or publishes nothing.
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 concurrency:
-  group: release-${{ github.event.release.tag_name }}
+  group: release-${{ github.event.release.tag_name || github.ref }}
   cancel-in-progress: false
 
 # Each job grants exactly what its called workflow requests; a called workflow
 # cannot exceed its caller's grant.
 permissions: {}
 
+# Everything reversible (build, attach, scan) runs first. PyPI, which cannot be
+# undone, runs last and only for full releases, behind the pypi environment's
+# required reviewer. Nothing here checks the branch: a full release from any
+# branch publishes, so that reviewer is the guard on where 2.x.y comes from.
 jobs:
   verify:
     permissions:
       contents: read
     uses: ./.github/workflows/_release-verify.yml
 
-  publish-pypi:
+  build:
     needs: verify
     permissions:
       contents: read
-      id-token: write
-    uses: ./.github/workflows/_release-publish-pypi.yml
+    uses: ./.github/workflows/_release-build-standalone.yml
+    with:
+      artifact_base: ${{ needs.verify.outputs.artifact_base }}
+      commit: ${{ needs.verify.outputs.commit }}
 
-  build-standalone:
-    needs: verify
+  # SBOM and checksums on every run; attestation and attaching on release events only.
+  release-assets:
+    needs: [verify, build]
     permissions:
       contents: write
-    uses: ./.github/workflows/_release-build-standalone.yml
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/_release-assets.yml
+    with:
+      artifact_base: ${{ needs.verify.outputs.artifact_base }}
 
+  # The scan passes whatever the detection count. It runs before PyPI so the
+  # pypi environment's reviewer can read the results in the release notes
+  # before approving.
   virustotal-scan:
-    needs: build-standalone
+    if: github.event_name == 'release'
+    needs: release-assets
     permissions:
       contents: write
     uses: ./.github/workflows/_release-virustotal.yml
     secrets:
       VT_API_KEY: ${{ secrets.VT_API_KEY }}
 
+  # A third-party action (the VT scan) runs between `collect` and PyPI, and any
+  # JS action in the run can replace a workflow artifact. Re-check python-dists
+  # against the checksums collect recorded as a job output, which no later job
+  # can change, with nothing third-party between this check and publish-pypi.
+  check-dists:
+    if: github.event_name == 'release' && needs.verify.outputs.is_prerelease == 'false'
+    needs: [verify, release-assets, virustotal-scan]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: python-dists
+          path: dist
+      # Exactly the two files collect checksummed: no more, none renamed.
+      - name: Match python-dists to the attested checksums
+        env:
+          EXPECTED: ${{ needs.release-assets.outputs.dists_sha256 }}
+        run: |
+          printf '%s\n' "$EXPECTED" > expected.txt
+          cd dist
+          ls -l
+          count="$(find . -maxdepth 1 -type f | wc -l)"
+          if [ "$count" -ne 2 ] || [ "$(wc -l < ../expected.txt)" -ne 2 ]; then
+            echo "::error::Expected one wheel and one sdist, found $count files and $(wc -l < ../expected.txt) checksums"
+            exit 1
+          fi
+          sha256sum -c --strict ../expected.txt
+
+  publish-pypi:
+    if: github.event_name == 'release' && needs.verify.outputs.is_prerelease == 'false'
+    needs: [verify, check-dists]
+    permissions:
+      id-token: write
+    uses: ./.github/workflows/_release-publish-pypi.yml
+
+  # After PyPI, so the docs never announce a version pip can't install yet.
   deploy-docs:
-    needs: verify
+    if: github.event_name == 'release' && needs.verify.outputs.is_prerelease == 'false'
+    needs: [verify, publish-pypi]
     permissions:
       contents: read
       pages: write
       id-token: write
     uses: ./.github/workflows/_release-deploy-docs.yml
+
+  post-release-check:
+    if: github.event_name == 'release' && needs.verify.outputs.is_prerelease == 'false'
+    needs: [verify, publish-pypi]
+    permissions:
+      issues: write
+    uses: ./.github/workflows/_release-post-check.yml
+    with:
+      version: ${{ needs.verify.outputs.version }}
+      commit: ${{ needs.verify.outputs.commit }}
+      python_version: ${{ needs.verify.outputs.python_version }}

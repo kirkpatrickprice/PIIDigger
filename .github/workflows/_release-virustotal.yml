@@ -9,19 +9,67 @@ on:
 permissions: {}
 
 jobs:
+  # The third-party action gets a read-only token: on a release event it only
+  # reads the release and downloads its assets. The release notes are edited
+  # by the `annotate` job, which runs no third-party code.
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write # update_release_body edits the release notes
+      contents: read
+    outputs:
+      analysis: ${{ steps.vt.outputs.analysis }}
     steps:
       - uses: crazy-max/ghaction-virustotal@936d8c5c00afe97d3d9a1af26d017cfdf26800a2 # v5.0.0
+        id: vt
         with:
           vt_api_key: ${{ secrets.VT_API_KEY }}
-          update_release_body: true
+          update_release_body: false
           # 4 requests/minute matches the free VirusTotal API tier. Raise this
           # if a paid VT API key is ever used instead.
           request_rate: 4
           files: |
             \.tar\.gz$
             \.zip$
+
+  # Replaces a marked block in the release notes rather than appending, so a re-run leaves one copy.
+  annotate:
+    needs: scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # gh release edit
+    steps:
+      - name: Add the VirusTotal links to the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          ANALYSIS: ${{ needs.scan.outputs.analysis }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body > notes.md
+          python3 - <<'EOF'
+          import os, re, sys
+
+          start, end = "<!-- virustotal -->", "<!-- /virustotal -->"
+          links = []
+          for item in filter(None, os.environ["ANALYSIS"].split(",")):
+              name, _, url = item.partition("=")
+              # Both come from a third-party action and go into the public notes, so
+              # match them whole: a URL like https://www.virustotal.com/x) [y](https://...
+              # would otherwise inject a link. The ID is base64; the URL format is the action's.
+              if not re.fullmatch(r"[A-Za-z0-9._+-]+", name):
+                  sys.exit(f"::error::Unexpected asset name from VirusTotal action: {name!r}")
+              if not re.fullmatch(r"https://www\.virustotal\.com/gui/file-analysis/[A-Za-z0-9+/=_-]+/detection", url):
+                  sys.exit(f"::error::Unexpected VirusTotal analysis URL for {name}: {url!r}")
+              links.append(f"  * [`{name}`]({url})")
+          if not links:
+              sys.exit("::error::VirusTotal returned no analysis links")
+          block = "\n".join([start, "<details>", "  <summary>🛡 VirusTotal analysis</summary>", "", *links, "</details>", end])
+          with open("notes.md", encoding="utf-8") as f:
+              notes = f.read()
+          marked = re.compile(re.escape(start) + ".*?" + re.escape(end), re.S)
+          notes = marked.sub(lambda _: block, notes) if marked.search(notes) else notes.rstrip() + "\n\n" + block + "\n"
+          with open("notes.md", "w", encoding="utf-8") as f:
+              f.write(notes)
+          EOF
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md

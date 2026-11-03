@@ -2,12 +2,49 @@ name: Release - Verify
 
 on:
   workflow_call:
+    outputs:
+      version:
+        description: piidigger.__version__, e.g. 2.0.0rc1
+        value: ${{ jobs.metadata.outputs.version }}
+      commit:
+        description: Short commit ID the run builds
+        value: ${{ jobs.metadata.outputs.commit }}
+      is_prerelease:
+        description: '"true" when the version is a PEP 440 pre-release'
+        value: ${{ jobs.metadata.outputs.is_prerelease }}
+      artifact_base:
+        description: piidigger-<version>-<commit>, or piidigger-<version>-dev-<commit> outside a release
+        value: ${{ jobs.metadata.outputs.artifact_base }}
+      python_version:
+        description: The major.minor in .python-version
+        value: ${{ jobs.metadata.outputs.python_version }}
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  # Fails a release whose tag, __version__ or pre-release box disagree, before anything is built.
+  metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      commit: ${{ steps.meta.outputs.commit }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+      artifact_base: ${{ steps.meta.outputs.artifact_base }}
+      python_version: ${{ steps.meta.outputs.python_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Resolve version, commit and artifact name
+        id: meta
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+        run: python3 .github/scripts/release_metadata.py
+
   full-test-suite:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -18,8 +55,11 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version-file: .python-version
+      # The cache stays on here, unlike the build jobs: this job produces no
+      # artifact, and a tag-ref run restores only tag- or main-scoped caches.
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
+          version: "0.13.6"
           enable-cache: true
       - name: Install dependencies
         run: uv sync --locked --extra dev --extra test

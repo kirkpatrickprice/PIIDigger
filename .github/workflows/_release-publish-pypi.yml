@@ -1,60 +1,23 @@
 name: Release - Publish to PyPI
 
-# Called only from release.yml; no workflow_dispatch, so nothing can publish
-# without a release event and its tag check.
+# Called only from release.yml, after the release assets are attached and
+# scanned; no workflow_dispatch, so nothing can publish without a release event.
+# The tag check runs in _release-verify.yml before anything is built.
 on:
   workflow_call:
 
 permissions: {}
 
-# Two jobs, as PyPA recommends: `uv build` runs unlocked build-backend code, so
-# it must not share a job with the OIDC token that can mint a PyPI upload token.
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version-file: .python-version
-      # No cache: a poisoned cache must not be able to reach what goes to PyPI.
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          enable-cache: false
-
-      - name: Verify release tag matches package version
-        env:
-          TAG: ${{ github.event.release.tag_name }}
-        run: |
-          TAG_VERSION="${TAG#v}"
-          PKG_VERSION="$(uv run --locked python -c 'import piidigger; print(piidigger.__version__)')"
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "::error::Release tag ($TAG -> $TAG_VERSION) does not match piidigger.__version__ ($PKG_VERSION)"
-            exit 1
-          fi
-          echo "Tag $TAG matches package version $PKG_VERSION"
-
-      - name: Build sdist and wheel
-        run: uv build
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: python-dists
-          path: dist/
-
   publish:
-    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: pypi
     permissions:
       id-token: write # PyPI trusted publishing
     # No checkout and no run: steps; only the publish action sees the OIDC token.
+    # python-dists comes from the `python` job in _release-build-standalone.yml,
+    # so PyPI gets the same files that were smoke-tested and attached.
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
