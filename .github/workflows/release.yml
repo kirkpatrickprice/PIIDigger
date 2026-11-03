@@ -1,4 +1,7 @@
 name: Release
+# The Actions sidebar shows the default branch's `name:`; run-name comes from
+# the file that actually runs, so a dry run from another branch says what it is.
+run-name: ${{ github.event_name == 'release' && format('Release {0}', github.event.release.tag_name) || format('Release dry run on {0}', github.ref_name) }}
 
 # A published GitHub Release is the real thing. Starting this workflow by hand
 # (workflow_dispatch) is a dry run: it builds, smoke-tests and assembles every
