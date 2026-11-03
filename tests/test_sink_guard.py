@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from pathlib import Path
 
 import pytest
 
 from piidigger.models.results import ResultRecord
+from piidigger.orchestration.escaping import escaped_record
 from piidigger.orchestration.progress import ProgressDisplay, ResultsFile
 from piidigger.orchestration.sinks import GuardedSink
 from piidigger.outputhandlers.csv import CsvSink
@@ -58,6 +60,9 @@ def _disk_full() -> OSError:
 
 # A file name that is not valid UTF-8 arrives on POSIX as surrogate escapes.
 _SURROGATE_PATH = "/data/caf\udce9.txt"
+# Written as the byte it stands for on POSIX.  On Windows a lone surrogate is
+# part of a UTF-16 name, so it is written as itself.
+_ESCAPED_PATH = "/data/caf\\xe9.txt" if sys.getfilesystemencodeerrors() == "surrogateescape" else "/data/caf\\udce9.txt"
 
 
 @pytest.mark.unit
@@ -92,6 +97,16 @@ def test_write_failure_is_logged_once_and_further_writes_skipped(caplog: pytest.
 
 
 @pytest.mark.unit
+def test_escaped_record_copies_only_a_record_that_needs_escaping() -> None:
+    plain = ResultRecord(source_path="/data/café.txt", handler="pan", matches={"visa": ["4111 11** **** 1111"]})
+    odd = ResultRecord(source_path=_SURROGATE_PATH, handler="pan", matches={"visa": ["4111 11** **** 1111"]})
+
+    assert escaped_record(plain) is plain, "valid UTF-8, including non-ASCII, needs no copy"
+    assert escaped_record(odd).source_path == _ESCAPED_PATH
+    assert odd.source_path == _SURROGATE_PATH, "the original record is left alone"
+
+
+@pytest.mark.unit
 def test_value_error_retries_the_record_escaped_and_keeps_the_sink(caplog: pytest.LogCaptureFixture) -> None:
     sink = _FakeSink(write_errors=[ValueError("bad text")])
     guarded = GuardedSink(sink, _LOG, _progress())
@@ -103,7 +118,7 @@ def test_value_error_retries_the_record_escaped_and_keeps_the_sink(caplog: pytes
 
     assert not guarded.failed
     assert guarded.written == 2, "the retried record and the next one both count"
-    assert [r.source_path for r in sink.records] == ["/data/caf\\udce9.txt", "/data/a.txt"]
+    assert [r.source_path for r in sink.records] == [_ESCAPED_PATH, "/data/a.txt"]
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 
 
@@ -140,8 +155,24 @@ def test_unencodable_file_name_is_written_escaped(
     assert not guarded.failed
     assert guarded.written == 2
     text = (tmp_path / "out").read_bytes().decode("utf-8")  # valid UTF-8 throughout
-    assert "/data/caf\\udce9.txt" in text
+    assert _ESCAPED_PATH in text
     assert "/data/a.txt" in text
+
+
+@pytest.mark.unit
+def test_json_writes_an_unencodable_file_name_as_the_other_results_files_do(tmp_path: Path) -> None:
+    """A lone-surrogate JSON escape (\\udce9) is rejected or replaced by strict JSON parsers."""
+    sink = JsonSink(tmp_path / "out.json")
+    sink.open()
+    record = ResultRecord(source_path=_SURROGATE_PATH, handler="pan", matches={"visa": ["4111 11** **** 1111"]})
+
+    sink.write(record)
+    sink.close()
+
+    line = json.loads((tmp_path / "out.jsonl").read_bytes().decode("utf-8"))
+    array = json.loads((tmp_path / "out.json").read_bytes().decode("utf-8"))
+    assert line["source_path"] == array[0]["source_path"] == _ESCAPED_PATH
+    assert not any(0xD800 <= ord(char) <= 0xDFFF for char in line["source_path"]), "no lone surrogate survives"
 
 
 @pytest.mark.unit

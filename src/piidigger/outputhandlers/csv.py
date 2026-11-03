@@ -2,6 +2,7 @@ import csv
 from pathlib import Path
 
 from piidigger.models.results import ResultRecord
+from piidigger.orchestration.escaping import UTF8_ERRORS
 
 _FIELDNAMES = [
     "source_path",
@@ -21,7 +22,8 @@ class CsvSink:
     Lineage fields are written even when null (on-disk files).
 
     Text that is not valid UTF-8, such as a POSIX file name holding surrogate
-    escapes, is written with backslash escapes, so it cannot fail a write.
+    escapes, is written with backslash escapes (see orchestration/escaping.py),
+    so it cannot fail a write.
 
     I/O errors propagate as OSError; the caller decides how to report them.
     """
@@ -36,7 +38,7 @@ class CsvSink:
         return (self.path,)
 
     def open(self) -> None:
-        self._file = open(self.path, "w", newline="", encoding="utf-8", errors="backslashreplace")
+        self._file = open(self.path, "w", newline="", encoding="utf-8", errors=UTF8_ERRORS)
         try:
             self._writer = csv.DictWriter(self._file, fieldnames=_FIELDNAMES)
             self._writer.writeheader()

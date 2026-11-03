@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import logging.handlers
 import math
@@ -163,6 +164,26 @@ def test_run_scan_returns_0_on_success(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
+def test_run_scan_log_names_every_results_file_and_ends_with_the_exit_code(tmp_path: Path) -> None:
+    """A log alone must say where its results went and how the run ended."""
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    (scan_root / "hello.txt").write_text("hello world 4111111111111111")
+    results_dir = tmp_path / "results"
+    log_file = tmp_path / "test.log"
+
+    rc = run_scan(
+        Config(start_dirs=[scan_root], log_file=log_file, results=ResultsConfig(path=results_dir, formats=["all"]))
+    )
+
+    assert rc == EXIT_OK
+    lines = _written_log(log_file).read_text(encoding="utf-8").splitlines()
+    logged = {line.split("Results file: ", 1)[1] for line in lines if " run INFO Results file: " in line}
+    assert logged == {str(p) for p in results_dir.iterdir()}, "one line per file: .csv, .json, .jsonl, .txt"
+    assert lines[-1].endswith(f"run INFO Exit code: {EXIT_OK}")
+
+
+@pytest.mark.integration
 def test_run_scan_aborts_when_results_cannot_be_opened(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A scan with nowhere to put its results must not start.
 
@@ -181,7 +202,9 @@ def test_run_scan_aborts_when_results_cannot_be_opened(tmp_path: Path, capsys: p
 
     assert rc == EXIT_ABORTED
     assert "Error: cannot open results file" in capsys.readouterr().err
-    assert "cannot open results file, aborting" in _written_log(log_file).read_text()
+    log_text = _written_log(log_file).read_text()
+    assert "cannot open results file, aborting" in log_text
+    assert log_text.splitlines()[-1].endswith(f"Exit code: {EXIT_ABORTED}")
     assert not any(isinstance(h, logging.handlers.QueueHandler) for h in logging.getLogger().handlers)
 
 
@@ -212,8 +235,13 @@ def test_run_scan_writes_findings_from_a_non_utf8_file_name_to_every_results_fil
     assert "Results files: all 2 results written to every results file." in capsys.readouterr().out
     for pattern in ("*.csv", "*.txt"):
         text = next(results_dir.glob(pattern)).read_bytes().decode("utf-8")  # valid UTF-8 throughout
-        assert "caf\\udce9.txt" in text
+        assert "caf\\xe9.txt" in text, "the name's own byte, so it can be found on disk"
         assert "plain.txt" in text
+    jsonl = next(results_dir.glob("*.jsonl")).read_bytes().decode("utf-8")
+    assert {json.loads(line)["source_path"] for line in jsonl.splitlines()} == {
+        str(scan_root / "caf\\xe9.txt"),
+        str(scan_root / "plain.txt"),
+    }
 
 
 @pytest.mark.integration
@@ -239,6 +267,7 @@ def test_run_scan_reports_incomplete_when_a_sink_fails_mid_scan(
         Config(
             start_dirs=[scan_root],
             log_file=log_file,
+            log_level="WARNING",
             results=ResultsConfig(path=results_dir, formats=["text", "csv"]),
         )
     )
@@ -246,6 +275,7 @@ def test_run_scan_reports_incomplete_when_a_sink_fails_mid_scan(
     assert rc == EXIT_INCOMPLETE
     log_text = _written_log(log_file).read_text()
     assert log_text.count("write failed, no further results written to it") == 1
+    assert log_text.splitlines()[-1].endswith(f"run WARNING Exit code: {EXIT_INCOMPLETE}"), "kept at WARNING level"
     out = capsys.readouterr().out
     assert "Results files incomplete (3 results found)." in out
     assert "(3 missing: stopped after an error: [Errno 28] No space left on device)" in out
@@ -535,7 +565,9 @@ def test_run_scan_cleans_up_when_workers_cannot_start(tmp_path: Path, monkeypatc
         )
 
     assert len(closed) == 1, "the results file was left open"
-    assert "scan failed during startup" in _written_log(log_file).read_text()
+    log_text = _written_log(log_file).read_text()
+    assert "scan failed during startup" in log_text
+    assert log_text.splitlines()[-1].endswith("run WARNING Exit code: 1 (scan failed: OSError)")
     assert not set(Path(tempfile.gettempdir()).glob("piidigger_*")) - before
     assert not any(isinstance(h, logging.handlers.QueueHandler) for h in logging.getLogger().handlers)
 
@@ -623,6 +655,67 @@ def test_run_scan_ctrl_c_during_startup_exits_interrupted(tmp_path: Path, monkey
 
 
 @pytest.mark.integration
+def test_run_scan_ctrl_c_at_the_admin_prompt_exits_interrupted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CTRL-C at a prompt before the scan starts once escaped to Click's exit 1, leaving the log undrained."""
+
+    def interrupted(config: Config, logger: logging.Logger) -> bool:
+        logger.warning("admin check: queued before the CTRL-C")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("piidigger.run._check_admin", interrupted)
+    config = _startup_config(tmp_path)
+
+    rc = run_scan(config)
+
+    assert rc == EXIT_INTERRUPTED
+    lines = _written_log(config.log_file).read_text().splitlines()
+    assert lines[-2].endswith("admin check: queued before the CTRL-C"), "the listener was drained"
+    assert lines[-1].endswith(f"run WARNING Exit code: {EXIT_INTERRUPTED}")
+    assert not any(isinstance(h, logging.handlers.QueueHandler) for h in logging.getLogger().handlers)
+
+
+@pytest.mark.integration
+def test_run_scan_logs_the_exit_code_when_a_second_ctrl_c_escapes_startup_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_workers(self: object, n: int) -> None:
+        raise OSError(1455, "The paging file is too small for this operation to complete")
+
+    def second_ctrl_c(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("piidigger.run.WorkerPool.start", no_workers)
+    monkeypatch.setattr("piidigger.run._abort_startup", second_ctrl_c)
+    config = _startup_config(tmp_path)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_scan(config)
+
+    last = _written_log(config.log_file).read_text().splitlines()[-1]
+    assert last.endswith("run WARNING Exit code: 1 (scan failed: OSError)"), "named by the failure that started it"
+
+
+@pytest.mark.integration
+def test_run_scan_called_while_its_caller_handles_an_exception_logs_one_exit_code(tmp_path: Path) -> None:
+    """The caller's exception is not this scan's failure."""
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    log_file = tmp_path / "test.log"
+    config = Config(start_dirs=[scan_root], log_file=log_file, results=ResultsConfig(path=tmp_path / "r"))
+
+    try:
+        raise ValueError("the caller's own")
+    except ValueError:
+        rc = run_scan(config)
+
+    assert rc == EXIT_OK
+    log_text = _written_log(log_file).read_text()
+    assert "scan failed" not in log_text
+    assert log_text.count("Exit code:") == 1
+    assert log_text.splitlines()[-1].endswith(f"run INFO Exit code: {EXIT_OK}")
+
+
+@pytest.mark.integration
 def test_run_scan_cleans_up_when_setup_fails_before_the_pool_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -678,7 +771,14 @@ def test_startup_panel_shows_windows_drive_roots_intact() -> None:
     config = Config(start_dirs=["C:\\", "D:\\"])
 
     _emit_startup_info(
-        progress, logging.getLogger("tests.startup"), config, 4, SleepStatus.ACTIVE, "1,024 MB per worker", None
+        progress,
+        logging.getLogger("tests.startup"),
+        config,
+        4,
+        SleepStatus.ACTIVE,
+        "1,024 MB per worker",
+        None,
+        results_files=[],
     )
 
     console = Console(width=200, color_system=None)
@@ -707,7 +807,9 @@ def test_startup_info_reports_sleep_status(
     logger = logging.getLogger("tests.startup")
 
     with caplog.at_level(logging.INFO, logger=logger.name):
-        _emit_startup_info(progress, logger, Config(start_dirs=[]), 1, status, "1,024 MB per worker", None)
+        _emit_startup_info(
+            progress, logger, Config(start_dirs=[]), 1, status, "1,024 MB per worker", None, results_files=[]
+        )
 
     assert text in caplog.messages
     assert f"[{colour}]{status}[/{colour}]" in progress._startup_lines[-2]
@@ -723,7 +825,14 @@ def test_startup_log_names_the_platform(caplog: pytest.LogCaptureFixture) -> Non
 
     with caplog.at_level(logging.INFO, logger=logger.name):
         _emit_startup_info(
-            ProgressDisplay(), logger, Config(start_dirs=[]), 1, SleepStatus.ACTIVE, "1,024 MB per worker", None
+            ProgressDisplay(),
+            logger,
+            Config(start_dirs=[]),
+            1,
+            SleepStatus.ACTIVE,
+            "1,024 MB per worker",
+            None,
+            results_files=[],
         )
 
     assert f"Platform: {_describe_platform()}" in caplog.messages
@@ -795,7 +904,9 @@ def test_startup_info_logs_the_memory_limit_and_shows_its_warning(caplog: pytest
     progress = ProgressDisplay()
 
     with caplog.at_level(logging.INFO, logger=logger.name):
-        _emit_startup_info(progress, logger, Config(start_dirs=[]), 3, SleepStatus.ACTIVE, description, warning)
+        _emit_startup_info(
+            progress, logger, Config(start_dirs=[]), 3, SleepStatus.ACTIVE, description, warning, results_files=[]
+        )
 
     messages = [(r.levelno, r.getMessage()) for r in caplog.records]
     assert (logging.INFO, "Memory limit: 1,024 MB per worker (up to ~3.0 GB for 3 workers)") in messages

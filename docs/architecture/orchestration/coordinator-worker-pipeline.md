@@ -239,7 +239,7 @@ Sinks never log; they raise `OSError`. `run_scan()` treats a failed `open()` as 
 
 The other sinks keep receiving findings, and the scan carries on. `close()` is still called on a failed sink to release its file handle.
 
-A `ValueError` belongs to one record, not to the sink, so the guard writes that record again with every string backslash-escaped. Only a second failure stops the sink. The CSV and text sinks and the log file open with `errors="backslashreplace"`, so text UTF-8 cannot encode, such as a POSIX file name holding surrogate escapes, does not fail a write in the first place. The JSON sink escapes it already.
+A `ValueError` belongs to one record, not to the sink, so the guard writes that record again with every string backslash-escaped. Only a second failure stops the sink. The CSV and text sinks and the log file open with the `piidigger.escape` error handler from `orchestration/escaping.py`. Text UTF-8 cannot encode, such as a POSIX file name holding surrogate escapes, therefore does not fail a write in the first place. The JSON sink escapes each record with the same handler before it serializes it. On POSIX, each surrogate escape is written as the byte it stands for, so `bad\xff.txt` names the file on disk. On Windows, a lone surrogate is part of the UTF-16 name and is written as `\udcff`.
 
 Each guard counts the results its sink received. After closing the sinks, the coordinator hands those counts to the progress display. A second CTRL-C during teardown skips the close, and the counts are handed over anyway. A file that was never closed is then reported as not saved, because its buffered results never reached disk. The end-of-run summary checks each results file against the number of results found:
 

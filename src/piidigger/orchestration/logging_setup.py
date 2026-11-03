@@ -6,6 +6,8 @@ import multiprocessing as mp
 from pathlib import Path
 from typing import Any
 
+from piidigger.orchestration.escaping import UTF8_ERRORS
+
 # How long stop_listener() waits for queued log records to be written out.
 _LISTENER_STOP_TIMEOUT: float = 5.0
 
@@ -119,10 +121,10 @@ def start_listener(
     # non-ASCII character logged (e.g. a path) raised UnicodeEncodeError in
     # the listener thread, dropping the record and corrupting the rich.Live
     # display.
-    # errors="backslashreplace": a POSIX file name that is not valid UTF-8
-    # arrives as surrogate escapes, which strict UTF-8 cannot encode.  logging
-    # would drop that record, and with it the only report of that file.
-    handler = logging.FileHandler(log_file, mode="w", encoding="utf-8", errors="backslashreplace")
+    # errors=UTF8_ERRORS: a POSIX file name that is not valid UTF-8 arrives as
+    # surrogate escapes, which strict UTF-8 cannot encode.  logging would drop
+    # that record, and with it the only report of that file.
+    handler = logging.FileHandler(log_file, mode="w", encoding="utf-8", errors=UTF8_ERRORS)
     handler.setLevel(level)
     handler.setFormatter(_SingleLineFormatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
     listener = logging.handlers.QueueListener(
@@ -154,6 +156,16 @@ def stop_listener(listener: logging.handlers.QueueListener, timeout: float = _LI
     thread.join(timeout)
     listener._thread = None  # stopped, or given up on: either way, done waiting
     return not thread.is_alive()
+
+
+def log_after_stop(listener: logging.handlers.QueueListener, name: str, level: int, message: str) -> None:
+    """Write one record straight to a stopped listener's handlers, at their own levels.
+
+    The coordinator stops the listener during its teardown, before run_scan()
+    knows its exit code.  The handlers stay open, so this is how that last line
+    still reaches the log file.
+    """
+    listener.handle(logging.LogRecord(name, level, __file__, 0, message, None, None))
 
 
 def _pkg_from_path(filename: str) -> str | None:

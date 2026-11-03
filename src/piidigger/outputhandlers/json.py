@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from piidigger.models.results import ResultRecord
+from piidigger.orchestration.escaping import escaped_record
 
 
 def _naming(error: OSError, path: Path) -> OSError:
@@ -26,6 +27,10 @@ class JsonSink:
     Only a hard kill (SIGKILL) loses the .json array; clean exit and Ctrl+C
     both flush it because the coordinator calls close() from a finally block.
 
+    Text that is not valid UTF-8, such as a POSIX file name holding surrogate
+    escapes, is written with the backslash escapes the CSV and text files use,
+    not as a lone-surrogate JSON escape that strict JSON parsers reject.
+
     I/O errors propagate as OSError; the caller decides how to report them.
     """
 
@@ -48,7 +53,7 @@ class JsonSink:
         A record the stream failed to take is not kept, so the array never holds
         more than the caller counted as written, and a retried record appears once.
         """
-        data = record.model_dump()
+        data = escaped_record(record).model_dump()
         if self._file is not None:
             try:
                 self._file.write(json.dumps(data) + "\n")

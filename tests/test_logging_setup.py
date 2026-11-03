@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import queue
+import sys
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
@@ -117,7 +118,9 @@ def test_log_file_keeps_a_record_naming_a_non_utf8_file(tmp_path: Path) -> None:
         stop_listener(listener)
 
     lines = log_file.read_bytes().decode("utf-8").splitlines()
-    assert lines[0].endswith("skipping /data/caf\\udce9.txt: text encoding could not be detected")
+    # The byte the escape stands for on POSIX; the UTF-16 unit itself on Windows.
+    escaped = "caf\\xe9.txt" if sys.getfilesystemencodeerrors() == "surrogateescape" else "caf\\udce9.txt"
+    assert lines[0].endswith(f"skipping /data/{escaped}: text encoding could not be detected")
     assert lines[1].endswith("next record")
 
 

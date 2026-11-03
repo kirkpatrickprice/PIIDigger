@@ -4,28 +4,10 @@ import logging
 from typing import Any
 
 from piidigger.models.results import ResultRecord
-from piidigger.orchestration.escaping import utf8_escaped
+from piidigger.orchestration.escaping import escaped_record
 from piidigger.orchestration.progress import ProgressDisplay, ResultsFile
 
 _NOT_SAVED = "not saved: the scan was force-quit before the file was closed"
-
-
-def _escaped_record(record: ResultRecord) -> ResultRecord:
-    """A copy of record with every string escaped as utf8_escaped() does."""
-    member = record.source_member_path
-    container = record.source_container_type
-    return record.model_copy(
-        update={
-            "source_path": utf8_escaped(record.source_path),
-            "source_member_path": None if member is None else utf8_escaped(member),
-            "source_container_type": None if container is None else utf8_escaped(container),
-            "handler": utf8_escaped(record.handler),
-            "matches": {
-                utf8_escaped(match_type): [utf8_escaped(value) for value in values]
-                for match_type, values in record.matches.items()
-            },
-        }
-    )
 
 
 def _value_count(record: ResultRecord) -> int:
@@ -101,7 +83,7 @@ class GuardedSink:
 
     def _write_escaped(self, record: ResultRecord, first: ValueError) -> bool:
         """Write record again with its strings escaped.  True if that worked."""
-        escaped = _escaped_record(record)
+        escaped = escaped_record(record)
         try:
             self._sink.write(escaped)
         except (OSError, ValueError) as exc:

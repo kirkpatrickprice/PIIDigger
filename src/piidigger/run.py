@@ -26,6 +26,7 @@ from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.coordinator import CoordinatorResult, run_coordinator, stop_workers
 from piidigger.orchestration.logging_setup import (
     build_worker_logger,
+    log_after_stop,
     route_library_logs,
     setup_warning_capture,
     start_listener,
@@ -200,11 +201,14 @@ def _emit_startup_info(
     sleep_status: SleepStatus,
     memory_limit: str,
     memory_warning: str | None,
+    *,
+    results_files: list[Path],
 ) -> None:
     """Emit a startup configuration summary to the event log and run logger.
 
     memory_limit and memory_warning are _memory_budget()'s result, worked out
-    once in run_scan() and shared with _check_memory().
+    once in run_scan() and shared with _check_memory().  results_files are the
+    opened sinks' paths, logged one per line so a log names its results.
     """
     plural = "es" if worker_count != 1 else ""
     sleep_active = sleep_status in (SleepStatus.ACTIVE, SleepStatus.ACTIVE_LOGIND)
@@ -217,6 +221,7 @@ def _emit_startup_info(
         f"Memory limit: {memory_limit}",
         f"Scan directories: {dirs}",
         f"Log file: {config.log_file}",
+        *(f"Results file: {path}" for path in results_files),
         f"Sleep prevention: {sleep_status}",
         "Press CTRL-C to terminate the scan",
     ]
@@ -465,15 +470,26 @@ def run_scan(config: Config) -> int:
 
     # The admin and memory checks and sink opening all happen before
     # progress.start() takes over the terminal, so their prompts and errors
-    # print cleanly.
-    memory_limit, memory_warning = _memory_budget(
-        config.max_worker_memory_mb, worker_count, psutil.virtual_memory().total
-    )
-    proceed = _check_admin(config, run_logger) and _check_memory(memory_warning, run_logger)
-    sinks = _open_sinks(config, timestamp, run_logger) if proceed else None
+    # print cleanly.  CTRL-C at a prompt ends the run as one during the scan
+    # does; any other failure still drains the listener and logs the exit code.
+    try:
+        memory_limit, memory_warning = _memory_budget(
+            config.max_worker_memory_mb, worker_count, psutil.virtual_memory().total
+        )
+        proceed = _check_admin(config, run_logger) and _check_memory(memory_warning, run_logger)
+        sinks = _open_sinks(config, timestamp, run_logger) if proceed else None
+    except BaseException as exc:
+        stop_listener(listener)
+        stop_library_log_routing()
+        if isinstance(exc, KeyboardInterrupt):
+            _log_exit_code(listener, EXIT_INTERRUPTED)
+            return EXIT_INTERRUPTED
+        _log_exit_code(listener, 1, f" (scan failed: {type(exc).__name__})")
+        raise
     if sinks is None:
         stop_listener(listener)
         stop_library_log_routing()
+        _log_exit_code(listener, EXIT_ABORTED)
         return EXIT_ABORTED
 
     # Teardown belongs to run_coordinator once it is called.  Anything that
@@ -485,6 +501,9 @@ def run_scan(config: Config) -> int:
     pool: WorkerPool | None = None
     progress = ProgressDisplay(log_file=config.log_file)
     handed_off = False
+    # Set only on the way to a return; anything else leaving the try is a failure.
+    returning = False
+    cause: BaseException | None = None
     try:
         # Create a PIIDigger-owned temp root and exclude it from directory
         # scanning so ENUM_DIR workers never attempt to scan extracted archive
@@ -521,10 +540,21 @@ def run_scan(config: Config) -> int:
         pool.start(worker_count)
         progress.start()
         with prevent_sleep(run_logger) as sleep_status:
-            _emit_startup_info(progress, run_logger, config, worker_count, sleep_status, memory_limit, memory_warning)
+            _emit_startup_info(
+                progress,
+                run_logger,
+                config,
+                worker_count,
+                sleep_status,
+                memory_limit,
+                memory_warning,
+                results_files=[path for sink in sinks for path in sink.paths],
+            )
             handed_off = True
             outcome = run_coordinator(worker_ctx, pool, listener, sinks, progress)
+        returning = True
     except BaseException as exc:
+        cause = exc
         interrupted = isinstance(exc, KeyboardInterrupt)
         if not handed_off:
             _abort_startup(ctx, pool, sinks, progress, run_logger, interrupted=interrupted)
@@ -533,6 +563,7 @@ def run_scan(config: Config) -> int:
         # CTRL-C must exit EXIT_INTERRUPTED, not Click's "Aborted!" exit 1,
         # which automation would read as EXIT_ABORTED.
         outcome = CoordinatorResult(interrupted=True)
+        returning = True
     finally:
         # secure_rmtree, not shutil.rmtree: a worker killed by terminate() never
         # unwinds its own finally, so its extracted members survive to here.
@@ -545,11 +576,31 @@ def run_scan(config: Config) -> int:
         # file.  Stopping an already-stopped listener is a no-op.
         stop_listener(listener)
         stop_library_log_routing()
+        # An exception leaving run_scan ends the process with Python's exit code 1:
+        # the error re-raised above, or a second CTRL-C out of _abort_startup(),
+        # named here by the failure that started it.
+        if not returning:
+            reason = type(cause).__name__ if cause is not None else "unknown error"
+            _log_exit_code(listener, 1, f" (scan failed: {reason})")
 
-    # No logging from here on: the listener is stopped, so records would be
-    # dropped.  run_coordinator has already logged each of these outcomes.
+    # The listener is stopped, so a logger's records would be dropped.
+    # run_coordinator has already logged each of these outcomes; only the exit
+    # code is left, and _log_exit_code() writes it to the log file directly.
     if outcome.interrupted:
-        return EXIT_INTERRUPTED
-    if outcome.unfinished or outcome.workers_failed or outcome.sinks_failed:
-        return EXIT_INCOMPLETE
-    return EXIT_OK
+        rc = EXIT_INTERRUPTED
+    elif outcome.unfinished or outcome.workers_failed or outcome.sinks_failed:
+        rc = EXIT_INCOMPLETE
+    else:
+        rc = EXIT_OK
+    _log_exit_code(listener, rc)
+    return rc
+
+
+def _log_exit_code(listener: logging.handlers.QueueListener, rc: int, reason: str = "") -> None:
+    """Write the run's last log line, once the listener has stopped.
+
+    A non-zero code is a WARNING, as the summary's "Not fully scanned" rows
+    are, so log_level = "WARNING" still records how the run ended.
+    """
+    level = logging.INFO if rc == EXIT_OK else logging.WARNING
+    log_after_stop(listener, "run", level, f"Exit code: {rc}{reason}")
