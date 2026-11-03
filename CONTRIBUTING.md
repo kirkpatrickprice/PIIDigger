@@ -13,6 +13,21 @@ This is an initial release and -- sadly -- I still have a day job.  There's plen
     * Add file handler types -- anything that Python can read is open game.
     * Add data handler types -- and the associated Regex tuning.
 
+## Changing GitHub workflows
+
+Run these three checks from the repo root before you commit any change under `.github/`.
+The `Workflow Lint` CI workflow runs the same checks on every PR that touches `.github/`.
+
+```bash
+actionlint                     # syntax, expressions, job wiring, shellcheck on run: blocks
+zizmor .github/workflows/      # security findings
+pinact run --check             # every action is pinned to a commit SHA
+```
+
+- **Pin a new action:** after you add a `uses:` line, run `pinact run`. It rewrites the ref to `owner/action@<sha> # vX.Y.Z`.
+- **Suppress a finding:** fix it if you can. Otherwise add `# zizmor: ignore[<rule>]` on the line, with a comment saying why.
+- **Install:** get [actionlint](https://github.com/rhysd/actionlint) and [pinact](https://github.com/suzuki-shunsuke/pinact) from their release pages, and zizmor with `uv tool install zizmor`.
+
 ## Building a local dev release
 
 A local build produces the same standalone bundle as a release, named

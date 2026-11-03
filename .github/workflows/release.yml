@@ -8,26 +8,41 @@ concurrency:
   group: release-${{ github.event.release.tag_name }}
   cancel-in-progress: false
 
+# Each job grants exactly what its called workflow requests; a called workflow
+# cannot exceed its caller's grant.
+permissions: {}
+
 jobs:
   verify:
+    permissions:
+      contents: read
     uses: ./.github/workflows/_release-verify.yml
 
   publish-pypi:
     needs: verify
+    permissions:
+      contents: read
+      id-token: write
     uses: ./.github/workflows/_release-publish-pypi.yml
-    secrets: inherit
 
   build-standalone:
     needs: verify
+    permissions:
+      contents: write
     uses: ./.github/workflows/_release-build-standalone.yml
-    secrets: inherit
 
   virustotal-scan:
     needs: build-standalone
+    permissions:
+      contents: write
     uses: ./.github/workflows/_release-virustotal.yml
-    secrets: inherit
+    secrets:
+      VT_API_KEY: ${{ secrets.VT_API_KEY }}
 
   deploy-docs:
     needs: verify
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     uses: ./.github/workflows/_release-deploy-docs.yml
-    secrets: inherit

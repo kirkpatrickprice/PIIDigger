@@ -1,32 +1,38 @@
 name: Release - Publish to PyPI
 
+# Called only from release.yml; no workflow_dispatch, so nothing can publish
+# without a release event and its tag check.
 on:
   workflow_call:
-  workflow_dispatch:
 
-permissions:
-  contents: read
-  id-token: write
+permissions: {}
 
+# Two jobs, as PyPA recommends: `uv build` runs unlocked build-backend code, so
+# it must not share a job with the OIDC token that can mint a PyPI upload token.
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
-    environment: pypi
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version-file: .python-version
-      - uses: astral-sh/setup-uv@v10.2.0
+      # No cache: a poisoned cache must not be able to reach what goes to PyPI.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          enable-cache: true
+          enable-cache: false
 
       - name: Verify release tag matches package version
-        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          TAG="${{ github.event.release.tag_name }}"
           TAG_VERSION="${TAG#v}"
-          PKG_VERSION="$(uv run python -c 'import piidigger; print(piidigger.__version__)')"
+          PKG_VERSION="$(uv run --locked python -c 'import piidigger; print(piidigger.__version__)')"
           if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
             echo "::error::Release tag ($TAG -> $TAG_VERSION) does not match piidigger.__version__ ($PKG_VERSION)"
             exit 1
@@ -36,5 +42,24 @@ jobs:
       - name: Build sdist and wheel
         run: uv build
 
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: python-dists
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: pypi
+    permissions:
+      id-token: write # PyPI trusted publishing
+    # No checkout and no run: steps; only the publish action sees the OIDC token.
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: python-dists
+          path: dist/
+
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

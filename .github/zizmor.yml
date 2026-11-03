@@ -1,0 +1,6 @@
+rules:
+  # The `$/` self-repository syntax is too new for actionlint 1.7.12, which
+  # rejects it as an invalid reusable-workflow reference. Re-enable this rule
+  # once actionlint accepts `$/`.
+  self-repository:
+    disable: true

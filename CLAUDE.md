@@ -61,6 +61,15 @@ To build a local standalone bundle (`piidigger-<version>-dev-<sha>-<platform>`) 
 follow [Building a local dev release](CONTRIBUTING.md#building-a-local-dev-release) in `CONTRIBUTING.md`.
 When you report a build, say whether `git status` showed uncommitted changes, since the name only reflects `HEAD`.
 
+Before committing any change under `.github/`, run the workflow gate from the repo root. All three must be clean
+(see [Changing GitHub workflows](CONTRIBUTING.md#changing-github-workflows)):
+
+```bash
+actionlint
+zizmor .github/workflows/
+pinact run --check
+```
+
 ---
 
 ## Project Structure
