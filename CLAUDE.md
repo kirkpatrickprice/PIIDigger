@@ -57,6 +57,10 @@ uv run pytest tests/ --cov=src/piidigger --cov-report=term-missing
 uv run mkdocs serve
 ```
 
+To build a local standalone bundle (`piidigger-<version>-dev-<sha>-<platform>`) on Windows, Linux or macOS,
+follow [Building a local dev release](CONTRIBUTING.md#building-a-local-dev-release) in `CONTRIBUTING.md`.
+When you report a build, say whether `git status` showed uncommitted changes, since the name only reflects `HEAD`.
+
 ---
 
 ## Project Structure

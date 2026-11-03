@@ -57,7 +57,8 @@ win = [
     "pywin32; sys_platform == 'win32'",
     ]
 build = [
-    "pyinstaller>=6.6.0",
+    # 6.16 is the first release whose bootloader supports Python 3.14
+    "pyinstaller>=6.16.0",
     ]
 pypi = [
     "build>=1.2.1",

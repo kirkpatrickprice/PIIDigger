@@ -166,7 +166,7 @@ debugging a single stage):
    - *linux* and *macos* both freeze `src/piidigger/__main__.py` with
      `--name piidigger`. The repo-root `piidigger.py` shadows the `piidigger`
      package during PyInstaller analysis, so it is not a usable entry script.
-   - *windows*: embedded-Python build via `build_windows_embedded.ps1`, zipped.
+   - *windows*: embedded-Python build via `.github/scripts/build-windows-embedded.ps1`, zipped.
    - *macos*: matrix over `macos-latest` (arm64) and `macos-13` (x86_64),
      built directly with `pyinstaller --onedir`. Unsigned/unnotarized —
      Gatekeeper shows an "unidentified developer" warning, documented as a
