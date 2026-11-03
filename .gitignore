@@ -11,6 +11,8 @@ __pycache__/
 *.so
 
 # Distribution / packaging
+# Written at build time by .github/scripts/write_build_info.py
+src/piidigger/_build_info.py
 .Python
 *build/
 develop-eggs/
