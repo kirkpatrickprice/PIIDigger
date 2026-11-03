@@ -1,4 +1,6 @@
+import re
 import time
+from pathlib import Path
 
 import pytest
 
@@ -168,3 +170,67 @@ def test_email_regex_is_linear_on_long_run_without_at() -> None:
 
     assert result == {"email": {"u***@example.com"}}
     assert elapsed < 1.0, f"regex took {elapsed:.3f}s — quadratic backtracking on the local part"
+
+
+# Long runs with no "@" once made the regex quadratic: 105s on one 277 KB token
+# of a source map.  Each shape below took 11-30s before the local part was bounded.
+@pytest.mark.datahandlers
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param('[[0,44],\\"valid\\"],' * 4000, id="escaped quotes"),
+        pytest.param("a." * 40000, id="dotted run"),
+        # Not a long run, but the same failure: 36 backslashes took 2.3s, doubling with each 2.
+        pytest.param("x@[1.2.3.a:" + "\\" * 60, id="backslashes in a domain literal"),
+    ],
+)
+def test_email_regex_is_fast_on_long_runs_without_at(shape: str) -> None:
+    start = time.perf_counter()
+    result = email.handler.find_matches(f"{shape} a@b.com")
+    elapsed = time.perf_counter() - start
+
+    assert result == {"email": {"*@b.com"}}
+    assert elapsed < 1.0, f"regex took {elapsed:.3f}s on a long run with no '@'"
+
+
+@pytest.mark.datahandlers
+@pytest.mark.parametrize(
+    "address",
+    [
+        pytest.param("x" * 64 + "@example.com", id="unquoted"),
+        pytest.param("a" * 31 + "." + "b" * 32 + "@example.com", id="unquoted dotted"),
+        pytest.param('"' + "q" * 62 + '"@example.com', id="quoted"),
+    ],
+)
+def test_email_local_part_of_64_characters_still_matches(address: str) -> None:
+    assert email.handler.find_matches(f"to {address} today") == {"email": {email._redact(address)}}
+
+
+@pytest.mark.datahandlers
+def test_email_over_long_local_part_reports_the_part_within_64_characters() -> None:
+    """The whole 71-character local part is invalid; the dotted part after it is a finding."""
+    result = email.handler.find_matches("to " + "x" * 60 + "." + "y" * 10 + "@example.com")
+
+    assert result == {"email": {email._redact("y" * 10 + "@example.com")}}
+
+
+# The regex as it was before the local part was bounded.  Its findings on
+# testdata/ hold no domain literal, so the dtext fix leaves them unchanged.
+_LEGACY_EMAIL_REGEX = re.compile(
+    r'(?:(?<![a-zA-Z0-9!#$%&\'*+/=?^_`{|}~-])[a-zA-Z0-9!#$%&\'*+/=?^_`{|}~-]+(?:\.[a-zA-Z0-9!#$%&\'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-zA-Z0-9-]*[a-zA-Z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])'
+)
+
+
+def _valid_matches(regex: re.Pattern[str], text: str) -> set[str]:
+    return {email._redact(m.strip()) for m in regex.findall(text) if email._is_valid(m.strip())}
+
+
+@pytest.mark.datahandlers
+@pytest.mark.slow  # the legacy regex is quadratic, so a long token in testdata/ costs minutes
+def test_email_regex_finds_what_the_legacy_regex_found_in_testdata() -> None:
+    files = [p for p in (Path(__file__).parents[1] / "testdata").rglob("*") if p.is_file()]
+    assert files, "testdata/ is missing"
+
+    for path in files:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        assert _valid_matches(email._EMAIL_REGEX, text) == _valid_matches(_LEGACY_EMAIL_REGEX, text), path

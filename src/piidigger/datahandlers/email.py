@@ -3,11 +3,45 @@ import re
 DH_NAME = "email"
 DH_DISPLAY_NAME = "Email Address"
 
+# RFC5322 compliant email regex, built from the grammar's own parts.
 # Compiled once at module scope to avoid repeated compilation overhead on every call.
-# RFC5322 compliant email regex
-_EMAIL_REGEX = re.compile(
-    r'(?:(?<![a-zA-Z0-9!#$%&\'*+/=?^_`{|}~-])[a-zA-Z0-9!#$%&\'*+/=?^_`{|}~-]+(?:\.[a-zA-Z0-9!#$%&\'*+/=?^_`{|}~-]+)*|"(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])*")@(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?|\[(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?|[a-zA-Z0-9-]*[a-zA-Z0-9]:(?:[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x53-\x7f]|\\[\x01-\x09\x0b\x0c\x0e-\x7f])+)\])'
+
+# The characters of an unquoted local part, less "-", which each class adds
+# last so it cannot be read as a range.
+_ATEXT_CHARS = r"a-zA-Z0-9!#$%&\'*+/=?^_`{|}~"
+_DOT_ATOM = rf"[{_ATEXT_CHARS}-]+(?:\.[{_ATEXT_CHARS}-]+)*"  # e.g. john.smith
+_QTEXT = r"[\x01-\x08\x0b\x0c\x0e-\x1f\x21\x23-\x5b\x5d-\x7f]"  # inside "..." except " and \
+_QUOTED_PAIR = r"\\[\x01-\x09\x0b\x0c\x0e-\x7f]"  # \" or \\ etc. inside "..."
+# Inside a [domain literal]: RFC 5322's dtext, which excludes [ \ ].  This once
+# read \x53-\x7f, admitting "\", so a run of backslashes matched as dtext or as
+# quoted pairs in every combination: 36 of them took 2.3s, doubling with each 2.
+_DTEXT = r"[\x01-\x08\x0b\x0c\x0e-\x1f\x21-\x5a\x5e-\x7f]"
+_LABEL = r"[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?"  # one hostname label
+_OCTET = r"25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?"  # 0-255
+
+# _is_valid() rejects a local part over 64 characters, so the regex need not
+# look further.  Unbounded, each start in a long run with no '@' scanned to the
+# run's end, so the time grew with the square of its length: one 277 KB token
+# in a source map took 105s.
+#
+# The bound also changes one result, by choice: a local part over 64
+# characters, once rejected whole, now yields its last dotted part within 64
+# characters (x...x.yyy@d.com finds yyy@d.com).  A scanner should rather
+# report a piece of an address than nothing.
+_MAX_LOCAL = 64
+
+_UNQUOTED_LOCAL = (
+    rf"(?<![{_ATEXT_CHARS}-])"  # starts where a local part can start
+    rf"(?=[{_ATEXT_CHARS}.-]{{1,{_MAX_LOCAL}}}@)"  # and reaches "@" within _MAX_LOCAL
+    rf"{_DOT_ATOM}"
 )
+_QUOTED_LOCAL = rf'"(?:{_QTEXT}|{_QUOTED_PAIR}){{0,{_MAX_LOCAL - 2}}}"'  # 62 items, not characters: a quoted pair is two, so _is_valid() has the last word
+_HOSTNAME = rf"(?:{_LABEL}\.)+{_LABEL}"
+# Matches user@[192.168.1.1], but _is_valid() requires a letter TLD, so a
+# domain literal is never reported today.
+_DOMAIN_LITERAL = rf"\[(?:(?:{_OCTET})\.){{3}}(?:{_OCTET}|[a-zA-Z0-9-]*[a-zA-Z0-9]:(?:{_DTEXT}|{_QUOTED_PAIR})+)\]"
+
+_EMAIL_REGEX = re.compile(rf"(?:{_UNQUOTED_LOCAL}|{_QUOTED_LOCAL})@(?:{_HOSTNAME}|{_DOMAIN_LITERAL})")
 
 
 def _is_valid(text: str) -> bool:
