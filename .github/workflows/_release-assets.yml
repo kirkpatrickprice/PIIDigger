@@ -44,9 +44,10 @@ jobs:
           uv export --locked --no-dev --extra win --extra build --format cyclonedx1.5
           -o "$ARTIFACT_BASE-sbom.cdx.json"
 
+      # Unzipped and named after the file, so collect's artifact_base-* pattern picks it up with the bundles.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: sbom
+          archive: false
           path: ${{ inputs.artifact_base }}-sbom.cdx.json
           if-no-files-found: error
 
@@ -71,11 +72,6 @@ jobs:
         with:
           name: python-dists
           path: py
-
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: sbom
-          path: assets
 
       # The wheel and sdist checksums leave as a job output too: a later job in
       # the run can replace a workflow artifact, but not this job's outputs.
