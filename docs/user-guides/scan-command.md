@@ -29,7 +29,7 @@ The simplest way to run a scan is with no arguments at all:
 piidigger
 ```
 
-This is shorthand for `piidigger scan`, and behaves the same whether you type the subcommand or not. With no config file in the current directory, it uses PIIDigger's built-in defaults: every Windows drive letter or Linux/MacOS mount, every supported file type and archive format, every registered PII data type, the `"balanced"` performance preset, and results written to `.\piidigger-results\` in all supported output formats.
+This is shorthand for `piidigger scan`, and behaves the same whether you type the subcommand or not. With no config file in the current directory, it uses PIIDigger's built-in defaults, listed under [Default Settings](#default-settings) below.
 
 ## Core Functionality
 
@@ -66,7 +66,7 @@ piidigger scan -f piidigger.toml --no-archives
 
 #### Working with Files
 
-`scan` doesn't take file or folder arguments directly — where it looks is controlled entirely by `start_dirs` and `exclude_dirs` in the configuration (built-in defaults scan every available drive/mount). See [Advanced Configuration](advanced-configuration.md#start_dirs-and-exclude_dirs) to point a scan at specific folders instead of the whole system or to exclude certain drive letters/folders.
+`scan` doesn't take file or folder arguments directly — where it looks is controlled entirely by `start_dirs` and `exclude_dirs` in the configuration (built-in defaults scan every available drive/mount, with reasonable per-OS exceptions). See [Advanced Configuration](advanced-configuration.md#start_dirs-and-exclude_dirs) to point a scan at specific folders instead of the whole system or to exclude certain drive letters/folders.
 
 ## Configuration
 
@@ -75,7 +75,8 @@ piidigger scan -f piidigger.toml --no-archives
 ### Default Settings
 
 With no config file, `scan` will use the following default configuration:
-* Scan all available Windows drive letters or Linux/MacOS disk partitions
+
+* Scan every path on all available Windows drive letters or Linux/MacOS disk partitions, with reasonable per-OS exceptions for operating system and program folders such as `C:\Windows` and `/usr/bin`
 * Scan for all supported file types
 * Scan inside all supported archive files
 * Scan for all supported sensitive data types
@@ -127,7 +128,7 @@ Rows with nothing to report are left out. So a clean run is just the first two l
 - **Scanned** counts only what was actually read.
 - **Not fully scanned** lists content that might hold PII but wasn't read. A file with an error may still have been partly read, and anything found in the part that was read stays in your results. A PDF with no extractable text opened without error but held no text, usually because its pages are scanned images. PIIDigger doesn't read text from images, so it counts these under "Scanned" and lists them here too. If this section lists rejected archive members, see [The summary says archive members were rejected](troubleshooting.md#the-summary-says-archive-members-were-rejected).
 - **Skipped by design** lists file types PIIDigger has no reader for, or that `include_exts` left out. It isn't a problem unless you expected those types to be scanned.
-- **Results files** checks each results file against the number of results found. If any file received fewer, for example because the disk filled up, the line becomes a "Results files incomplete" block instead. It lists every file with its count and what it is missing:
+- **Results files** checks each results file against the number of results found. If any file received fewer than the total, this line becomes a "Results files incomplete" block instead. It lists every file with its count and what it is missing:
 
   ```text
   Results files incomplete (88,441 results found). See the log for details: logs/piidigger-20261101-224139.log
@@ -199,7 +200,7 @@ Note: For a full-disk scan on Windows, it's necessary to start the Powershell pr
 
 PIIDigger asks the operating system to stay awake during a scan. The Scan Configuration panel shows the result:
 
-- **Active** — the desktop or operating system accepted the request.
+- **Active** — the desktop environment or operating system accepted the request.
 - **Active (logind)** — on Linux, the desktop could not take the request, so PIIDigger holds a lock from `logind` instead. This is normal under `sudo`. Run `systemd-inhibit --list` to see the lock.
 - **Unavailable (no desktop session or logind lock)** — on Linux, neither route worked. This is common in containers, and for a standard user over SSH, whom `logind` usually refuses. Running with `sudo` avoids the refusal. The log file records the reason.
 - **Unavailable** — on Windows or macOS, the request failed. The log file records the reason.
@@ -213,11 +214,13 @@ The machine can still suspend while the status is active:
 
 ### Stopping a scan early
 
-Press **Ctrl+C** once. PIIDigger stops feeding new work to the workers, lets in-flight tasks wind down, flushes whatever results have been found so far to the output sinks, and exits. Output files up to that point are valid and usable — they just won't include anything past the point of interruption.
+Press **Ctrl+C** once. PIIDigger stops feeding new work to the workers, lets in-flight tasks wind down, flushes whatever results have been found so far to the output files, and exits. Output files up to that point are valid and usable — they just won't include anything past the point of interruption.
 
 If Ctrl+C doesn't respond within a few seconds and the process genuinely seems stuck, fall back to stopping it at the OS level — see [Troubleshooting](troubleshooting.md#a-scan-appears-hung) for the platform-specific commands.
 
 ### Getting Help
+
+Append `--help` to just about anything to see a brief explanation of available options.
 
 ```powershell
 piidigger scan --help
@@ -263,6 +266,7 @@ piidigger scan -f piidigger.toml --no-archives
 ### Performance Considerations
 
 - The `performance` config setting controls worker count (`"fast"` = one per logical core, `"balanced"` = ~75% of physical cores, `"slow"` = one worker total). More workers means faster wall-clock time but more simultaneous disk/CPU load — `"slow"` is worth using on a shared or production system you don't want to visibly impact.
+- The number of workers has a direct effect on how much PIIDigger could use.  Each worker is capped at `max_worker_memory_mb` RAM (default 1,024MB).  Each worker will use up to that amount depending on the task. This cap does not apply to the coordination/orchestration part of PIIDigger, but the total RAM here is negligible compared to the workers.  Therefore, the maximum amount of RAM that might ever be used approximately `max_worker_memory_mb * workers`.  This should be kept in mind when adjusting the `performance` profile, especially if running it on a production server or a resource-starved laptop.  See [Advanced Configuration](advanced-configuration.md) for additional details.
 - Scans against network shares are usually I/O-bound, not CPU-bound — a higher `performance` preset won't help as much there as it does on local disks, and `default_timeout_seconds` may need to be raised to accommodate slower reads.
 
 ## Related Documentation

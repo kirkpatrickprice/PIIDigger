@@ -52,7 +52,7 @@ This is a clean-slate rewrite of the orchestration layer. There is **no incremen
 - The subprocess-based progress line.
 
 ### Kept, but re-contracted
-The three business-logic layers survive because the PII-matching and file-reading logic is correct. Every layer gets a new, narrower interface (details in [New Business-Logic Protocols](#new-business-logic-contracts)):
+The three business-logic layers survive because the PII-matching and file-reading logic is correct. Every layer gets a new, narrower interface (details in [New Business-Logic Protocols](#new-business-logic-protocols)):
 - **Data handlers** (`datahandlers/`): the PII matchers (pan, email, phonenum, trackdata).
 - **File handlers** (`filehandlers/`): readers that turn a file into text chunks (plaintext, pdf, docx, xlsx, xls).
 - **Output handlers** (`outputhandlers/`): the CSV/JSON/text writers, recast as **sinks** that no longer own a queue loop.

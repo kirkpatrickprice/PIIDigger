@@ -71,3 +71,25 @@ jobs:
         run: >
           uv run pytest tests/ -v
           --cov=src/piidigger --cov-report=term-missing --cov-fail-under=80
+
+  # deploy-docs needs this workflow, so a release only publishes a site that builds cleanly.
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.13.6"
+          enable-cache: true
+          # full-test-suite saves this same cache key.
+          save-cache: false
+      - name: Install dependencies
+        run: uv sync --locked --extra docs
+      - name: Build docs (strict)
+        run: uv run mkdocs build --strict

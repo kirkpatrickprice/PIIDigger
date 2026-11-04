@@ -68,7 +68,12 @@ Outcome:   Scanned with PlaintextHandler
 
 A file with a plain-text extension is always read as text. Any other file goes by its MIME type first, then its extension. See [Advanced Configuration](advanced-configuration.md#root-level-settings) for the full rules.
 
-The encoding comes from the same detection code as the scanner, and it examines only the first 4 MB of the file. If detection fails but at least half of the sample is text, as with browser storage files, it shows `latin_1`, and the scanner reads the file that way. A file that is pure ASCII in that first 4 MB is reported as `utf_8`: UTF-8 reads ASCII identically and also handles any non-ASCII text later in the file. An empty file shows `(not detected)`, and is scanned with nothing to read. A non-empty file with no detected encoding has the outcome `Not read: text encoding could not be detected`.
+The encoding comes from the same detection code as the scanner, and it examines only the first 4 MB of the file:
+
+- **Pure ASCII:** a file that is pure ASCII in that first 4 MB is reported as `utf_8`. UTF-8 reads ASCII identically and also handles any non-ASCII text later in the file.
+- **Mostly text:** if detection fails but at least half of the sample is text, as with browser storage files, it shows `latin_1`, and the scanner reads the file that way.
+- **Empty file:** shows `(not detected)`, and is scanned with nothing to read.
+- **No encoding detected:** a non-empty file has the outcome `Not read: text encoding could not be detected`.
 
 This command applies the selection rules but doesn't open the file with the handler it names. So `Scanned with PdfHandler` means the file would go to that handler, not that the handler can read it: a damaged or mislabeled file can still be reported as not read during the scan. It reports a symbolic link to a file, and other non-regular files, as skipped, as a scan does inside a folder. A link to a folder, or one whose target is missing, gets a path error instead. It doesn't check `exclude_dirs` or `local_files_only`, and it doesn't account for a symbolic link further up the path. An archive's members are not listed, and members follow their own rule: they go by extension alone. If your account can't read the file, the command reports a path error. Only a file is accepted, not a folder.
 
@@ -204,6 +209,8 @@ piidigger inspect cpu
 `"fast"` uses the logical CPU count, `"balanced"` uses ~75% of the physical count, and `"slow"` always uses one worker — `inspect cpu` tells you the actual numbers those presets will resolve to here.
 
 **NOTE:** The difference between `physical` and `logical` cores is dependant on CPU architecture. For instance, many Intel and AMD CPUs will report twice as many logical cores based on HT or SMT features.  PIIDigger's work loads -- a mix of heavy I/O (disk access) and heavy CPU (regex processing) -- benefit from these CPU features.  That said, a `fast` scan will give all CPU priority to PIIDigger and other applications on the system will suffer.
+
+The number of workers has a direct effect the maximum amount of RAM that PIIDigger might use.  See [Advanced Configuration](advanced-configuration.md) for additional details.
 
 ## Best Practices
 

@@ -103,7 +103,7 @@ foreach ($try in 1..3) {
     }
 }
 
-uv run --no-project python .github\scripts\smoke_test.py --expect-commit $sha --cwd dist\piidigger-amd64 -- piidigger.cmd
+uv run --no-project python .github\scripts\smoke_test.py --expect-commit $sha -- "$PWD\dist\piidigger-amd64\piidigger.cmd"
 Assert-ExitCode "Smoke test"
 }
 ```

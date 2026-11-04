@@ -330,6 +330,18 @@ A root-level setting (like `log_level`) was written *after* a `[section]` header
 
 A single back-slash was used in a Windows path, contrary to the TOML specification.  Replace it with either a front-slash (`/`) or a double black-slash (`\\`).  Re-run `piidigger config validate`.
 
+### `config validate` reports "Invalid statement (at line 1, column 1)"
+
+The full error looks like this:
+
+```powershell
+Error: invalid TOML in piidigger.toml: Invalid statement (at line 1, column 1)
+```
+
+If line 1 of the file looks fine, the editor probably saved it as "UTF-8 with BOM". A BOM is an invisible marker at the very start of the file, and PIIDigger can't read a config file that has one. Some editors and scripts add it. For example, Windows PowerShell 5.1 adds one when you write a file with `Set-Content -Encoding utf8` or `Out-File`.
+
+Notepad and VS Code should be safe, because both save as plain UTF-8 by default. If an editor gives you a choice, pick "UTF-8", not "UTF-8 with BOM", then save the file and re-run `piidigger config validate`.
+
 ### `scan` fails with "start directory does not exist"
 
 An entry in `start_dirs` (for your OS) points to a path that isn't there — often a drive letter that isn't mounted, or a typo. Fix or remove the entry and re-run `piidigger config validate`.

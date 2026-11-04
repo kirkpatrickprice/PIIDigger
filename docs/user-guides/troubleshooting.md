@@ -53,6 +53,10 @@ piidigger scan -f piidigger.toml
 
 **Explanation:** PIIDigger reports **unique** matches per file, per data handler — not raw occurrence counts. If the same email address or card number appears 50 times in one file, it's reported once for that file. This is by design, not a bug; in testing against a dataset with hundreds of thousands of duplicated fake card numbers, deduplicated PIIDigger counts landed within a few percent of a tool that counted every occurrence.
 
+Like all tools of this nature, PIIDigger also makes its own assumptions about where to spend time.  For instance, the default configuration steers clear of operating system folders which are known to contain only program files (`/usr/bin`, `/usr/sbin`, `C:\Program Files`, etc).  All of these assumptions can be changed by creating your own configuration with `piidigger config generate`.
+
+Finally, PIIDigger's primary detection method is regular expressions and is therefore  predominantly bounded by CPU resources.  The range of what is a potentially valid email address is quite complex.  To balance both detections and performance, PIIDigger makes some assumptions, especially about the length of the various parts of an email address.  These are not currently adjustable via a configuration file.
+
 ### PIIDigger didn't flag a file I expected it to catch
 
 **Symptoms:** A file you know contains PII wasn't included in the results.
@@ -111,26 +115,79 @@ max_members = 31000
 
 Expect a longer run. Another limit may apply once this one is out of the way, and the log names it in the same way. Only raise these limits for archives you trust. The `unsafe` wording means path traversal or a likely archive bomb, and no setting changes those checks.
 
+### I just want to find credit card numbers -- why is it so slow?
+
+**Symptoms:** A scan takes hours, and you only care about card numbers (PANs).
+
+**Explanation:** By default, PIIDigger looks for every data type it supports. Each one adds a pass of pattern matching over every file it reads. Email address matching is the most CPU-heavy of these (see [My results look lower than another tool's](#my-results-look-lower-than-another-tools)). If you don't need email results, that work is wasted.
+
+**Solutions:** Create a configuration that looks only for the `pan` data type:
+
+1. Generate a configuration file:
+
+    ```powershell
+    piidigger config generate piidigger.toml
+    ```
+
+2. Open `piidigger.toml` and change the `data_handlers` line to:
+
+    ```toml
+    data_handlers = ["pan"]
+    ```
+
+3. Run the scan with that file:
+
+    ```powershell
+    # piidigger.toml is picked up automatically in the current folder
+    piidigger scan
+
+    # piidigger.toml is in a different directory or named something different
+    piidigger scan -f C:\<path-to>\piidigger-panonly.toml
+    ```
+
+Run `piidigger inspect datatypes` to list the data types you can name here. For other ways to shorten a scan, such as excluding folders you don't need, see [Advanced Configuration](advanced-configuration.md).
+
+### A config file I edited is rejected at line 1, column 1
+
+**Symptoms:** `piidigger config validate` or `piidigger scan -f` fails with `Invalid statement (at line 1, column 1)`, though line 1 of the file looks fine.
+
+**Explanation:** Some editors and scripts save files as "UTF-8 with BOM", which adds an invisible marker at the start of the file. PIIDigger can't read a config file that starts with one. Notepad and VS Code should be safe, because both save as plain UTF-8 by default.
+
+**Solutions:** Save the file as plain "UTF-8" and validate it again. See [Advanced Configuration](advanced-configuration.md#config-validate-reports-invalid-statement-at-line-1-column-1) for details.
+
 ### A scan appears hung
 
 **Symptoms:** No progress-bar movement for a long time, and the log file shows nothing new.
 
-**Solutions:** First, check the log for repeated timeout/termination messages — a single stuck file is handled automatically (see the "A worker seems stuck" entry in the [Scan Command Guide](scan-command.md#troubleshooting)) and shouldn't stall the whole run. If the whole process genuinely seems stuck, try **Ctrl+C** once and give it a few seconds. If that doesn't work, stop it at the OS level:
+**Solutions:** First, check the log for repeated timeout/termination messages — a single stuck file is handled automatically (see the "A worker seems stuck" entry in the [Scan Command Guide](scan-command.md#troubleshooting)) and shouldn't stall the whole run. If the whole process genuinely seems stuck, try **Ctrl+C** once and give it a few seconds. If that doesn't work, stop it at the OS level.
+
+PIIDigger runs as several processes, one for each worker plus one that coordinates them. Their names depend on how you installed it:
+
+| Install method | Windows | Linux/macOS |
+|---|---|---|
+| Standalone package from GitHub Releases | `python.exe` | `piidigger` |
+| `uv tool install` | `piidigger.exe` and `python.exe` | `piidigger` and `python` |
+
+On Windows, stop both names. This also stops any other Python programs you have running:
 
 ```powershell
 # Windows PowerShell
-Get-Process python | Stop-Process
+Get-Process piidigger, python -ErrorAction SilentlyContinue | Stop-Process
 ```
 
 ```powershell
 # Windows Task Manager
-# Manually "End Task" on each python.exe process in the list
+# Manually "End Task" on each piidigger.exe and python.exe process in the list
 ```
+
+On Linux and macOS, match on the command line instead. Every PIIDigger process has `piidigger` somewhere in its command line, whichever way you installed it:
 
 ```bash
 # Linux/macOS
-kill $(pidof python)
+pkill -f piidigger
 ```
+
+Check that nothing is left with `pgrep -fl piidigger`. If a process is still listed, run `pkill -9 -f piidigger` to force it to stop.
 
 ### Getting Help
 

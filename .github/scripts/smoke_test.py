@@ -5,7 +5,7 @@ The scan covers plain text, ZIP, 7z, PDF, DOCX and XLSX so each reader's
 dependencies get loaded.  Standard library only.
 
     python .github/scripts/smoke_test.py --expect-commit abc1234 -- dist/piidigger/piidigger
-    python .github/scripts/smoke_test.py --expect-commit abc1234 --cwd dist/piidigger-amd64 -- piidigger.cmd
+    python .github/scripts/smoke_test.py --expect-commit abc1234 -- "$PWD\dist\piidigger-amd64\piidigger.cmd"
 
 COMMAND runs from --cwd (default: a temporary directory, so a checkout's src/
 cannot stand in for what the bundle is missing).  A relative COMMAND[0] that

@@ -7,7 +7,7 @@ This page documents changes that require action from existing PIIDigger users wh
 
 ---
 
-## 2.0.0 (in development — `refactor` branch)
+## 2.0.0
 
 ### 1. Configuration file format (TOML)
 

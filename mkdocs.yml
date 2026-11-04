@@ -66,6 +66,10 @@ markdown_extensions:
   - md_in_html
   - toc:
       permalink: true
+      # GitHub-style heading IDs ("A & B" -> "a--b"), so an anchor link works both on GitHub and on this site
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
   - pymdownx.emoji:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
@@ -79,6 +83,14 @@ plugins:
           options:
             show_source: true
             docstring_style: google
+
+validation:
+  links:
+    # Architecture docs link to source files outside docs/. Those links work on GitHub and in an
+    # editor, but MkDocs can't serve them, so report them without failing `mkdocs build --strict`.
+    not_found: info
+    # A broken heading anchor still fails --strict.
+    anchors: warn
 
 nav:
   - Home: index.md
@@ -98,6 +110,7 @@ nav:
       - Implementation Checklist: refactor/IMPLEMENTATION_CHECKLIST.md
       - Testing Strategy: refactor/TESTING_STRATEGY.md
   - Architecture:
+      - architecture/index.md
       - Orchestration: architecture/orchestration/coordinator-worker-pipeline.md
       - Archive Handling (Architecture): architecture/archives/archive-handling.md
       - PDF Memory Limits: architecture/filehandlers/pdf-memory-limits.md

@@ -62,6 +62,7 @@ flowchart TB
     subgraph ci_group["✅ CI (ci.yml)"]
         TEST["test\nubuntu/windows/macos matrix\nruff + mypy + fast pytest"]:::coreService
         SLOW["slow-tests\n(push to main only)\npytest -m 'slow or e2e'"]:::component
+        DOCSCHECK["docs\nmkdocs build --strict"]:::component
     end
 
     subgraph drafter_group["📝 Release Drafter"]
@@ -69,7 +70,7 @@ flowchart TB
     end
 
     subgraph release_group["🚀 Release (release.yml)"]
-        VERIFY["_release-verify.yml\nfull suite, 80% coverage gate"]:::coreService
+        VERIFY["_release-verify.yml\nfull suite, 80% coverage gate,\nmkdocs build --strict"]:::coreService
         PYPI["_release-publish-pypi.yml\nuv build + OIDC publish"]:::component
         BUILD["_release-build-standalone.yml\nlinux/windows/macos binaries\n+ checksums"]:::component
         VT["_release-virustotal.yml\nscans binaries"]:::integration
@@ -77,7 +78,9 @@ flowchart TB
     end
 
     PR --> TEST
+    PR --> DOCSCHECK
     PUSH --> TEST
+    PUSH --> DOCSCHECK
     PUSH --> SLOW
     PUSH --> DRAFT
     DEPENDABOT --> PR
@@ -115,6 +118,11 @@ superseded runs on the same ref.
   only, 30-minute timeout. Runs `pytest -m "slow or e2e"` with no coverage gate.
   This keeps PR feedback fast while still exercising timeout/reliability and
   full end-to-end scans on every `main` push.
+- **`docs`** — `ubuntu-latest`, 10-minute timeout. Installs with
+  `uv sync --extra docs` and runs `mkdocs build --strict`, which fails on any
+  warning, such as a link to a missing page or heading anchor. Links to source
+  files outside `docs/` are reported but don't fail the build (see
+  `validation` in `mkdocs.yml`).
 
 ### Release Drafter (`.github/workflows/release-drafter.yml`)
 Runs on push to `main` and `workflow_dispatch`. Uses `release-drafter/release-drafter@v6`
@@ -146,8 +154,9 @@ reusable workflows (each also independently `workflow_dispatch`-able for
 debugging a single stage):
 
 1. **`verify`** (`_release-verify.yml`) — full test suite, all markers, no
-   exclusions, same 80% coverage gate as CI. Nothing downstream starts until
-   this passes.
+   exclusions, same 80% coverage gate as CI, plus the same
+   `mkdocs build --strict` check as CI's `docs` job. Nothing downstream starts
+   until this passes, so a release only deploys docs that build cleanly.
 2. **`publish-pypi`** (`_release-publish-pypi.yml`, needs `verify`) — checks the
    release tag (`vX.Y.Z`) matches `piidigger.__version__`, fails the run on
    mismatch, then `uv build`s an sdist and wheel and publishes via
@@ -178,7 +187,8 @@ debugging a single stage):
    scans the `.tar.gz`/`.zip` binaries with `crazy-max/ghaction-virustotal`
    (pinned to a commit SHA) and updates the release body with scan result
    links. Rate-limited to 4 requests/minute to match the free VirusTotal API tier.
-5. **`deploy-docs`** (`_release-deploy-docs.yml`, needs `verify`) — builds the
+5. **`deploy-docs`** (`_release-deploy-docs.yml`, needs `verify` and
+   `publish-pypi`) — builds the
    MkDocs site (`uv sync --extra docs && uv run mkdocs build`) and deploys it
    to GitHub Pages via `actions/deploy-pages`. Uses the `pages` concurrency
    group with `cancel-in-progress: false` so a docs deploy always finishes.
