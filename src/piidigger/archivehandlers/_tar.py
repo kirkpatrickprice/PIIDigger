@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+import gzip
+import lzma
+import tarfile
+import zlib
+from collections.abc import Callable, Sequence
+from pathlib import Path
+
+from piidigger._progress_io import open_with_progress
+from piidigger.exceptions import ArchivePartlyReadError, ArchiveReadError
+from piidigger.models.archive import MemberInfo
+
+# A truncated compressed tar raises EOFError.  A corrupt .tar.xz raises LZMAError,
+# a corrupt .tar.gz can raise zlib.error, and a corrupt zstd tar raises ZstdError,
+# none of them an OSError.
+_READ_ERRORS: tuple[type[Exception], ...] = (tarfile.TarError, OSError, EOFError, lzma.LZMAError, zlib.error)
+try:
+    from compression.zstd import ZstdError
+except ImportError:
+    # zstd is optional when CPython is built, and tarfile treats it that way too:
+    # without it, a zstd tar does not open, and everything else still works.
+    pass
+else:
+    _READ_ERRORS = (*_READ_ERRORS, ZstdError)
+
+_DRAIN_CHUNK_BYTES = 1024 * 1024
+
+ARCHIVE_TYPE = "tar"
+HANDLES = {
+    "ext": [".tar", ".tgz", ".tbz2", ".tbz", ".txz", ".tar.gz", ".tar.bz2", ".tar.xz"],
+}
+
+
+def _read_to_end(read: Callable[[int], bytes]) -> None:
+    """Read a compressed stream to its end, which makes its reader verify the checksum.
+
+    tarfile takes a damaged header part way through for the end of the archive,
+    with no error, so damage to a compressed tar can otherwise look like a
+    complete listing that is merely short.  A tar that ended normally has only
+    its padding left to read.  An uncompressed tar has no checksum to verify.
+
+    Bytes appended after a complete gzip stream are not damage: the stream has
+    passed its checksum by then, and gzip itself only warns about them.
+    """
+    try:
+        while read(_DRAIN_CHUNK_BYTES):
+            pass
+    except gzip.BadGzipFile as exc:
+        if not str(exc).startswith("Not a gzipped file"):
+            raise
+
+
+class TarArchiveHandler:
+    def list_members(self, archive_path: Path, on_progress: Callable[[], None] | None = None) -> list[MemberInfo]:
+        """List members in archive order, one header at a time.
+
+        Raises ArchivePartlyReadError, holding the members already listed, when
+        the archive fails part way through; ArchiveReadError when nothing could
+        be listed.
+        """
+        members: list[MemberInfo] = []
+        try:
+            with open_with_progress(archive_path, on_progress) as raw, tarfile.open(fileobj=raw, mode="r:*") as tf:
+                # An uncompressed tar is read straight from the file, which
+                # seeks past member data for free, so nothing has to be
+                # decompressed to reach a member.  A compressed one is read
+                # through a gzip/bzip2/xz reader that wraps the file.
+                compressed = tf.fileobj is not raw
+                while (info := tf.next()) is not None:
+                    if not (info.isfile() or info.isdir()):
+                        # symlinks, hardlinks, device/FIFO nodes have no
+                        # scannable content; skip rather than flag downstream
+                        continue
+                    members.append(
+                        MemberInfo(
+                            name=info.name,
+                            uncompressed_size=info.size,
+                            compressed_size=0,
+                            is_dir=info.isdir(),
+                            is_encrypted=False,
+                            decompress_offset=info.offset if compressed else 0,
+                        )
+                    )
+                if compressed:
+                    _read_to_end(tf.fileobj.read)
+                return members
+        except _READ_ERRORS as exc:
+            if members:
+                raise ArchivePartlyReadError(
+                    f"archive is damaged; scanning the {len(members):,} member(s) listed: {exc}", members
+                ) from exc
+            raise ArchiveReadError(str(exc)) from exc
+
+    def extract_members(
+        self,
+        archive_path: Path,
+        member_paths: Sequence[str],
+        dest_dir: Path,
+        *,
+        on_extracted: Callable[[str, Path], None],
+        on_started: Callable[[str], None] | None = None,
+        on_failed: Callable[[str, str], None] | None = None,
+        on_progress: Callable[[], None] | None = None,
+    ) -> None:
+        """Walk the tar stream forward once, extracting the requested members as they go by.
+
+        next() reads one header at a time, so the part of the archive before the
+        first requested member is decompressed once and never rewound, and the
+        walk stops after the last requested member instead of reading to the
+        end.  getmember() would do neither: it reads every header to the end of
+        the archive, and the extract that follows seeks back, which makes a
+        gzip/bzip2/xz reader start again from byte 0.
+
+        A path that occurs more than once is extracted at its first occurrence.
+
+        The extracted path comes from the member as the data filter rewrites
+        it, never from the raw name.  The filter strips a leading separator,
+        and on Windows that includes a backslash.  So dest_dir / "\\x\\y.txt"
+        would name a file outside dest_dir — on the drive root — while the
+        filter actually wrote dest_dir\\x\\y.txt.  The caller deletes the path
+        it is given, so getting this wrong would delete a host file.
+
+        A member that cannot be written on its own (the filter rejects it, or
+        the OS refuses the name or path) goes to on_failed, and the walk
+        carries on with the next member.
+        """
+        wanted = set(member_paths)
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            root = dest_dir.resolve()
+            with open_with_progress(archive_path, on_progress) as raw, tarfile.open(fileobj=raw, mode="r:*") as tf:
+                while wanted:
+                    info = tf.next()
+                    if info is None:
+                        break
+                    if info.name not in wanted:
+                        continue
+                    wanted.discard(info.name)
+                    if on_started is not None:
+                        on_started(info.name)
+                    try:
+                        safe = tarfile.data_filter(info, str(dest_dir))
+                        tf.extract(safe, path=dest_dir, filter="data")
+                    except (tarfile.FilterError, OSError) as exc:
+                        # Includes a corrupt stream (gzip raises BadGzipFile,
+                        # an OSError).  That fails this member; the next
+                        # next() then hits the same broken stream and ends
+                        # the walk with ArchiveReadError.
+                        if on_failed is not None:
+                            on_failed(info.name, str(exc))
+                        continue
+                    extracted = dest_dir / safe.name
+                    if not extracted.resolve().is_relative_to(root) or not extracted.is_file():
+                        if on_failed is not None:
+                            on_failed(info.name, "member not found in the extraction folder")
+                        continue
+                    on_extracted(info.name, extracted)
+        except _READ_ERRORS as exc:
+            raise ArchiveReadError(str(exc)) from exc
+
+
+handler = TarArchiveHandler()

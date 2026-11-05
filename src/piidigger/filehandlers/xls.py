@@ -2,101 +2,117 @@ from collections.abc import Iterator
 
 import xlrd
 
-from piidigger.filehandlers._sharedfuncs import ContentHandler
-from piidigger.globalvars import excelBlankColLimit
-from piidigger.globalvars import excelBlankRowLimit
-from piidigger.globalvars import maxChunkSize
-from piidigger.globalvars import defaultChunkCount
-from piidigger.logmanager import LogManager
+from piidigger.filehandlers._sharedfuncs import ContentBuffer
+from piidigger.models.config import Config
 
-# Each filehandler must have the following:
-#   "handles" -     dictionary to identify lists of file extensions and mime types that the handler will manage.
-#                   This will be read by globals upon initial load to build the full list of supported mime types and file extensions
-#   "processFile" - Function that manages opening and reading of the file.  The main module will call this handler wtih the "processFile(filename)" function.
-#                   processFile should provide the lines of text to each of the dataHandlers
-
-handles={
-    'ext': [
-        '.xls',
+HANDLES = {
+    "ext": [
+        ".xls",
     ],
-    'mime': [
-        'application/vnd.ms-excel',
-        'application/excel',
-        ],
+    "mime": [
+        "application/vnd.ms-excel",
+        "application/excel",
+    ],
 }
 
-def readFile(filename: str, 
-                logManager: LogManager,
-                maxChunkCount = defaultChunkCount,
-            ) -> Iterator[str]:
-    ''''
-    Handle all file IO and text extraction operations for this file type.  Returns a list of results that have been validated by each datahandler.  
-    "filename" is a string of the path and filename to process.  "handlers" is passed as a list of module objects that are called directly by processFile.
-    '''
+handles = HANDLES
 
-    logger = logManager.getLogger('xls-handler')
-    
-    try:
-        # Don't use "on_demand" in order to keep the code simpler.  All worksheets are loaded into RAM.
+# xlrd has no exception type of its own for this.
+_ENCRYPTED_MESSAGE = "Workbook is encrypted"
 
-        book=xlrd.open_workbook(filename, on_demand=True, formatting_info=False,)
-        logger.debug('%s: Read %d worksheets', filename, len(book.sheet_names()))
-        for sheet in book.sheet_names():
-            logger.debug('Processing worksheet: %s', str(sheet))
-            activeSheet=book.sheet_by_name(sheet)
-            handler: ContentHandler = ContentHandler(maxContentSize = maxChunkSize * maxChunkCount)
-            blankRowCount=0
-            rowCount=0
-            totalRows=activeSheet.nrows
-            totalCols=activeSheet.ncols
-            # create a string with all of the content of this sheet
-            # Iterate through each cell in each row.  If we reach a limit of blank cells, move to the next row
-            # If we reach a limit of blank rows, then move to the next sheet.
-            for row in range(totalRows):
-                logger.debug('%s[Sheet %s]: Processing row [%d]', filename, sheet, rowCount)
-                line: str = ''
-                rowCount+=1
-                rowHasData=False
-                blankColCount=0
-                for col in range(totalCols):
-                    item=activeSheet.cell_value(row, col)
-                    if item is None or item == '':
-                        blankColCount+=1
-                        if blankColCount > excelBlankColLimit:
-                            break
-                        continue
-                    # xlrd converts all numbers to floats.  If the float is really an integer (ends in '.0'), convert it to a string without the decimal point
-                    if type(item) == float and str(item)[-2:] == '.0':
-                        item = str(item)[:-2]
-                    line += str(item) + ' '
-                    rowHasData=True
-                handler.appendContent(line)
-                if rowHasData:
-                    blankRowCount=0
-                else:
-                    blankRowCount+=1
-                    if blankRowCount > excelBlankRowLimit:
-                        logger.debug('%s[Sheet %s]: Blank row count exceeded at row %d', filename, sheet, rowCount)
-                        break
-                if handler.contentBufferFull():
-                    yield handler.getContent()
-            book.unload_sheet(sheet)
-            logger.debug('%s[Sheet %s]: Read content (%d bytes)', filename, sheet, handler.totalBytes)
-            yield handler.finalizeContent()
-            
-        book.release_resources()
-    except FileNotFoundError:
-        logger.error('Previously discovered file no longer exists: %s. File skipped', filename)
-    except PermissionError as e:
-        logger.error('PermissionError adding %s.  File skipped.  Error message: %s', filename, str(e))
-    except OSError as e:
-        logger.error('OSError adding %s.  File skipped.  Error message: %s', filename, str(e))
-    except xlrd.compdoc.CompDocError:
-        logger.error('Excel document corrupted: %s', filename,)
-    except xlrd.biffh.XLRDError:
-        logger.error('Excel read error: %s', filename,)
-    except Exception as e:
-        logger.error('Unknown exception on file %s.  File skipped.  Error message: %s', filename, str(e))
 
-    
+class XlsHandler:
+    """FileHandler for legacy XLS files.
 
+    Preferred path (archive members): source.open_bytes() returns bytes which
+    are passed directly to xlrd via the file_contents parameter — no temp file.
+
+    Fallback path (on-disk files): source.open_bytes() returns None, so
+    source.materialize() is called to obtain a filesystem path.  For
+    FilesystemItem materialize() is a no-op (returns the path itself).
+
+    A workbook or sheet that cannot be read goes to source.report_unread(), naming
+    only the exception type because xlrd's messages can quote the file.  Other
+    sheets are still read.  An OSError still reaches the worker, and only an empty
+    file is silent, because it holds nothing to miss.
+    """
+
+    def read(self, source, config: Config) -> Iterator[str]:  # source: ScannableItem
+        try:
+            data = source.open_bytes()
+            if data is not None:
+                book = xlrd.open_workbook(file_contents=data, on_demand=True, formatting_info=False)
+            else:
+                book = xlrd.open_workbook(str(source.materialize()), on_demand=True, formatting_info=False)
+        except OSError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, xlrd.XLRDError) and str(exc) == _ENCRYPTED_MESSAGE:
+                source.report_unread("Excel workbook is password protected", nothing_read=True)
+            elif source.size:
+                source.report_unread(f"Excel workbook could not be read: {type(exc).__name__}", nothing_read=True)
+            return
+        try:
+            sheet_names = book.sheet_names()
+            sheets_unread = 0
+            first_unread = ""
+            text_read = False
+            for sheet_number, sheet_name in enumerate(sheet_names, start=1):
+                content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
+                try:
+                    active_sheet = book.sheet_by_name(sheet_name)
+                    blank_row_count = 0
+                    row_count = 0
+                    total_rows = active_sheet.nrows
+                    total_cols = active_sheet.ncols
+
+                    for row in range(total_rows):
+                        row_count += 1
+                        line = ""
+                        row_has_data = False
+                        blank_col_count = 0
+
+                        for col in range(total_cols):
+                            item = active_sheet.cell_value(row, col)
+                            if item is None or item == "":
+                                blank_col_count += 1
+                                if blank_col_count > config.spreadsheet.blank_col_limit:
+                                    break
+                                continue
+                            blank_col_count = 0  # the limit is on consecutive blanks
+                            if isinstance(item, float) and str(item)[-2:] == ".0":
+                                item = str(item)[:-2]
+                            line += str(item) + " "
+                            row_has_data = True
+
+                        text_read = text_read or row_has_data
+                        content_buffer.append_content(line)
+                        if row_has_data:
+                            blank_row_count = 0
+                        else:
+                            blank_row_count += 1
+                            if blank_row_count > config.spreadsheet.blank_row_limit:
+                                break
+
+                        if content_buffer.content_buffer_full():
+                            yield content_buffer.get_content()
+
+                    book.unload_sheet(sheet_name)
+                except OSError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    sheets_unread += 1
+                    first_unread = first_unread or f"sheet {sheet_number:,}: {type(exc).__name__}"
+                final = content_buffer.finalize_content()
+                if final:
+                    yield final
+            if sheets_unread:
+                source.report_unread(
+                    f"{sheets_unread:,} of {len(sheet_names):,} Excel sheets could not be read, first {first_unread}",
+                    nothing_read=sheets_unread == len(sheet_names) and not text_read,
+                )
+        finally:
+            book.release_resources()
+
+
+handler = XlsHandler()

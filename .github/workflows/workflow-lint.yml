@@ -1,0 +1,89 @@
+name: Workflow Lint
+
+# A separate workflow rather than a job in ci.yml: `paths:` filters only exist
+# at the workflow level, and this gate only matters when .github/ changes.
+on:
+  pull_request:
+    paths: [".github/**"]
+  push:
+    branches: [main]
+    paths: [".github/**"]
+  workflow_dispatch:
+
+concurrency:
+  group: workflow-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  ACTIONLINT_VERSION: "1.7.12"
+  ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+  PINACT_VERSION: "5.0.2"
+  PINACT_SHA256: 7f003d8f51e984c2264d2009d430e3e0e87ae404a0e2dc2a9a277b0f731bf5b7
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Upload zizmor's SARIF to code scanning so findings show on the PR.
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint and pinact
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP"
+          curl -fsSLo actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLo pinact.tar.gz \
+            "https://github.com/suzuki-shunsuke/pinact/releases/download/v${PINACT_VERSION}/pinact_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          echo "${PINACT_SHA256}  pinact.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz -C bin actionlint
+          tar -xzf pinact.tar.gz -C bin pinact
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+
+      # Hash-checked like the two downloads above; Dependabot keeps the pin current.
+      - name: Install zizmor
+        run: |
+          uv venv "$RUNNER_TEMP/zizmor"
+          uv pip install --python "$RUNNER_TEMP/zizmor" --require-hashes -r .github/requirements/requirements.txt
+          echo "$RUNNER_TEMP/zizmor/bin" >> "$GITHUB_PATH"
+
+      # shellcheck is preinstalled on ubuntu-latest; actionlint uses it for run: blocks.
+      - name: actionlint
+        run: actionlint
+
+      - name: pinact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: pinact run --check
+
+      - name: zizmor (SARIF)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --format sarif --no-exit-codes .github/workflows/ > zizmor.sarif
+
+      # A fork PR's token cannot get security-events: write, so the upload would fail.
+      - name: Upload zizmor results to code scanning
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: github/codeql-action/upload-sarif@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4.39.2
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor
+
+      # The SARIF run never fails; this run is the gate and prints readable findings.
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor .github/workflows/

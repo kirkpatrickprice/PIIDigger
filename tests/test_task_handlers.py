@@ -1,0 +1,1200 @@
+"""Unit tests for handle_enum_dir and handle_scan_file in worker.py."""
+
+from __future__ import annotations
+
+import dataclasses
+import functools
+import io
+import multiprocessing as mp
+import os
+import stat
+import sys
+import types
+import unittest.mock
+import zipfile
+from pathlib import Path
+
+import pytest
+
+from piidigger.getmime import get_mime
+from piidigger.models.config import Config
+from piidigger.models.tasks import Task, TaskProgress, TaskType
+from piidigger.orchestration.context import WorkerContext
+from piidigger.orchestration.logging_setup import build_worker_logger
+from piidigger.orchestration.worker import handle_enum_dir, handle_scan_file, resolve_exclude_dirs
+from piidigger.orchestration.worker._enum_dir import _is_excluded
+from tests._fs import make_dir_alias
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_LOG_QUEUE: mp.Queue = mp.Queue()  # type: ignore[type-arg]
+
+
+def _make_ctx(tmp_path: Path, **config_kwargs: object) -> WorkerContext:
+    return WorkerContext(
+        config=Config(**{"start_dirs": [], **config_kwargs}),  # type: ignore[arg-type]
+        task_queue=mp.Queue(),
+        result_queue=mp.Queue(),
+        log_queue=_LOG_QUEUE,
+        stop_event=mp.Event(),
+    )
+
+
+def _logger() -> object:
+    return build_worker_logger(_LOG_QUEUE, "test-handler")
+
+
+def _enum_dir_task(path: Path, depth: int = 0) -> Task:
+    return Task(
+        task_type=TaskType.ENUM_DIR,
+        payload={"path": str(path), "depth": depth},
+    )
+
+
+def _scan_file_task(path: Path, ext: str = ".txt", mime: str | None = None) -> Task:
+    return Task(
+        task_type=TaskType.SCAN_FILE,
+        payload={
+            "display_path": str(path),
+            "file_path": str(path),
+            "ext": ext,
+            "mime": mime,
+            "size": path.stat().st_size if path.exists() else 0,
+            "depth": 0,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# handle_enum_dir
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_enum_dir_empty_directory(tmp_path: Path) -> None:
+    scan_root = tmp_path / "empty"
+    scan_root.mkdir()
+
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_dir(_enum_dir_task(scan_root), ctx, _logger())
+
+    assert result.status == "ok"
+    assert result.counters.get("dirs_scanned") == 1
+    assert result.new_tasks == []
+
+
+@pytest.mark.unit
+def test_enum_dir_finds_subdirs_and_files(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "sub").mkdir()
+    (root / "file.txt").write_text("hello")
+
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_dir(_enum_dir_task(root), ctx, _logger())
+
+    assert result.status == "ok"
+    task_types = [t["task_type"] for t in result.new_tasks]
+    assert TaskType.ENUM_DIR in task_types
+    assert TaskType.SCAN_FILE in task_types
+    assert result.counters.get("dirs_scanned") == 1
+    assert result.counters.get("dirs_found", 0) >= 1
+    assert result.counters.get("files_found", 0) >= 1
+
+
+@pytest.mark.unit
+def test_enum_dir_respects_exclude_dirs(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    excluded = root / "skip_me"
+    excluded.mkdir()
+    kept = root / "keep"
+    kept.mkdir()
+
+    ctx = _make_ctx(tmp_path, exclude_dirs=[str(excluded)])
+    result = handle_enum_dir(_enum_dir_task(root), ctx, _logger())
+
+    assert result.status == "ok"
+    task_paths = [t["payload"].get("path", "") for t in result.new_tasks]
+    assert not any("skip_me" in p for p in task_paths)
+    assert any("keep" in p for p in task_paths)
+
+
+@pytest.mark.unit
+def test_enum_dir_exclude_dirs_forward_slash_pattern(tmp_path: Path) -> None:
+    """Exclude patterns with forward slashes must work on all platforms.
+
+    The default config stores Windows paths as 'C:/Program Files' (forward
+    slashes) while Path.resolve() returns backslash paths on Windows.
+    _is_excluded must normalise both sides so the exclusion fires correctly.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    excluded = root / "skip_me"
+    excluded.mkdir()
+    kept = root / "keep"
+    kept.mkdir()
+
+    # Simulate a config entry written with forward slashes (as the default
+    # TOML template generates on Windows).
+    forward_slash_pattern = str(excluded).replace("\\", "/")
+    ctx = _make_ctx(tmp_path, exclude_dirs=[forward_slash_pattern])
+    result = handle_enum_dir(_enum_dir_task(root), ctx, _logger())
+
+    assert result.status == "ok"
+    task_paths = [t["payload"].get("path", "") for t in result.new_tasks]
+    assert not any("skip_me" in p for p in task_paths), "forward-slash exclude pattern was not honoured"
+    assert any("keep" in p for p in task_paths)
+
+
+@pytest.mark.unit
+def test_resolve_exclude_dirs_matches_pattern_written_through_alias(tmp_path: Path) -> None:
+    """An exclude pattern written through a symlink alias must still match.
+
+    Regression test: on macOS, mkdtemp() returns /var/folders/... but entries
+    resolve to /private/var/...; the same applies to the /etc default.
+    _is_excluded() resolves the entry, so the pattern must be resolved too.
+    """
+    physical = tmp_path / "physical"
+    excluded = physical / "skip_me"
+    excluded.mkdir(parents=True)
+    (physical / "keep").mkdir()
+    alias = tmp_path / "alias"
+    make_dir_alias(alias, physical)
+
+    aliased_pattern = str(alias / "skip_me")
+    assert not _is_excluded(excluded, [aliased_pattern]), "unresolved alias pattern should not match"
+    assert _is_excluded(excluded, resolve_exclude_dirs([aliased_pattern]))
+
+    ctx = _make_ctx(tmp_path, exclude_dirs=resolve_exclude_dirs([aliased_pattern]))
+    result = handle_enum_dir(_enum_dir_task(physical), ctx, _logger())
+
+    task_paths = [t["payload"].get("path", "") for t in result.new_tasks]
+    assert not any("skip_me" in p for p in task_paths)
+    assert any("keep" in p for p in task_paths)
+
+
+@pytest.mark.unit
+def test_resolve_exclude_dirs_leaves_wildcard_and_relative_patterns() -> None:
+    assert resolve_exclude_dirs(["*/.vscode-server", "relative/dir"]) == ["*/.vscode-server", "relative/dir"]
+
+
+@pytest.mark.unit
+def test_resolve_exclude_dirs_strips_trailing_separator(tmp_path: Path) -> None:
+    excluded = tmp_path / "skip_me"
+    excluded.mkdir()
+
+    patterns = resolve_exclude_dirs([str(excluded) + os.sep, str(excluded).replace("\\", "/") + "/"])
+
+    assert all(_is_excluded(excluded / "child", [p]) for p in patterns)
+
+
+@pytest.mark.unit
+def test_resolve_exclude_dirs_keeps_missing_paths(tmp_path: Path) -> None:
+    missing = tmp_path / "not_there"
+
+    assert _is_excluded(missing / "child", resolve_exclude_dirs([str(missing)]))
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(sys.platform != "win32", reason="drive letters are Windows-only")
+def test_resolve_exclude_dirs_bare_drive_means_whole_drive(tmp_path: Path) -> None:
+    """'G:' must exclude the whole drive, not the current directory on it.
+
+    os.path.realpath('C:') returns the current working directory on C:.
+    """
+    drive = os.path.splitdrive(str(tmp_path.resolve()))[0]
+
+    for pattern in (drive, drive + "/", drive + "\\"):
+        resolved = resolve_exclude_dirs([pattern])
+        assert resolved == [drive], pattern
+        assert _is_excluded(tmp_path, resolved), pattern
+
+
+@pytest.mark.unit
+def test_enum_dir_nonexistent_path_returns_error(tmp_path: Path) -> None:
+    missing = tmp_path / "no_such_dir"
+    ctx = _make_ctx(tmp_path, start_dirs=[missing])  # only a start directory is listed without a parent listing it
+    result = handle_enum_dir(_enum_dir_task(missing), ctx, _logger())
+    assert result.status == "error"
+    assert result.counters == {"dirs_not_scanned": 1}
+
+
+@pytest.mark.unit
+def test_enum_dir_skips_symlinks(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    link = root / "link"
+    try:
+        link.symlink_to(target)
+    except OSError, NotImplementedError:
+        pytest.skip("symlinks not supported on this platform")
+
+    ctx = _make_ctx(tmp_path)
+    result = handle_enum_dir(_enum_dir_task(root), ctx, _logger())
+
+    task_paths = [t["payload"].get("path", "") for t in result.new_tasks]
+    assert not any("link" in Path(p).name for p in task_paths)
+
+
+# ---------------------------------------------------------------------------
+# handle_scan_file
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_scan_file_txt_with_no_matches(tmp_path: Path) -> None:
+    f = tmp_path / "plain.txt"
+    f.write_text("no pii here, just lorem ipsum")
+
+    ctx = _make_ctx(tmp_path)
+    result = handle_scan_file(_scan_file_task(f), ctx, _logger())
+
+    assert result.status == "ok"
+    assert result.counters.get("files_scanned") == 1
+    assert result.findings == []
+
+
+@pytest.mark.unit
+def test_scan_file_txt_finds_pan(tmp_path: Path) -> None:
+    f = tmp_path / "pan.txt"
+    f.write_text("card number: 4111111111111111")
+
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+    result = handle_scan_file(_scan_file_task(f), ctx, _logger())
+
+    assert result.status == "ok"
+    assert result.counters.get("files_scanned") == 1
+    assert len(result.findings) >= 1
+    finding = result.findings[0]
+    assert finding["source_path"] == str(f)
+    assert finding["handler"] == "pan"
+
+
+def _enumerate_and_scan(tmp_path: Path, name: str, content: bytes, **config_kwargs: object) -> object:
+    """Send one file down the real route: enumeration detects its MIME type, then the scan task reads it."""
+    root = tmp_path / "scan"
+    root.mkdir()
+    (root / name).write_bytes(content)
+    ctx = _make_ctx(tmp_path, **config_kwargs)
+
+    tasks = handle_enum_dir(_enum_dir_task(root), ctx, _logger()).new_tasks
+    assert len(tasks) == 1
+
+    return handle_scan_file(Task(**tasks[0]), ctx, _logger())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["customers.csv", "app.log"])
+def test_scan_file_text_that_sniffs_as_pdf_is_read_as_text(tmp_path: Path, name: str) -> None:
+    content = b"%PDF-1.4,name\nalice@example.com,Alice\n"
+    probe = tmp_path / "probe"
+    probe.write_bytes(content)
+    assert get_mime(str(probe)) == "application/pdf", "the sniff this test guards against no longer happens"
+
+    result = _enumerate_and_scan(tmp_path, name, content, data_handlers=["email"])
+
+    assert result.status == "ok"
+    assert [finding["handler"] for finding in result.findings] == ["email"]
+
+
+@pytest.mark.unit
+def test_scan_file_extensionless_real_pdf_reaches_the_pdf_handler(tmp_path: Path) -> None:
+    content = Path("testdata/pan/sample-pans.pdf").read_bytes()
+
+    result = _enumerate_and_scan(tmp_path, "scanned-report", content, data_handlers=["pan"])
+
+    assert result.status == "ok"
+    assert result.counters.get("files_scanned") == 1
+    assert result.findings
+
+
+@pytest.mark.unit
+def test_scan_file_real_workbook_named_docx_is_read_as_a_workbook(tmp_path: Path) -> None:
+    """The Word handler would call this file scanned and clean: it has no Word parts to fail on."""
+    content = Path("testdata/pan/Excel Sheet.xlsx").read_bytes()
+
+    result = _enumerate_and_scan(tmp_path, "r.docx", content, data_handlers=["pan"])
+
+    assert result.status == "ok"
+    assert result.findings
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["report.xls", "report.xlsx"])
+def test_scan_file_html_exported_as_a_spreadsheet_is_read(tmp_path: Path, name: str) -> None:
+    content = b"<html><body><table><tr><td>alice@example.com</td></tr></table></body></html>\n"
+
+    result = _enumerate_and_scan(tmp_path, name, content, data_handlers=["email"])
+
+    assert result.status == "ok"
+    assert result.findings
+
+
+@pytest.mark.unit
+def test_scan_file_csv_text_with_an_unrecognised_extension_is_read(tmp_path: Path) -> None:
+    content = b"name,email\nAlice,alice@example.com\nBob,bob@example.com\n"
+
+    result = _enumerate_and_scan(tmp_path, "customers.bak", content, data_handlers=["email"])
+
+    assert result.status == "ok"
+    assert result.findings
+
+
+def _zip_bytes(members: dict[str, bytes]) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    return out.getvalue()
+
+
+def _rewrite_zip(path: str, edit: dict[str, tuple[bytes, bytes]], extra: dict[str, bytes]) -> bytes:
+    """A copy of the zip at path, with (old, new) replaced in the named members and extra members added."""
+    with zipfile.ZipFile(path) as source:
+        members = {info.filename: source.read(info) for info in source.infolist()}
+    for name, (old, new) in edit.items():
+        assert old in members[name]
+        members[name] = members[name].replace(old, new)
+    return _zip_bytes(members | extra)
+
+
+@pytest.mark.unit
+def test_docx_handler_reads_a_word_file_with_an_unusual_root_or_second_main_part(tmp_path: Path) -> None:
+    """Only a file with no Word main part at all is turned away: docx2python reads the others."""
+    docx = "testdata/pan/sample-pans.docx"
+    workbook_rel = (
+        b'<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        b'<Relationship Id="rId1" Target="/aaa/x.xml" '
+        b'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument"/></Relationships>'
+    )
+    variants = {
+        "renamed-root.docx": _rewrite_zip(docx, {"word/document.xml": (b"w:document", b"w:Document")}, {}),
+        "short-root.docx": _rewrite_zip(docx, {"word/document.xml": (b"w:document", b"w:doc")}, {}),
+        "second-part.docx": _rewrite_zip(docx, {}, {"aaa/_rels/x.xml.rels": workbook_rel, "aaa/x.xml": b"<workbook/>"}),
+    }
+    for name, content in variants.items():
+        f = tmp_path / name
+        f.write_bytes(content)
+        task = _scan_file_task(f, ext=".docx")
+        result = handle_scan_file(task, _make_ctx(tmp_path, data_handlers=["pan"]), _logger())
+        assert result.findings, name
+        assert result.counters.get("files_scanned") == 1, name
+
+
+@pytest.mark.unit
+def test_vcf_file_is_read_as_text(tmp_path: Path) -> None:
+    f = tmp_path / "contacts.VCF"
+    f.write_text("BEGIN:VCARD\nFN:Alice\nEMAIL:alice@example.com\nEND:VCARD\n")
+
+    tasks = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger()).new_tasks
+    assert len(tasks) == 1
+
+    result = handle_scan_file(Task(**tasks[0]), _make_ctx(tmp_path, data_handlers=["email"]), _logger())
+    assert result.findings
+
+
+def _workbook_with_content_type(content_type: str) -> bytes:
+    """The workbook fixture, declaring itself as another workbook type, as a macro-enabled file or template does."""
+    sheet_type = b"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile("testdata/pan/Excel Sheet.xlsx") as source,
+        zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dest,
+    ):
+        for info in source.infolist():
+            data = source.read(info)
+            if info.filename == "[Content_Types].xml":
+                assert sheet_type in data
+                data = data.replace(sheet_type, content_type.encode())
+            dest.writestr(info, data)
+    return out.getvalue()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "application/vnd.ms-excel.sheet.macroEnabled.main+xml",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml",
+        "application/vnd.ms-excel.template.macroEnabled.main+xml",
+    ],
+)
+def test_scan_file_other_workbook_types_with_no_extension_are_read(tmp_path: Path, content_type: str) -> None:
+    content = _workbook_with_content_type(content_type)
+
+    result = _enumerate_and_scan(tmp_path, "workbook.bak", content, data_handlers=["pan"])
+
+    assert result.status == "ok"
+    assert result.findings
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"From: Alice <alice@example.com>\nTo: bob@example.com\nSubject: Hello\nMessage-ID: <1@example.com>\n\nHi\n",
+        b"BEGIN:VCARD\nVERSION:3.0\nFN:Alice\nEMAIL:alice@example.com\nEND:VCARD\n",
+    ],
+)
+def test_scan_file_mail_and_contacts_with_no_extension_are_read(tmp_path: Path, content: bytes) -> None:
+    result = _enumerate_and_scan(tmp_path, "message", content, data_handlers=["email"])
+
+    assert result.status == "ok"
+    assert result.findings
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "content",
+    [
+        Path("testdata/pan/Excel Sheet.xlsx").read_bytes(),
+        Path("testdata/pan/sample-pans.pptx").read_bytes(),
+        _zip_bytes({"data.txt": b"card 4111111111111111"}),
+    ],
+    ids=["workbook", "presentation", "plain-zip"],
+)
+def test_docx_handler_reports_another_office_file_rather_than_clean(tmp_path: Path, content: bytes) -> None:
+    """Archive members go by extension alone, so this reaches the Word handler, which would find nothing to fail on."""
+    f = tmp_path / "book.docx"
+    f.write_bytes(content)
+
+    result = handle_scan_file(_scan_file_task(f, ext=".docx"), _make_ctx(tmp_path, data_handlers=["pan"]), _logger())
+
+    assert result.status == "error"
+    assert result.error_message == "Word document could not be read"
+    assert "files_scanned" not in result.counters
+
+
+@pytest.mark.unit
+def test_enum_dir_does_not_sniff_a_text_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sniffing one JavaScript file can outlast the listing's deadline, losing the whole folder."""
+    sniffed: list[str] = []
+    monkeypatch.setattr("piidigger.orchestration.worker._enum_dir.get_mime", lambda p: sniffed.append(p))
+    (tmp_path / "constants.js").write_text("export const k1 = 'value1';\n")
+    (tmp_path / "a.pdf").write_bytes(b"%PDF-1.4\n")
+
+    tasks = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger()).new_tasks
+
+    assert len(tasks) == 2
+    assert sniffed == [str(tmp_path / "a.pdf")]
+
+
+@pytest.mark.unit
+def test_scan_file_real_pdf_named_txt_is_reported_as_not_read(tmp_path: Path) -> None:
+    """The known limit in TECHNICAL_DEBT.md: a text extension is trusted, so the PDF's text is missed, but not silently."""
+    content = Path("testdata/pan/sample-pans.pdf").read_bytes()
+
+    result = _enumerate_and_scan(tmp_path, "report.txt", content, data_handlers=["pan"])
+
+    assert not result.findings
+    assert result.counters.get("files_unreadable") == 1
+    assert "files_scanned" not in result.counters
+
+
+@pytest.mark.unit
+def test_scan_file_no_handler_returns_error(tmp_path: Path) -> None:
+    f = tmp_path / "unknown.xyz123"
+    f.write_bytes(b"binary data")
+
+    ctx = _make_ctx(tmp_path)
+    result = handle_scan_file(
+        Task(
+            task_type=TaskType.SCAN_FILE,
+            payload={
+                "display_path": str(f),
+                "file_path": str(f),
+                "ext": ".xyz123",
+                "mime": None,
+                "size": f.stat().st_size,
+                "depth": 0,
+            },
+        ),
+        ctx,
+        _logger(),
+    )
+
+    assert result.status == "error"
+    assert result.counters.get("files_not_scanned") == 1
+
+
+@pytest.mark.unit
+def test_scan_file_testdata_pan_pdf() -> None:
+    """Smoke test: scan the known-PII PDF fixture, expect at least one finding."""
+    pdf = Path("testdata/pan/sample-pans.pdf")
+    if not pdf.exists():
+        pytest.skip("testdata not available")
+
+    log_q: mp.Queue = mp.Queue()  # type: ignore[type-arg]
+    ctx = WorkerContext(
+        config=Config(start_dirs=[], data_handlers=["pan"]),
+        task_queue=mp.Queue(),
+        result_queue=mp.Queue(),
+        log_queue=log_q,
+        stop_event=mp.Event(),
+    )
+    task = Task(
+        task_type=TaskType.SCAN_FILE,
+        payload={
+            "display_path": str(pdf),
+            "file_path": str(pdf),
+            "ext": ".pdf",
+            "mime": None,
+            "size": pdf.stat().st_size,
+            "depth": 0,
+        },
+    )
+    result = handle_scan_file(task, ctx, build_worker_logger(log_q, "test"))
+
+    assert result.status == "ok"
+    assert len(result.findings) >= 1
+
+
+@pytest.mark.unit
+def test_scan_file_permission_denied_returns_error(tmp_path: Path) -> None:
+    """handle_scan_file() returns status='error' when the file cannot be opened."""
+    f = tmp_path / "restricted.txt"
+    f.write_text("content that cannot be read")
+
+    ctx = _make_ctx(tmp_path)
+    # The plaintext handler's first open() is the encoding sample in getencoding.
+    with unittest.mock.patch(
+        "piidigger.getencoding.open",
+        side_effect=PermissionError("access denied"),
+        create=True,
+    ):
+        result = handle_scan_file(_scan_file_task(f), ctx, _logger())
+
+    assert result.status == "error"
+    assert result.counters.get("files_not_scanned") == 1
+    assert "files_scanned" not in result.counters, "a file that could not be opened was not scanned"
+
+
+@pytest.mark.unit
+def test_scan_file_undetectable_encoding_is_logged_and_counted(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A text file that was never read must show up in the log, not pass as a silent ok."""
+    import logging
+
+    f = Path("testdata/plaintext/mislabeled-text-file.txt")
+    logger = logging.getLogger("tests.scan_file.encoding")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path), logger)
+
+    assert result.status == "ok"
+    assert result.counters == {"files_unreadable": 1, "bytes_not_scanned": f.stat().st_size}
+    assert result.findings == []
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.INFO, f"skipping {f}: text encoding could not be detected")
+    ]
+
+
+@pytest.mark.unit
+def test_scan_file_mostly_text_with_stray_binary_yields_findings(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Detection gives up on these, but they are read rather than skipped."""
+    import logging
+
+    from tests.test_getencoding import _MOSTLY_TEXT
+
+    f = tmp_path / "000003.log"
+    f.write_bytes(_MOSTLY_TEXT)
+    logger = logging.getLogger("tests.scan_file.fallback")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path, data_handlers=["email"]), logger)
+
+    assert result.status == "ok"
+    assert result.findings
+    assert caplog.records == []
+
+
+@pytest.mark.unit
+def test_scan_file_that_vanished_after_listing_is_skipped_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A file removed between the directory listing and its scan is not a failure."""
+    import logging
+
+    f = tmp_path / "gone.txt"
+    f.write_text("listed, then deleted")
+    task = _scan_file_task(f)
+    f.unlink()
+    logger = logging.getLogger("tests.scan_file.vanished")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = handle_scan_file(task, _make_ctx(tmp_path), logger)
+
+    assert result.status == "ok"
+    assert result.counters == {"files_not_scanned": 1, "bytes_not_scanned": len("listed, then deleted")}
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.INFO, f"skipping {f}: file no longer exists (removed after it was listed)")
+    ]
+
+
+@pytest.mark.unit
+def test_scan_file_not_found_for_a_file_that_still_exists_is_an_error(tmp_path: Path) -> None:
+    """Only a file that is really gone counts as vanished; any other FileNotFoundError is a failure."""
+    f = tmp_path / "present.txt"
+    f.write_text("still here")
+
+    with unittest.mock.patch(
+        "piidigger.getencoding.open", side_effect=FileNotFoundError("some other path"), create=True
+    ):
+        result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path), _logger())
+
+    assert result.status == "error"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("removed", ["sub", "whole tree"])
+def test_enum_dir_subfolder_that_vanished_after_listing_is_skipped_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, removed: str
+) -> None:
+    """Built at depth 0, as production builds every ENUM_DIR task on disk."""
+    import logging
+    import shutil
+
+    root = tmp_path / "root"
+    gone = root / "app" / "sub"
+    gone.mkdir(parents=True)
+    task = _enum_dir_task(gone, depth=0)
+    shutil.rmtree(gone if removed == "sub" else root / "app")  # a software update removes whole trees
+    logger = logging.getLogger("tests.enum_dir.vanished")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = handle_enum_dir(task, _make_ctx(tmp_path, start_dirs=[root]), logger)
+
+    assert result.status == "ok"
+    assert result.counters == {"dirs_not_scanned": 1}
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.INFO, f"skipping {gone}: folder no longer exists (removed after it was listed)")
+    ]
+
+
+@pytest.mark.unit
+def test_enum_dir_missing_start_directory_is_still_an_error(tmp_path: Path) -> None:
+    """A start directory that does not exist is a configuration mistake, not a vanished folder."""
+    start = tmp_path / "no-such-start"
+
+    result = handle_enum_dir(_enum_dir_task(start, depth=0), _make_ctx(tmp_path, start_dirs=[start]), _logger())
+
+    assert result.status == "error"
+
+
+@pytest.mark.unit
+def test_enum_dir_not_found_for_a_folder_that_is_still_listed_is_an_error(tmp_path: Path) -> None:
+    """A path too long on Windows fails like a missing one; the folder is still there, so it is a failure."""
+    root = tmp_path / "root"
+    present = root / "deep"
+    present.mkdir(parents=True)
+
+    with unittest.mock.patch(
+        "piidigger.orchestration.worker._enum_dir._list_dir", side_effect=FileNotFoundError("[WinError 3]")
+    ):
+        result = handle_enum_dir(_enum_dir_task(present, depth=0), _make_ctx(tmp_path, start_dirs=[root]), _logger())
+
+    assert result.status == "error"
+
+
+@pytest.mark.unit
+def test_scan_file_in_a_removed_folder_is_skipped(tmp_path: Path) -> None:
+    import shutil
+
+    folder = tmp_path / "app"
+    folder.mkdir()
+    f = folder / "index.js"
+    f.write_text("listed, then its folder was deleted")
+    task = _scan_file_task(f, ext=".js")
+    shutil.rmtree(folder)
+
+    result = handle_scan_file(task, _make_ctx(tmp_path), _logger())
+
+    assert result.status == "ok"
+
+
+# ---------------------------------------------------------------------------
+# _is_cloud_placeholder
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_cloud_placeholder_check_skips_win32api_off_windows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Off Windows the answer is always False, without retrying the failed import for every file."""
+    from piidigger.orchestration.worker._enum_dir import _is_cloud_placeholder
+
+    consulted: list[str] = []
+    fake = unittest.mock.MagicMock()
+    fake.GetFileAttributes.side_effect = lambda p: consulted.append(p) or 0x400000
+    monkeypatch.setitem(sys.modules, "win32api", fake)
+    monkeypatch.setattr(os, "name", "posix")
+    # Linux, not just "not Windows": macOS has its own placeholder checks.
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    assert _is_cloud_placeholder(tmp_path) is False
+    assert consulted == []
+
+
+class _StatStub:
+    def __init__(self, flags: int | None, *, size: int = 10, blocks: int = 8, mode: int = stat.S_IFREG) -> None:
+        self._flags = flags
+        self._size = size
+        self._blocks = blocks
+        self._mode = mode
+
+    def stat(self, *, follow_symlinks: bool = True) -> object:
+        if self._flags is None:
+            raise OSError("gone")
+        return types.SimpleNamespace(
+            st_flags=self._flags, st_size=self._size, st_blocks=self._blocks, st_mode=self._mode
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [(stat.SF_DATALESS, True), (stat.SF_DATALESS | stat.UF_COMPRESSED, True), (0, False), (None, False)],
+)
+def test_cloud_placeholder_on_macos_reads_dataless_flag(
+    monkeypatch: pytest.MonkeyPatch, flags: int | None, expected: bool
+) -> None:
+    from piidigger.orchestration.worker._enum_dir import _is_cloud_placeholder
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    assert _is_cloud_placeholder(_StatStub(flags)) is expected  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("flags", "size", "blocks", "expected"),
+    [
+        (0, 168_000_000, 0, True),  # OneDrive's sparse placeholder: full size, nothing on disk
+        (stat.UF_COMPRESSED, 4096, 0, False),  # APFS-compressed files also report zero blocks
+        (0, 0, 0, False),  # empty file
+        (0, 4096, 8, False),  # ordinary file
+    ],
+)
+def test_cloud_placeholder_on_macos_treats_unallocated_files_as_placeholders(
+    monkeypatch: pytest.MonkeyPatch, flags: int, size: int, blocks: int, expected: bool
+) -> None:
+    from piidigger.orchestration.worker._enum_dir import _is_cloud_placeholder
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+    assert _is_cloud_placeholder(_StatStub(flags, size=size, blocks=blocks)) is expected  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_cloud_placeholder_on_macos_ignores_directories(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An APFS directory reports a size but no blocks; it is not a sparse placeholder."""
+    from piidigger.orchestration.worker._enum_dir import _is_cloud_placeholder
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    directory = _StatStub(0, size=64, blocks=0, mode=stat.S_IFDIR)
+
+    assert _is_cloud_placeholder(directory) is False  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_enum_dir_skips_cloud_placeholders(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import piidigger.orchestration.worker._enum_dir as enum_dir_mod
+
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "local.txt").write_text("here")
+    (root / "cloud.txt").write_text("not really here")
+    monkeypatch.setattr(enum_dir_mod, "_is_cloud_placeholder", lambda path: path.name == "cloud.txt")
+
+    result = handle_enum_dir(_enum_dir_task(root), _make_ctx(tmp_path), _logger())
+
+    names = [Path(t["payload"]["file_path"]).name for t in result.new_tasks]
+    assert names == ["local.txt"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("local_only", "expected"), [(True, ["local"]), (False, ["local", "nfs"])])
+def test_enum_dir_skips_network_filesystems_when_local_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, local_only: bool, expected: list[str]
+) -> None:
+    import piidigger.orchestration.worker._enum_dir as enum_dir_mod
+
+    root = tmp_path / "root"
+    (root / "local").mkdir(parents=True)
+    (root / "nfs").mkdir()
+    monkeypatch.setattr(enum_dir_mod, "is_remote_filesystem", lambda path, dev: path.endswith("nfs"))
+
+    result = handle_enum_dir(_enum_dir_task(root), _make_ctx(tmp_path, local_files_only=local_only), _logger())
+
+    assert sorted(Path(t["payload"]["path"]).name for t in result.new_tasks) == expected
+
+
+@pytest.mark.unit
+def test_enum_dir_retries_a_listing_interrupted_by_a_signal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "a.txt").write_text("x")
+    real_iterdir = Path.iterdir
+    calls: list[Path] = []
+
+    def flaky_iterdir(self: Path):  # type: ignore[no-untyped-def]
+        calls.append(self)
+        if len(calls) == 1:
+            raise InterruptedError(4, "Interrupted system call")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", flaky_iterdir)
+
+    result = handle_enum_dir(_enum_dir_task(root), _make_ctx(tmp_path), _logger())
+
+    assert result.status == "ok"
+    assert len(calls) == 2
+    assert [Path(t["payload"]["file_path"]).name for t in result.new_tasks] == ["a.txt"]
+
+
+@pytest.mark.unit
+def test_enum_dir_reports_alive_while_listing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import piidigger.orchestration.worker._enum_dir as enum_dir_mod
+
+    root = tmp_path / "root"
+    root.mkdir()
+    for i in range(3):
+        (root / f"f{i}.txt").write_text("x")
+    sent: list[object] = []
+    ctx = _make_ctx(tmp_path)
+    ctx = dataclasses.replace(ctx, result_queue=types.SimpleNamespace(put=sent.append))  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        enum_dir_mod, "ProgressReporter", functools.partial(enum_dir_mod.ProgressReporter, alive_interval=0.0)
+    )
+    task = _enum_dir_task(root)
+
+    handle_enum_dir(task, ctx, _logger())
+
+    alive = [m for m in sent if isinstance(m, TaskProgress) and m.event == "alive"]
+    assert len(alive) == 3
+    assert {m.task_id for m in alive} == {task.task_id}
+
+
+@pytest.mark.unit
+def test_scan_file_error_message_names_the_exception_type(tmp_path: Path) -> None:
+    """str() of a KeyError is only the key, which on its own tells the reader nothing."""
+    f = tmp_path / "broken.txt"
+    f.write_text("content")
+
+    with unittest.mock.patch("piidigger.getencoding.open", side_effect=KeyError("7"), create=True):
+        result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path), _logger())
+
+    assert result.status == "error"
+    assert result.error_message == "KeyError: '7'"
+
+
+@pytest.mark.unit
+def test_scan_file_partly_read_keeps_findings_and_reports_an_error(tmp_path: Path) -> None:
+    """A handler that skipped part of a file must not make it look fully scanned, or lose what it found."""
+
+    class _PartialReader:
+        def read(self, source, config):  # noqa: ANN001, ANN202
+            yield "card 4893013335386137"
+            source.report_unread("1 of 2 PDF pages could not be read")
+
+    f = tmp_path / "partly.pdf"
+    f.write_bytes(b"x")
+
+    with unittest.mock.patch("piidigger.filehandlers.get_handler_for", return_value=_PartialReader()):
+        result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path, data_handlers=["pan"]), _logger())
+
+    assert result.status == "error"
+    assert result.error_message == "1 of 2 PDF pages could not be read"
+    assert result.findings, "the findings from the part that was read were lost"
+    assert result.counters["files_scanned"] == 1
+    assert result.counters["results_found"] == 1
+
+
+@pytest.mark.unit
+def test_scan_file_with_nothing_read_is_an_error_and_not_counted_as_scanned(tmp_path: Path) -> None:
+    class _LockedReader:
+        def read(self, source, config):  # noqa: ANN001, ANN202
+            source.report_unread("PDF is password protected", nothing_read=True)
+            yield from ()
+
+    f = tmp_path / "locked.pdf"
+    f.write_bytes(b"xyz")
+
+    with unittest.mock.patch("piidigger.filehandlers.get_handler_for", return_value=_LockedReader()):
+        result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path), _logger())
+
+    assert result.status == "error"
+    assert result.error_message == "PDF is password protected"
+    assert result.counters["files_not_scanned"] == 1
+    assert result.counters["bytes_not_scanned"] == 3
+    assert "files_scanned" not in result.counters
+
+
+# ---------------------------------------------------------------------------
+# handle_scan_file: progress keeps a long scan alive
+# ---------------------------------------------------------------------------
+
+
+class _ListQueue:
+    """Stands in for result_queue so the TaskProgress messages can be read back at once."""
+
+    def __init__(self) -> None:
+        self.items: list[object] = []
+
+    def put(self, item: object) -> None:
+        self.items.append(item)
+
+
+def _alive_count(ctx: WorkerContext) -> int:
+    return sum(1 for m in ctx.result_queue.items if isinstance(m, TaskProgress) and m.event == "alive")  # type: ignore[attr-defined]
+
+
+def _scan_with_handler(tmp_path: Path, handler: object, monkeypatch: pytest.MonkeyPatch) -> WorkerContext:
+    """Run handle_scan_file with a stand-in file handler and no rate limit on alive()."""
+    from piidigger.orchestration.worker import _scan_file as scan_mod
+    from piidigger.orchestration.worker._reporter import ProgressReporter
+
+    monkeypatch.setattr(scan_mod, "ProgressReporter", functools.partial(ProgressReporter, alive_interval=0.0))
+    f = tmp_path / "big.txt"
+    f.write_bytes(b"x" * 4096)
+    ctx = dataclasses.replace(_make_ctx(tmp_path), result_queue=_ListQueue())  # type: ignore[arg-type]
+    with unittest.mock.patch("piidigger.filehandlers.get_handler_for", return_value=handler):
+        result = handle_scan_file(_scan_file_task(f), ctx, _logger())
+    assert result.status == "ok"
+    return ctx
+
+
+@pytest.mark.unit
+def test_scan_file_reads_through_open_stream_report_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A handler that only reads (pypdf, openpyxl) keeps its task alive without knowing about progress."""
+
+    class _Reader:
+        def read(self, source, config):  # noqa: ANN001, ANN202
+            with source.open_stream() as stream:
+                while stream.read(512):
+                    pass
+            return iter(())
+
+    ctx = _scan_with_handler(tmp_path, _Reader(), monkeypatch)
+    assert _alive_count(ctx) >= 1
+
+
+@pytest.mark.unit
+def test_scan_file_each_content_piece_reports_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A handler that reads via materialize() still keeps its task alive by yielding content."""
+
+    class _Yielder:
+        def read(self, source, config):  # noqa: ANN001, ANN202
+            yield from ["one", "", "three"]
+
+    ctx = _scan_with_handler(tmp_path, _Yielder(), monkeypatch)
+    assert _alive_count(ctx) == 2, "every non-empty piece counts"
+
+
+@pytest.mark.unit
+def test_scan_file_empty_content_is_not_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A handler stuck yielding "" must still trip the deadline, like a read that returns no data."""
+
+    class _Blank:
+        def read(self, source, config):  # noqa: ANN001, ANN202
+            yield from [""] * 50
+
+    ctx = _scan_with_handler(tmp_path, _Blank(), monkeypatch)
+    assert _alive_count(ctx) == 0
+
+
+# ---------------------------------------------------------------------------
+# What a scan counts: results by type, and files it leaves out
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_scan_file_counts_results_per_data_handler(tmp_path: Path) -> None:
+    f = tmp_path / "both.txt"
+    f.write_text("card 4111111111111111 and 4893013335386137, mail someone@example.com")
+
+    result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path, data_handlers=["pan", "email"]), _logger())
+
+    assert result.counters["results_by_handler:pan"] == 2
+    assert result.counters["results_by_handler:email"] == 1
+    assert result.counters["results_found"] == 3
+
+
+@pytest.mark.unit
+def test_enum_dir_tallies_unsupported_files_by_type(tmp_path: Path) -> None:
+    for name in ("a.DOC", "b.doc", "c.rtf", "noext", "kept.txt"):
+        (tmp_path / name).write_text("hello")
+
+    result = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger())
+
+    tally = {k: v for k, v in result.counters.items() if k.startswith("files_unsupported_by_type:")}
+    assert tally.pop("files_unsupported_by_type:.doc") == 2
+    assert tally.pop("files_unsupported_by_type:.rtf") == 1
+    assert sum(tally.values()) == 1, "the extensionless file may be text or not, by its detected type"
+    assert result.counters["files_found"] >= 1
+
+
+def _denied_junction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: Path) -> Path:
+    junction = tmp_path / "Application Data"
+    monkeypatch.setattr(Path, "is_junction", lambda self: self == junction)
+    monkeypatch.setattr(Path, "iterdir", lambda self: (_ for _ in ()).throw(PermissionError("access denied")))
+    real_resolve = Path.resolve
+    monkeypatch.setattr(Path, "resolve", lambda self, *a, **k: target if self == junction else real_resolve(self))
+    return junction
+
+
+@pytest.mark.unit
+def test_enum_dir_denied_junction_to_a_scanned_folder_is_not_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The legacy profile junctions answer access denied, which read as hundreds of failed folders."""
+    junction = _denied_junction(tmp_path, monkeypatch, tmp_path / "AppData" / "Roaming")
+
+    result = handle_enum_dir(_enum_dir_task(junction), _make_ctx(tmp_path, start_dirs=[tmp_path]), _logger())
+
+    assert result.status == "ok"
+    assert result.counters == {"dirs_not_scanned": 1}
+
+
+@pytest.mark.unit
+def test_enum_dir_denied_junction_outside_the_scan_stays_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A folder-mounted volume may be the only way to its content, so losing it must be reported."""
+    junction = _denied_junction(tmp_path, monkeypatch, tmp_path.parent / "other-volume")
+
+    result = handle_enum_dir(_enum_dir_task(junction), _make_ctx(tmp_path, start_dirs=[tmp_path]), _logger())
+
+    assert result.status == "error"
+
+
+@pytest.mark.unit
+def test_enum_dir_follows_a_readable_junction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "mounted").mkdir()
+    monkeypatch.setattr(Path, "is_junction", lambda self: self.name == "mounted")
+
+    result = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger())
+
+    assert [Path(t["payload"]["path"]).name for t in result.new_tasks] == ["mounted"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bin_name", ["$RECYCLE.BIN", "$Recycle.Bin"])
+def test_enum_dir_skips_recycle_bin_stubs_but_scans_deleted_files(tmp_path: Path, bin_name: str) -> None:
+    sid = tmp_path / bin_name / "S-1-5-21"
+    sid.mkdir(parents=True)
+    (sid / "$IABC123.txt").write_bytes(b"stub")
+    (sid / "$RABC123.txt").write_text("deleted PII is still PII")
+
+    result = handle_enum_dir(_enum_dir_task(sid), _make_ctx(tmp_path), _logger())
+
+    assert [Path(t["payload"]["file_path"]).name for t in result.new_tasks] == ["$RABC123.txt"]
+    assert not any(key.startswith("files_unsupported_by_type:") for key in result.counters)
+
+
+@pytest.mark.unit
+def test_enum_dir_keeps_a_file_named_like_a_stub_outside_the_recycle_bin(tmp_path: Path) -> None:
+    (tmp_path / "$Invoices.txt").write_text("not a stub")
+
+    result = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger())
+
+    assert [Path(t["payload"]["file_path"]).name for t in result.new_tasks] == ["$Invoices.txt"]
+
+
+@pytest.mark.unit
+def test_enum_dir_scans_user_files_named_like_stubs_inside_a_deleted_folder(tmp_path: Path) -> None:
+    deleted = tmp_path / "$Recycle.Bin" / "S-1-5-21" / "$RABC123"
+    deleted.mkdir(parents=True)
+    (deleted / "$Invoices.csv").write_text("deleted PII is still PII")
+    (deleted / "$IABC123.txt").write_text("a real file, one level below where stubs sit")
+
+    result = handle_enum_dir(_enum_dir_task(deleted), _make_ctx(tmp_path), _logger())
+
+    assert sorted(Path(t["payload"]["file_path"]).name for t in result.new_tasks) == ["$IABC123.txt", "$Invoices.csv"]
+
+
+def _junction_to(monkeypatch: pytest.MonkeyPatch, junction: Path, target: Path) -> None:
+    junction.mkdir()
+    real_resolve = Path.resolve
+    monkeypatch.setattr(Path, "is_junction", lambda self: self == junction)
+    monkeypatch.setattr(Path, "resolve", lambda self, *a, **k: target if self == junction else real_resolve(self))
+
+
+def _names(result: object) -> list[str]:
+    return [Path(t["payload"]["path"]).name for t in result.new_tasks]  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+def test_enum_dir_does_not_follow_a_junction_to_a_folder_it_came_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path.resolve()
+    _junction_to(monkeypatch, root / "link", root)
+
+    result = handle_enum_dir(_enum_dir_task(root), _make_ctx(tmp_path, start_dirs=[root]), _logger())
+
+    assert _names(result) == []
+
+
+@pytest.mark.unit
+def test_enum_dir_stops_a_cycle_entered_from_outside_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """e/x -> a, a/l -> b, b/l -> a.  The written path never holds a or b, but e/x resolves to a."""
+    root = tmp_path.resolve()
+    a = root / "a"
+    a.mkdir()
+    walked = root / "e" / "x" / "l"
+    walked.mkdir(parents=True)
+    junction = walked / "l"
+    junction.mkdir()
+    real_resolve = Path.resolve
+    aliases = {root / "e" / "x": a, root / "e" / "x" / "l": root / "b", junction: a}
+    monkeypatch.setattr(Path, "is_junction", lambda self: self in aliases)
+    monkeypatch.setattr(Path, "resolve", lambda self, *args, **kw: aliases.get(self) or real_resolve(self))
+
+    result = handle_enum_dir(_enum_dir_task(walked), _make_ctx(tmp_path, start_dirs=[root]), _logger())
+
+    assert _names(result) == []
+
+
+@pytest.mark.unit
+def test_enum_dir_follows_a_junction_to_a_folder_above_the_start_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its content is reached no other way, even though the target contains the junction."""
+    docs = tmp_path.resolve() / "docs"
+    docs.mkdir()
+    _junction_to(monkeypatch, docs / "up", tmp_path.resolve())
+
+    result = handle_enum_dir(_enum_dir_task(docs), _make_ctx(tmp_path, start_dirs=[docs]), _logger())
+
+    assert _names(result) == ["up"]
+
+
+@pytest.mark.unit
+def test_scan_file_counts_a_pdf_with_no_text_without_failing_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(100, 100)
+    path = tmp_path / "scan.pdf"
+    writer.write(path)
+    logger = logging.getLogger("tests.scan_file.no_text")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = handle_scan_file(_scan_file_task(path, ext=".pdf"), _make_ctx(tmp_path), logger)
+
+    assert result.status == "ok"
+    assert result.counters["pdfs_no_text"] == 1
+    assert result.counters["files_scanned"] == 1
+    assert f"no extractable text in PDF {path}" in caplog.text

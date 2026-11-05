@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="PIIDigger logo">
+  <title>PIIDigger</title>
+
+  <!-- Card background, keeps the mark legible on any header/background color -->
+  <rect x="2" y="2" width="44" height="44" rx="10" fill="#FFFFFF" stroke="#3F51B5" stroke-width="1.5"/>
+
+  <!-- Magnifying glass -->
+  <circle cx="19" cy="19" r="9" fill="#EEF1FC" stroke="#3F51B5" stroke-width="3.2"/>
+  <line x1="25.36" y1="25.36" x2="30.31" y2="30.31" stroke="#3F51B5" stroke-width="3.6" stroke-linecap="round"/>
+
+  <!-- Redacted data lines found inside the lens -->
+  <rect x="15" y="14.2" width="8" height="2.4" rx="1.1" fill="#FF9800"/>
+  <rect x="13.5" y="17.8" width="11" height="2.6" rx="1.2" fill="#FF9800"/>
+  <rect x="15" y="21.6" width="8" height="2.4" rx="1.1" fill="#FF9800"/>
+</svg>

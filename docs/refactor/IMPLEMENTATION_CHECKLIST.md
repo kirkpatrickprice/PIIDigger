@@ -1,0 +1,607 @@
+# Implementation Checklist
+
+**Branch**: `refactor`
+**Status**: Refactor complete — all phases (0-5) done; Overall Success Criteria met. Retained as the historical build-progress record.
+**Last Updated**: 2026-07-06
+**Reference**: [ARCHITECTURE_REDESIGN.md](./ARCHITECTURE_REDESIGN.md)
+
+Use this checklist to track progress. Mark items `[x]` as completed. Each phase ends with an exit-criteria gate — do not start the next phase until all exit criteria are met.
+
+---
+
+## Phase 0 — Standards & Scaffolding
+
+*No behavior changes. Sets the baseline that all new code is born into.*
+
+### snake_case rename — retained business logic
+
+- [x] Run `ruff check --select N src/` to enumerate all naming violations
+- [x] `datahandlers/`: rename all functions, variables, and module-level names to `snake_case`
+  - [x] `pan.py`
+  - [x] `email.py`
+  - [x] `phonenum.py`
+  - [x] `trackdata.py`
+  - [x] `__init__.py` exports
+- [x] `filehandlers/`: rename all functions, variables, and module-level names to `snake_case`
+  - [x] `plaintext.py`
+  - [x] `pdf.py`
+  - [x] `docx.py`
+  - [x] `xlsx.py`
+  - [x] `xls.py`
+  - [x] `_sharedfuncs.py`
+  - [x] `__init__.py` exports
+- [x] `outputhandlers/`: rename all functions, variables, and module-level names to `snake_case`
+  - [x] `csv.py`
+  - [x] `json.py`
+  - [x] `text.py`
+  - [x] `__init__.py` exports
+- [x] `console.py`: verify already snake_case (it was rewritten in a prior commit); fix any remaining violations
+- [x] `getencoding.py`, `getmime.py`: rename as needed
+- [x] `globalfuncs.py`: rename all functions and variables to `snake_case`
+- [x] `globalvars.py`: rename variables to `snake_case`; constants to `UPPER_CASE`
+
+### Linting — enable `N` ruleset and reach zero violations
+
+- [x] Add `"N"` to `ruff` `select` list in `pyproject.toml`
+- [x] Run `ruff check src/ --select N` and fix all violations
+- [x] Run full `ruff check src/` (all enabled rulesets) — zero violations
+- [x] Run `mypy src/` — zero errors (or confirm existing suppressions are documented)
+- [x] Confirm CI passes (`ruff` + `mypy` gates both green)
+
+### Extract `run_scan()` — make the core testable
+
+- [x] Create `src/piidigger/run.py` with a `run_scan(config: Config) -> int` function
+  - [x] Move the scan orchestration body out of the Click `main()` into `run_scan()`
+  - [x] `main()` in `piidigger.py` becomes: load config → call `run_scan(config)` → `sys.exit(code)`
+  - [x] `run_scan` must be importable and callable in a test without invoking Click
+
+### Fix `errorCodes` bugs
+
+- [x] `classes.py:66`: replace `globalfuncs.errorCodes['invalidConfig']` with `globalvars.errorCodes['invalidConfig']` — **moot: `classes.py` deleted in Phase 4**
+- [x] `classes.py:110`: same fix — **moot: `classes.py` deleted in Phase 4**
+- [x] `piidigger.py:288`: replace non-existent key `errorCodes['unknown']` with `errorCodes['unknownError']` — **moot: old `src/piidigger/piidigger.py` deleted in Phase 4**
+- [x] Add a test that exercises both invalid-config paths and verifies clean exit (no `AttributeError`) — **moot: code path no longer exists; `Config.from_toml()` raises `ValueError` with clear message instead**
+
+### Scaffold new module stubs
+
+Create empty-but-importable stubs (docstring + `__all__ = []` or equivalent) so import paths are established before Phase 1 fills them in:
+
+- [x] `src/piidigger/cli/__init__.py`
+- [x] `src/piidigger/cli/main.py` (empty `click.group()`)
+- [x] `src/piidigger/cli/commands/__init__.py`
+- [x] `src/piidigger/cli/commands/scan.py`
+- [x] `src/piidigger/cli/commands/config.py`
+- [x] `src/piidigger/models/__init__.py`
+- [x] `src/piidigger/models/config.py`
+- [x] `src/piidigger/models/tasks.py`
+- [x] `src/piidigger/models/payloads.py`
+- [x] `src/piidigger/models/results.py`
+- [x] `src/piidigger/protocols.py`
+- [x] `src/piidigger/orchestration/__init__.py`
+- [x] `src/piidigger/orchestration/context.py`
+- [x] `src/piidigger/orchestration/worker/` (refactored into package: `_loop.py`, `_enum_dir.py`, `_scan_file.py`)
+- [x] `src/piidigger/orchestration/coordinator.py`
+- [x] `src/piidigger/orchestration/logging_setup.py`
+- [x] `src/piidigger/orchestration/progress.py`
+- [x] `src/piidigger/orchestration/sources.py`
+- [x] `src/piidigger/run.py`
+
+### Phase 0 — Exit Criteria
+
+- [x] `ruff check src/` — zero violations (all rulesets including `N`)
+- [x] `mypy src/` — zero errors
+- [x] Existing test suite passes unchanged
+- [x] `run_scan(config)` is callable in a test without Click
+- [x] All module stubs importable without error
+
+---
+
+## Phase 1 — Core Infrastructure
+
+*Orchestration machinery with a trivial no-op task. No business logic attached yet. Goal: prove pool start/dispatch/result/shutdown works correctly on Windows `spawn`.*
+
+### Task model — `src/piidigger/models/tasks.py`
+
+- [x] `TaskType` enum: `ENUM_DIR`, `SCAN_FILE`, `NOOP` (testing only); archive types reserved as comments
+- [x] `Task` Pydantic model (frozen): `task_id`, `task_type`, `payload`, `timeout_seconds`
+  - [x] `task_id` defaults to `uuid4().hex`
+  - [x] `timeout_seconds` validated: `ge=1, le=600`
+  - [x] Picklable: verified by round-trip test
+- [x] `TaskResult` Pydantic model: `task_id`, `task_type`, `status`, `new_tasks`, `findings`, `counters`, `error_message`, `duration_seconds`, `worker_pid`
+  - [x] `status` constrained to `Literal["ok", "timeout", "error"]`
+  - [x] `duration_seconds` validated: `ge=0.0`
+- [x] `TaskStarted` dataclass: `task_id`, `worker_pid` (heartbeat message — not a `TaskResult`)
+- [x] `SHUTDOWN` sentinel constant (module-level; replaces 1.x `SENTINEL` string)
+
+### WorkerContext — `src/piidigger/orchestration/context.py`
+
+- [x] `WorkerContext` frozen dataclass: `config`, `task_queue`, `result_queue`, `log_queue`, `stop_event`
+- [x] Docstring states: why `dataclass` not Pydantic; what is and is not allowed (no `Logger`, no `Console`)
+- [x] Verified picklable across `mp.spawn` on Windows
+
+### Logging setup — `src/piidigger/orchestration/logging_setup.py`
+
+- [x] `build_worker_logger(log_queue, name) -> logging.Logger`: attaches `QueueHandler`; called inside each process
+- [x] `start_listener(log_queue, log_file, log_level) -> QueueListener`: creates `FileHandler`, starts listener thread
+- [x] `stop_listener(listener)`: stops the listener; called after all workers have joined
+- [x] Verified: log records written inside a worker process appear in the log file
+
+### Worker — `src/piidigger/orchestration/worker.py`
+
+- [x] `DISPATCH` dict: maps `TaskType` → handler callable; initially contains only `NOOP` handler
+- [x] `worker_loop(ctx: WorkerContext) -> None`:
+  - [x] Builds its own logger via `build_worker_logger()`
+  - [x] Loop: `task_queue.get()` → check `SHUTDOWN` → put `TaskStarted` heartbeat → `_dispatch()` → `try/finally _cleanup_temp_workspace()` → put `TaskResult`
+  - [x] `_dispatch()` wraps handler in `try/except`; exceptions become `status="error"` results, never propagate
+  - [x] `_cleanup_temp_workspace()`: no-op in Phase 1; stub with documented interface
+  - [x] Handles `KeyboardInterrupt` cleanly: finishes current task, exits loop
+- [x] `_handle_noop(task, ctx, logger) -> TaskResult`: returns `status="ok"` instantly; used for integration testing only
+
+### Worker pool helpers — `src/piidigger/orchestration/worker.py`
+
+- [x] `start_worker_pool(ctx, n_workers) -> list[mp.Process]`: spawns N `worker_loop` processes
+- [x] `broadcast_shutdown(task_queue, n_workers)`: puts N `SHUTDOWN` sentinels
+- [x] `join_workers(workers, timeout)`: joins all; force-terminates any still alive after timeout; logs each outcome
+
+### Phase 1 — Tests
+
+- [x] Unit: `Task` creation with valid fields
+- [x] Unit: `Task` rejects invalid `timeout_seconds` (out of range)
+- [x] Unit: `Task` rejects unknown `task_type`
+- [x] Unit: `Task` pickles and unpickles cleanly (`pickle.dumps` / `pickle.loads`)
+- [x] Unit: `TaskResult` rejects invalid `status` literal
+- [x] Unit: `build_worker_logger()` returns a logger that puts records on `log_queue`
+- [x] Integration: start pool of 2 workers, dispatch 10 `NOOP` tasks, collect all 10 results, shut down cleanly
+- [x] Integration: log records from workers appear in log file after `stop_listener()`
+- [x] Unit: `Config` (WorkerContext custom payload) pickles cleanly; NOOP pool integration test proves full spawn-boundary transit
+
+### Phase 1 — Exit Criteria
+
+- [x] Pool start → dispatch → result → shutdown cycle works on Windows `spawn`
+- [x] Worker log records reach the file handler
+- [x] All unit and integration tests pass
+- [x] `ruff check` + `mypy` clean on all Phase 1 files
+
+---
+
+## Phase 2 — Coordinator & Control Flow
+
+*The riskiest piece: the fan-out loop, `pending` termination logic, deadline monitoring, and graceful shutdown. No real scan logic — business handlers are stubs.*
+
+### Coordinator — `src/piidigger/orchestration/coordinator.py`
+
+- [x] `run_coordinator(ctx, workers, listener, sinks, progress) -> None`:
+  - [x] Seeds initial tasks: one `ENUM_DIR` per `config.start_dirs`; sets `pending = len(start_dirs)`
+  - [x] Main loop: `result_queue.get(timeout=HEARTBEAT_CHECK_INTERVAL)`
+    - [x] On `queue.Empty`: call `_check_worker_deadlines()`; continue
+    - [x] On `TaskStarted`: call `_record_heartbeat()`; continue (does not change `pending`)
+    - [x] On `TaskResult`: `pending -= 1`; enqueue each `new_task` (`pending += 1` per); route `findings`; call `progress.update(counters)`
+  - [x] Termination: when `pending == 0`, exits loop
+  - [x] Post-loop: `broadcast_shutdown()` → `join_workers()` → `_flush_sinks()` → `stop_listener()`
+- [x] `_record_heartbeat(msg)`: stores `{task_id: (worker_pid, timestamp)}`
+- [x] `_check_worker_deadlines()`:
+  - [x] For each in-flight task older than `2 × timeout_seconds`: log warning; `terminate()` the owning worker; spawn replacement; synthesize `status="timeout"` `TaskResult`; decrement `pending`
+  - [x] Phase 4 will add crash-before-heartbeat re-queue; stub the extension point here
+- [x] `KeyboardInterrupt` handler: calls `broadcast_shutdown()`, joins workers with timeout, flushes sinks, exits (via `try/finally`)
+
+### Progress display — `src/piidigger/orchestration/progress.py`
+
+- [x] `ProgressDisplay` class, owned by the coordinator, constructed before the main loop
+- [x] `start() -> None`: opens `rich.Live` context with two-panel `rich.Layout`
+  - [x] Top panel: `rich.Progress` with tasks for `dirs_found`, `dirs_scanned`, `files_found`, `files_scanned`, `bytes_scanned`, `results_found`
+  - [x] Bottom panel: fixed-height scrolling events log (`rich.Table`, circular buffer of last N lines)
+- [x] `update(counters: dict[str, int]) -> None`: increments the relevant progress bars
+- [x] `log_event(level: str, message: str) -> None`: prepends a line to the events panel (with timestamp and colour by level)
+- [x] `stop() -> None`: closes `rich.Live`; prints final summary line to stdout
+- [x] Non-TTY mode: when `rich.Console` is not a terminal, `start()`/`update()`/`log_event()` are no-ops; `stop()` prints plain-text summary
+
+### Simulated end-to-end test chain (Phase 2 integration)
+
+- [x] Add `ENUM_DIR` and `SCAN_FILE` stub handlers to `DISPATCH` (return synthetic `new_tasks` / `counters` without touching the filesystem):
+  - [x] `ENUM_DIR` stub: returns 2 child `ENUM_DIR` tasks + 3 `SCAN_FILE` tasks (fixed synthetic payloads)
+  - [x] `SCAN_FILE` stub: returns `counters={"files_scanned": 1, "bytes_scanned": 1024}`
+- [x] Run coordinator with stub handlers on a synthetic tree; verify `pending` reaches 0 and loop exits
+
+### Phase 2 — Tests
+
+- [x] Unit: coordinator seeds correct number of initial tasks for N start dirs
+- [x] Unit: `pending` counter arithmetic — decrement + re-increment stays consistent across one result with 3 `new_tasks`
+- [x] Unit: `_check_worker_deadlines()` synthesizes a timeout result and decrements `pending` for an expired task
+- [x] Unit: `ProgressDisplay.update()` increments counters correctly
+- [x] Unit: `ProgressDisplay` no-ops cleanly when not a TTY
+- [x] Integration: coordinator + stub handlers — full fan-out loop reaches `pending == 0` on a synthetic tree of depth 2
+- [x] Integration: `Ctrl+C` during fan-out exits within 5 seconds, no orphan processes remain — **skipped on Windows** (cross-process SIGINT requires `CREATE_NEW_PROCESS_GROUP`; tested on POSIX only)
+- [x] Integration: a deliberately hung stub handler triggers deadline detection, is terminated, and scan continues
+
+### Phase 2 — Exit Criteria
+
+- [x] Coordinator reaches `pending == 0` correctly on a synthetic tree
+- [x] `Ctrl+C` exits cleanly within 5 seconds (POSIX verified; Windows skip documented)
+- [x] Deadline detection terminates a hung worker and the scan continues
+- [x] Progress display renders without error in TTY mode; is silent in non-TTY mode
+- [x] All tests pass; `ruff` + `mypy` clean
+
+---
+
+## Phase 3 — Re-contract & Wire Business Logic
+
+*First real scan. Business logic re-contracted under the new protocols and attached to the orchestration layer. End-to-end directory scan must produce correct output.*
+
+### Protocols — `src/piidigger/protocols.py`
+
+- [x] `DataHandler(Protocol)`: `name: str`; `find_matches(text: str) -> dict[str, set[str]]`
+- [x] `FileHandler(Protocol)`: `read(source: ScannableItem) -> Iterator[str]`
+- [x] `OutputSink(Protocol)`: `open() -> None`; `write(record: ResultRecord) -> None`; `close() -> None`
+- [x] `ScannableItem(Protocol)`: `display_path: str`; `ext: str`; `mime: str | None`; `size: int`; `depth: int`; `open_stream() -> IO[bytes]`; `materialize() -> Path`
+
+### Sources — `src/piidigger/orchestration/sources.py`
+
+- [x] `FilesystemItem(ScannableItem)`: wraps `pathlib.Path`
+  - [x] `display_path`: `str(path)`
+  - [x] `ext`: `path.suffix`
+  - [x] `mime`: result of MIME detection (or `None` if detection disabled)
+  - [x] `size`: `path.stat().st_size`
+  - [x] `depth`: always `0`
+  - [x] `open_stream()`: `open(path, "rb")`
+  - [x] `materialize()`: returns `path` itself (no copy)
+- [x] `FilesystemItem` passes the `ScannableItem` Protocol check (`typing.runtime_checkable` or `isinstance` test)
+
+### Configuration model — `src/piidigger/models/config.py`
+
+- [x] `Config` Pydantic model replaces the 1.x `classes.Config` getter-soup
+  - [x] `start_dirs: list[Path]`
+  - [x] `exclude_dirs: list[str]`
+  - [x] `include_exts: list[str]`
+  - [x] `include_mime: list[str]`
+  - [x] `data_handlers: list[str]`
+  - [x] `performance: Literal["fast", "balanced", "slow"]` (replaces `max_workers`; removed in Phase 4 cleanup)
+  - [x] `default_timeout_seconds: int` (default: 30)
+  - [x] `local_files_only: bool`
+  - [x] `log_file: Path`
+  - [x] `log_level: str`
+  - [x] Nested `results: ResultsConfig` (output file paths per format)
+  - [x] `@classmethod from_toml(path: Path) -> Config`: loads and validates; raises with clear message on invalid TOML or missing required fields
+  - [x] `@classmethod default() -> Config`: returns built-in defaults
+  - [x] Validation: start dirs must exist; log dir must be creatable; `data_handlers` must be known names
+
+### Result model — `src/piidigger/models/results.py`
+
+- [x] `ResultRecord` Pydantic model (as specified in architecture doc, with all lineage fields)
+- [x] `source_member_path`, `source_depth`, `source_container_type` present but optional/defaulted; non-null for archive members
+
+### Payload models — `src/piidigger/models/payloads.py`
+
+- [x] `EnumDirPayload(BaseModel)`: `path: Path`; `depth: int = 0`
+- [x] `ScanFilePayload(BaseModel)`: `display_path: str`; `file_path: Path`; `ext: str`; `mime: str | None`; `size: int`; `depth: int = 0`
+
+### Real task handlers — `src/piidigger/orchestration/worker.py`
+
+- [x] `handle_enum_dir(task, ctx, logger) -> TaskResult`:
+  - [x] Validates payload as `EnumDirPayload`
+  - [x] Iterates directory; respects `config.exclude_dirs`, `config.local_files_only`
+  - [x] Handles `PermissionError`, `OSError`, `FileNotFoundError` — logs and continues
+  - [x] Returns `new_tasks`: one `ENUM_DIR` per subdirectory, one `SCAN_FILE` per matching file
+  - [x] Returns `counters`: `{"dirs_scanned": 1, "dirs_found": N, "files_found": M, "bytes_found": B}`
+- [x] `handle_scan_file(task, ctx, logger) -> TaskResult`:
+  - [x] Validates payload as `ScanFilePayload`
+  - [x] Constructs a `FilesystemItem`
+  - [x] Loads enabled `FileHandler` for the item's extension/MIME
+  - [x] Iterates chunks from `file_handler.read(item)`
+  - [x] For each chunk, runs all enabled `DataHandler.find_matches()` instances
+  - [x] Aggregates matches into `ResultRecord` entries
+  - [x] Returns `findings` (list of serialized `ResultRecord`) and `counters`: `{"files_scanned": 1, "bytes_scanned": N}`
+  - [x] Handles unreadable files, encoding errors — logs and returns `status="error"`
+- [x] Update `DISPATCH` table: replace stubs with real handlers
+
+### Data handlers — re-contracted
+
+- [x] Each handler implements `DataHandler` protocol
+- [x] Function renamed: `find_match` → `find_matches` (returns `dict[str, set[str]]`)
+- [x] No imports of `multiprocessing`, queues, or loggers
+- [x] Unit tests pass without changes (just import path updates)
+
+### File handlers — re-contracted
+
+- [x] Each handler implements `FileHandler` protocol: `read(source: ScannableItem) -> Iterator[str]`
+- [x] Text-based handlers (`plaintext`, `pdf`): use `source.open_stream()` with encoding detection
+- [x] Binary handlers requiring a real path (`docx`, `xlsx`, `xls`): call `source.materialize()`; documented in class docstring
+- [x] Handlers do not import `multiprocessing`, queues, or loggers
+
+### Output sinks — re-implemented
+
+- [x] `outputhandlers/csv.py`: `CsvSink(OutputSink)` — `open()` creates file + writes header; `write(record)` appends row; `close()` flushes
+- [x] `outputhandlers/json.py`: `JsonSink(OutputSink)` — `open()` opens file; `write(record)` appends JSON line; `close()` finalizes
+- [x] `outputhandlers/text.py`: `TextSink(OutputSink)` — `open()` opens file; `write(record)` appends formatted line; `close()` flushes
+- [x] All sinks write `ResultRecord` lineage fields (even if null for on-disk files)
+- [x] All sinks handle `IOError` gracefully — log, do not crash the coordinator
+
+### CLI scaffolding — `src/piidigger/cli/`
+
+- [x] `cli/main.py`: `@click.group()` with `scan` as default command
+- [x] `cli/commands/scan.py`: all current Click options migrated from `piidigger.py`; calls `run_scan(config)`
+- [x] `cli/commands/config.py`: `generate` subcommand (write default TOML); `validate` subcommand (load and report errors)
+- [x] `run.py`: `run_scan(config: Config) -> int` wires together: start logging listener → start workers → run coordinator → return exit code
+
+### CLI — second pass (pre-2.0 launch, deferred from Wave 3)
+
+- [x] Add `piidigger inspect` subcommand group (`cli/commands/inspect.py`); register it on the root group in `cli/main.py`
+- [x] `piidigger inspect mime <file>` — detect and print the MIME type PIIDigger would assign to a given file (wraps `getmime.get_mime()`)
+- [x] `piidigger inspect encoding <file>` — detect and print the encoding PIIDigger would use to read a given file (wraps `getencoding.detect_encoding()`)
+- [x] `piidigger inspect datatypes` — list available data handlers; moved from `scan --list-datahandlers` *(implemented as `datatypes`, not `handlers`, to match the internal registry name)*
+- [x] `piidigger inspect filetypes` — list supported extensions and MIME types; moved from `scan --list-filetypes`
+- [x] `piidigger inspect cpu` — print physical and logical CPU counts; moved from `scan --cpu-count`
+- [x] Remove `--list-datahandlers`, `--list-filetypes`, and `--cpu-count` from `scan` after `inspect` is in place
+- [x] Move `--version` / `-v` from `piidigger scan` to the root `piidigger` group (`cli/main.py`); remove `click.version_option` from `scan.py`
+
+### CLI — performance preset (pre-2.0 launch, deferred from Wave 3)
+
+Replace the raw `--max-workers N` option with a user-friendly performance preset.  The preset maps to a worker count using physical core count (via `psutil`) so the application handles CPU architecture differences transparently.
+
+Preset → worker count formula:
+
+| Preset | Workers | Notes |
+|---|---|---|
+| `slow` | 1 | Background scan — machine stays fully responsive |
+| `balanced` | `max(1, ceil(physical_cores × 0.75))` | Default — leaves ~25% of physical cores free for other work |
+| `fast` | `os.cpu_count()` (logical cores) | Full throughput; HT benefit is real for PIIDigger's mixed I/O+CPU profile |
+
+- [x] Add `psutil` to project dependencies (`pyproject.toml`)
+- [x] Add `performance: Literal["fast", "balanced", "slow"] = "balanced"` field to `Config`; included in `generate_toml_template()` and `from_toml()` round-trip
+- [x] Implement `_resolve_workers(performance: str, physical_cores: int, logical_cores: int) -> int` in `run.py`; `psutil.cpu_count(logical=False)` provides physical cores with `os.cpu_count()` as logical fallback
+- [x] `--performance` CLI flag on `piidigger scan` — **omitted by design**: performance is a config-only setting; no CLI worker-count override of any kind (decision made during Phase 4 cleanup)
+- [x] `--max-workers N` hidden expert override — **intentionally removed**: `max_workers` field deleted from `Config` and all CLI surfaces; performance profiles are the sole control
+- [x] Unit tests for `_resolve_workers()`: each preset on a range of physical/logical core counts, including the 2-core edge case (`test_run.py`)
+
+### Phase 3 — Tests
+
+- [x] Unit: `FilesystemItem` satisfies `ScannableItem` protocol
+- [x] Unit: `Config.from_toml()` loads a valid TOML; rejects invalid with clear message
+- [x] Unit: `Config.from_toml()` with missing start dir raises with message (not `AttributeError`)
+- [x] Unit: each `DataHandler` — `find_matches()` returns correct type on known input
+- [x] Unit: each `FileHandler` — `read()` yields non-empty strings from a test fixture file
+- [x] Unit: each `OutputSink` — `open()`/`write()`/`close()` produces correct file content with `tmp_path`
+- [x] Unit: `handle_enum_dir()` with a real temp directory returns correct `new_tasks` and `counters`
+- [x] Unit: `handle_scan_file()` with a test fixture returns correct `findings`
+- [x] Unit: `handle_scan_file()` with a permission-denied file returns `status="error"`, does not raise
+- [x] Integration: `run_scan()` on `testdata/plaintext/` produces correct CSV output
+- [x] Integration: `run_scan()` on `testdata/pan/` with all output formats — CSV, JSON, text files all created and non-empty
+- [x] Integration: `CliRunner` invokes `piidigger scan` and exits 0
+
+### Phase 3 — Exit Criteria
+
+- [x] Full scan of `testdata/pan/` produces correct output in all three formats
+- [x] All handler unit tests pass without spinning up a process tree
+- [x] `CliRunner` smoke test passes
+- [x] `ruff` + `mypy` clean on all Phase 3 files
+
+---
+
+## Phase 4 — Hardening & Parity
+
+*Reliability, the 2.0 output baseline, deletion of old code, and coverage floor.*
+
+### Heartbeat deadline monitoring (completing the Phase 2 stub)
+
+- [x] `_check_worker_deadlines()` full implementation:
+  - [x] Track `{task_id: (worker_pid, start_time)}` for all in-flight tasks
+  - [x] On expiry (`2 × task.timeout_seconds`): log warning with task details; `terminate()` pid; spawn replacement; synthesize `status="timeout"` result; decrement `pending`
+  - [x] Crash-before-heartbeat detection: if a worker process is dead (`not proc.is_alive()`) and its task has no heartbeat record, re-queue the task (up to `MAX_RETRIES`); log each retry; after max retries, synthesize `status="error"`
+- [x] `MAX_RETRIES` constant defined in `orchestration/worker/_loop.py`
+
+### Reliability validation
+
+- [x] `base64-xml-test.xml` with email handler and `timeout_seconds=30` completes in < 5 minutes total
+- [x] Log contains an explicit `"timeout"` record for the offending file — not a silent skip
+- [x] Run with 1 deliberately hung worker (synthetic): other workers continue; hung worker is terminated and replaced; scan completes — `test_coordinator.py::test_hung_worker_replaced_other_workers_continue` (3 workers, 1 hung NOOP + 5 quick NOOPs; asserts all 5 quick tasks complete with `status="ok"`, replacement spawned, pending reaches 0, completes in < 15 s)
+
+### UI Improvements
+
+- [x] Improve timeout warning message readability: replace terse `timeout task=<id>` output with structured context including task_type, source/path member, and retry/replacement action in the event table.  Ensure that full details (`task_type`, source path/member, worker pid, configured timeout, elapsed time, retry/replacement action) are captured in the log.
+- [x] Update the Progress Bar display to provide an ETA for each of the Directory, File, and Bytes progress bars
+- [x] Add a check to ensure that the user is an administrator/root before running PIIDigger.  Log the status of the check in the log file.  If not an admin, report that "Admin user not detected.  A full disk scan may not be possible.  Continue (Y/n)" with a timeout of 10 seconds.  Add a configuration option `admin_check = true` as the default in the TOML file.  `admin_check = false` will bypass the confirmation (but not the check and log actions above).  Check `globalfuncs` for `is_admin` for existing code to implement the check or recommend a better implementation.  This code can be moved (e.g. to `progress.py`) if needed.
+- [x] Emit configuration confirmation messages to the Event table on start-up.  Include: Performance profile, Number of worker threads, seed directories/Windows drive letters, Sleep Prevention (wake.py) status, and a message to "Press CTRL-C to terminate the scan"
+- [x] Ensure that a default scan automatically checks for a default `piidigger.toml` file in the current directory and uses it if found -- even if `piidigger scan -f <filename>` is not specified.  If not found, uses the default, internal configuration silently.  Explicit `-f missing.toml` is now an error rather than a silent fallback. Tests: `test_cli.py::test_scan_auto_detects_piidigger_toml_in_cwd`, `test_scan_uses_defaults_silently_when_no_toml_in_cwd`, `test_scan_f_flag_errors_on_missing_file`.
+- [x] Rename `piidigger scan -c` to `piidigger scan -f`.  No existing tests referenced `-c`; new test `test_scan_f_flag_is_recognized` confirms the flag.
+
+### Baseline comparison
+
+- [x] Generate 1.x baseline output: `uv tool install piidigger` (v1 from PyPI) run against `testdata/` — 747 findings, saved to `piidigger-results/THE-BEAST-20260628-213721.csv`
+- [x] Generate 2.0 output: `uv run piidigger scan` run against same `testdata/` — 751 findings, saved to `piidigger-results/THE-BEAST-20260628-214040.csv`
+- [x] Compare findings: v2 is a **strict superset** of v1 — zero regressions (0 items in v1 missing from v2); v2 finds 4 additional matches
+- [x] Document intentional delta — v1/v2 CSV schemas differ entirely (v1: `filename/datatype/value`; v2: `source_path/source_member_path/source_depth/source_container_type/handler/match_type/value`); format comparison is not meaningful
+
+**v2 additional findings (improvements, not regressions):**
+| File | Handler | Match type | Value |
+|---|---|---|---|
+| `testdata/pan/example-file2 (1).txt` | pan | amex | `372058*****2012,` |
+| `testdata/pan/sample-pans-ascii.csv` | pan | amex | `3444 91**** *3122,` |
+| `testdata/pan/sample-pans-ascii.csv` | pan | amex | `344491*****3122,` |
+| `testdata/pan/sample-pans.docx` | pan | visa | `4111-11**-****-1111` |
+
+**Decision — no permanent baseline test**: a standing e2e test would require updating every time a new handler is added or ZIP support lands (v2 finds more → false failure). Per-handler unit tests already guard the regression surface. The comparison was a one-time migration validation, not an ongoing contract.
+
+### Old code deletion
+
+- [x] Delete `src/piidigger/classes.py` (contained `ProcessManager`)
+- [x] Delete `src/piidigger/queuefuncs.py`
+- [x] Delete `src/piidigger/filescan.py`
+- [x] Delete `src/piidigger/piidigger.py` (old entry point; fully replaced by `cli/` + `run.py`)
+- [x] Delete `src/piidigger/logmanager.py`
+- [x] Delete `src/piidigger/globalvars.SENTINEL` (and remaining dead vars)
+- [x] `grep -r "SENTINEL\|ProcessManager\|LogManager\|queuefuncs\|filescan\|logmanager"` returns no hits in `src/` — enforced by `test_phase4.py::test_no_legacy_orchestration_references`
+- [x] Review `globalfuncs` and `globalvars` to ensure that all remaining code is still used.  Delete all unused functions and variables.  Identify if all remaining/in-use items are better located in other modules.
+
+### Coverage and quality gate
+
+- [x] Run `pytest --cov=src/piidigger tests/ --cov-report=term-missing`
+- [x] Overall coverage ≥ 80% — achieved then; **84% overall as of 2026-07-06** (349+ tests)
+- [ ] `orchestration/` coverage ≥ 90% — **not met** (55% for `coordinator.py` and `progress.py` as of 2026-07-06); this was always an aspirational stretch goal, not a merge-blocking exit criterion (the merge gate is the 80% overall figure in Overall Success Criteria, which is met). Left open as optional future work, not a refactor-completeness gap.
+- [x] `ruff check src/ tests/` — zero violations
+- [x] `mypy src/` — zero errors
+
+> **Orchestration coverage note**: The 90% goal is aspirational and remains unmet. Uncovered lines are concentrated in `coordinator.py` nested functions (`_check_worker_deadlines` timeout/crash paths, `KeyboardInterrupt` handler) and `progress.py` TTY paths. Covering them requires either (a) multiprocessing coverage plugin configuration, or (b) slow tests (> 5s) for deadline timeout scenarios. Not scheduled against any current phase — pick up only if orchestration reliability work resumes.
+
+### Phase 4 — Tests
+
+- [x] Unit: email `@` prefilter prevents regex backtracking on long base64-like strings — `test_email.py::test_email_prefilter_skips_regex_on_long_no_at_string` *(replaces the original `base64-xml-test.xml` integration scenario; the prefilter eliminates the backtracking root cause before the regex is ever invoked)*
+- [x] Integration: worker crash recovery — synthetic crash; task is re-queued; scan completes — `test_coordinator.py::test_crash_before_heartbeat_requeues_task`
+- [x] Integration: all old orchestration code deleted — `grep` assertions pass in CI (`test_phase4.py::test_no_legacy_orchestration_references`, `test_legacy_module_files_do_not_exist`)
+- [x] Integration: baseline comparison — v2 is strict superset of v1 (0 regressions, 4 improvements); delta documented in Baseline comparison section above; no permanent test (rationale documented there)
+
+Additional tests added in Phase 4:
+- [x] Unit: coordinator helper functions (`_truncate_path`, `_is_access_denied`, `_denied_path`, `_short_error`, `_findings_summary`) — `test_coordinator_helpers.py`
+- [x] Unit: `_build_sinks()` all format combinations — `test_run.py`
+- [x] Unit: `worker_loop()` dispatches task and handles SHUTDOWN in a thread (coverage path) — `test_worker.py`
+- [x] Unit: `_dispatch()` unknown handler → `status="error"` — `test_worker.py`
+- [x] Unit: `_dispatch()` handler exception → `status="error"` — `test_worker.py`
+- [x] Unit: `_handle_noop()` with `delay_seconds` sleeps and returns ok — `test_worker.py`
+- [x] Unit: `join_workers()` force-terminates a straggler process — `test_worker.py`
+- [x] Integration: `run_scan()` with text output sink returns 0, writes file — `test_run.py`
+- [x] Integration: coordinator calls `_check_worker_deadlines` on queue.Empty (via tiny `HEARTBEAT_CHECK_INTERVAL`) — `test_coordinator.py`
+
+### Phase 4 — Exit Criteria
+
+- [x] `base64-xml-test.xml` completes without error or hang; email handler `@` prefilter eliminates backtracking risk; hung-worker termination and replacement validated by `test_hung_worker_replaced_other_workers_continue`
+- [x] Graceful `Ctrl+C` with full cleanup — coordinator `KeyboardInterrupt` handler implemented; POSIX integration test passes; Windows skip documented
+- [x] Baseline comparison passes (or delta is documented) — v2 strict superset of v1; 4-finding delta documented
+- [x] No old orchestration code in `src/` — grep-clean test enforces this in CI
+- [x] Coverage ≥ 80%; `ruff` + `mypy` clean — 80% overall, zero ruff violations, zero mypy errors
+
+---
+
+## Phase 5 — Multi-Format Archive Support (ZIP + 7z)
+
+*Proves Goal 2: archive support adds task types and a `ScannableItem` producer with zero changes to `coordinator.py` or `worker.py`.*
+
+> **Design revision complete** — the unified temp-dir extraction path (`extract_member()`-only `ArchiveHandler`, `ArchiveMemberItem` folded into `FilesystemItem`) described in [ADR-multi-format-archives.md](./ADR-multi-format-archives.md) is implemented and verified directly against the code (2026-07-06). Items previously marked `⟳` are done.
+
+### Open Decision 6 — secure deletion
+
+- [x] Implemented `src/piidigger/orchestration/secure_delete.py`: 2-pass overwrite (zeros then random) + `os.fsync()` + `unlink`; cross-platform, no external dependency
+- [x] `_cleanup_temp_workspace()` in `_loop.py` calls `secure_delete()` on all files in `task_temp` at end of every task (try/finally)
+
+### Shared types
+
+- [x] `src/piidigger/exceptions.py` — `ArchiveReadError` (no internal imports; cycle-safe)
+- [x] `src/piidigger/models/archive.py` — `MemberInfo` Pydantic frozen model (`name`, `uncompressed_size`, `compressed_size`, `is_dir`, `is_encrypted`)
+
+### `protocols.py` — `ArchiveHandler`
+
+- [x] `ArchiveHandler(Protocol)`: `list_members()`, `extract_member(archive_path, member_path, dest_dir) -> Path` — revision-3 shape, no `open_bytes()`/`open_stream()`
+
+### `archivehandlers/` package
+
+- [x] `archivehandlers/__init__.py` — `HANDLER_REGISTRY`, `get_handler()`, `_EXT_REGISTRY`/`detect_archive_type()` (longest-first `endswith` match), auto-registration loop
+- [x] `archivehandlers/_zip.py` — `ZipArchiveHandler`: `list_members()`, `extract_member()`
+- [x] `archivehandlers/_7z.py` — `SevenZArchiveHandler`: `list_members()`, `extract_member()` (no `tempfile.TemporaryDirectory()` — flatten/rename block removed)
+- [x] `archivehandlers/_tar.py` — `TarArchiveHandler`: `list_members()`, `extract_member()`; `mode="r:*"` transparent gzip/bzip2/xz detection; `HANDLES` covers `.tar`, `.tgz`, `.tbz2`, `.tbz`, `.txz`, `.tar.gz`, `.tar.bz2`, `.tar.xz`
+- [x] `pyproject.toml`: `py7zr>=1.1.3,<1.2` dependency added; `piidigger.archivehandlers.*` added to mypy strict overrides
+
+### Task types and handlers
+
+- [x] `TaskType` enum: `ENUM_ARCHIVE_MEMBERS`, `SCAN_ARCHIVE_MEMBER` added
+- [x] `models/payloads.py`: `EnumArchiveMembersPayload`, `ScanArchiveMemberPayload` — both include `archive_type: str = "zip"` field
+- [x] `handle_enum_archive_members()` in `orchestration/worker/_enum_archive.py`:
+  - [x] Format-agnostic via `get_handler(payload.archive_type)` registry lookup
+  - [x] All 8 safety checks (path traversal, dir, encrypted, extension block, individual size, total size, bomb ratio, member count)
+  - [x] Returns `new_tasks`: one `SCAN_ARCHIVE_MEMBER` per accepted member, with `archive_type` propagated
+  - [x] Returns `counters`: `{"archives_scanned": 1, "archive_members_found": N, "archive_members_skipped": K}`
+  - [x] `_NESTED_ARCHIVE_EXTS` derived from `HANDLER_REGISTRY` keys (not hardcoded)
+- [x] `handle_scan_archive_member()` in `orchestration/worker/_scan_archive_member.py`:
+  - [x] Resolves `get_handler(payload.archive_type)`, calls `extract_member()`, wraps result as `FilesystemItem(extracted_path, mime=..., archive_path=..., member_path=...)`
+  - [x] Routes through `FileHandler` + `DataHandler` chain (same as `handle_scan_file`)
+  - [x] `source_container_type=payload.archive_type` in `ResultRecord`
+- [x] Both handlers added to `DISPATCH` table — `coordinator.py` and `worker.py` unchanged
+
+### Archive source — `src/piidigger/orchestration/sources.py`
+
+- [x] `ArchiveMemberItem` deleted; `FilesystemItem(ScannableItem)` takes optional `archive_path: Path | None` / `member_path: str | None` kwargs to cover both plain files and extracted archive members
+  - [x] `display_path`: returns `f"{archive_path}::{member_path}"` when both are set, else `str(path)`
+  - [x] `ext`, `mime`, `size`, `depth` all wired correctly
+  - [x] `open_stream()`, `materialize()` read the already-extracted file directly; `open_bytes()` returns `None` (signals handlers to use `materialize()`'s path) — extraction itself happens once in `handle_scan_archive_member()`, not lazily inside these methods
+  - [x] Cleanup (secure-delete of the extracted file) happens once, at end-of-task, via `_cleanup_temp_workspace()` — not per-call inside `FilesystemItem`
+
+### Configuration additions
+
+- [x] `ArchiveConfig` nested model in `models/config.py`:
+  - [x] `enabled: bool = True`
+  - [x] `formats: list[str] = ["all"]` (expands to all `HANDLER_REGISTRY` keys at runtime)
+  - [x] `max_depth: int = Field(default=1, ge=0, le=3)`
+  - [x] `max_members: int = 10_000`
+  - [x] `max_member_uncompressed_size_mb: int = 64`
+  - [x] `max_total_uncompressed_size_mb: int = 2048`
+  - [x] `task_timeout_seconds: int = 30`
+- [x] `[archives]` TOML section in `generate_toml_template()`
+- [x] `_is_archive_format()` in `_enum_dir.py` handles `"all"` sentinel; passes `archive_type` in payload
+
+### Progress counters
+
+- [x] `ProgressDisplay` extended: `archives_found`, `archives_scanned`, `archive_members_found`, `archive_members_scanned`, `archive_members_skipped`
+
+### Test fixtures
+
+- [x] `testdata/zip/` — `simple-pii.zip`, `nested-depth-2.zip`, `oversize-member.zip`, `many-members.zip`, `traversal-member.zip`, `encrypted-member.zip`, `corrupt.zip`, `zip-bomb-simulated.zip`
+- [x] `testdata/7z/create_fixtures.py` — `simple-pii.7z`, `many-members.7z`, `oversize-member.7z`, `corrupt.7z`, `encrypted.7z`
+
+### Tests — `tests/test_archives.py`
+
+- [x] 52 tests passing (all ZIP + 7z enumeration/scan scenarios)
+- [x] Safety check unit tests for all 8 rejection rules
+- [x] `test_archive_config_defaults` — asserts `formats == ["all"]`
+- [x] 14 7z-specific tests (list_members, encrypted, corrupt, oversize, member count)
+- [x] `extract_member()` unit tests — one per format: `test_zip_handler_extract_member`, `test_7z_handler_extract_member`, `test_tar_handler_extract_member`
+- [x] `test_cleanup_temp_workspace_recursive` — confirms `_cleanup_temp_workspace()` secure-deletes and removes the entire `task_temp` tree at end-of-task (the revision-3 equivalent of the old per-`open_bytes()` assertion, since extraction+cleanup are no longer coupled to that call)
+
+### Phase 5 — Revision 3 design (unified extraction path) — complete
+
+All items below were verified directly against the code on 2026-07-06 (not just checked off from memory):
+
+- [x] `protocols.py`: `ArchiveHandler` has only `extract_member(archive_path, member_path, dest_dir) -> Path` + `list_members()`; no `open_bytes()`/`open_stream()`
+- [x] `archivehandlers/_zip.py`, `_7z.py`, `_tar.py`: all `extract_member()`-only; no `tempfile.TemporaryDirectory()` anywhere in `archivehandlers/`
+- [x] `orchestration/sources.py`: `ArchiveMemberItem` deleted; `FilesystemItem.__init__()` takes `archive_path`/`member_path` kwargs; `display_path` returns `archive::member` form when set
+- [x] `orchestration/worker/_scan_archive_member.py`: `get_handler() → extract_member() → FilesystemItem(..., archive_path=..., member_path=...)`
+- [x] `tests/test_archives.py`: no `ArchiveMemberItem` tests remain (only a docstring mention of the old test category); `extract_member()` tests present per format
+- [x] `uv run ruff check src/ tests/` clean; `uv run mypy src/` clean (53 source files); `uv run pytest tests/ -q` — 354 passed, 1 skipped (Windows CTRL-C cross-process test, expected)
+- [x] User documentation: [docs/user-guides/archive-handling.md](../user-guides/archive-handling.md) documents temp-dir extraction, secure deletion, and residual-data risk on abnormal interruption
+
+### Phase 5 — Exit Criteria
+
+- [x] ZIP and 7z enumeration and member scanning run under the task queue architecture
+- [x] Zero changes to `coordinator.py` or `worker.py` vs. Phase 4 (verified by diff)
+- [x] All 8 safety limits active and covered by tests
+- [x] Findings include lineage fields (`source_container_type`, `source_member_path`, `source_depth`); non-archive output unchanged
+- [x] `secure_delete()` used for all temp files at end of each task
+- [x] `ArchiveMemberItem` deleted — single `FilesystemItem` implementation for all sources
+- [x] No `tempfile.TemporaryDirectory()` anywhere in archive handling code
+- [x] `FilesystemItem.display_path` returns `archive::member` form when archive context is set
+- [x] User documentation updated with Security Considerations
+- [x] Test coverage ≥ 80% maintained (84% overall, verified 2026-07-06)
+- [x] `ruff` + `mypy` clean (verified 2026-07-06)
+
+---
+
+## Overall Success Criteria
+
+These must all be true before `refactor` is merged to `main`. All verified 2026-07-06:
+
+- [x] Entire orchestration layer is new code under `orchestration/`; old process code deleted — `classes.py`, `piidigger.py`, `queuefuncs.py`, `filescan.py`, `globalvars.py` absent from `src/piidigger/`; enforced by `test_phase4.py::test_no_legacy_orchestration_references`
+- [x] All identifiers snake_case / PascalCase / UPPER_CASE; ruff `N` + mypy clean — `ruff check src/ tests/` and `mypy src/` both clean; no per-file `N` exemption remains for the legacy tree in `pyproject.toml`
+- [x] Business logic unit-testable with no process tree — handler unit tests call handler functions directly
+- [x] `base64-xml-test.xml` completes < 5 minutes; timeout logged; run never hangs — resolved at the root cause (regex catastrophic backtracking) via an `@` prefilter instead of the original slow e2e fixture; see `test_email.py::test_email_prefilter_skips_regex_on_long_no_at_string`
+- [x] Graceful `Ctrl+C` with full cleanup (no temp files, no orphan processes) — verified on POSIX (`test_coordinator.py::test_ctrl_c_exits_within_5_seconds`); no equivalent automated test on Windows (`mp.Process` doesn't expose cross-process SIGINT delivery without `CREATE_NEW_PROCESS_GROUP` — a test-harness limitation, not a difference in `run_coordinator()`'s OS-agnostic `KeyboardInterrupt` handling)
+- [x] 2.0 output baseline set with lineage fields present; baseline comparison passes — one-time migration validation: v2 is a strict superset of v1 (0 regressions, 4 improvements); no permanent baseline test kept (rationale documented in the Baseline comparison section above)
+- [x] ZIP (Phase 5, later generalized to 7z and tar) added with zero changes to `coordinator.py` or `worker.py`
+- [x] Test coverage ≥ 80% — 84% overall (`pytest --cov=src/piidigger`)
+
+---
+
+## Known Risks
+
+| Risk | Mitigation |
+|---|---|
+| Windows `spawn` pickling surprises | Phase 1 integration test explicitly verifies `WorkerContext` across the spawn boundary before any business logic is attached |
+| Coordinator termination never fires | Phase 2 tested on a synthetic tree before real I/O is wired; `pending` arithmetic unit-tested independently |
+| Output format regression | Phase 4 baseline comparison run before any old code is deleted |
+| ZIP temp extraction leaves PII on disk | `materialize()` only called when provably necessary; secure deletion library selected in Phase 5 pre-work; cleanup in `try/finally` |
+| Crash-before-heartbeat orphans a task | Acknowledged gap; Phase 4 hardens with live-worker count check and task re-queue |
+| `rich.Live` conflicts with test output | `ProgressDisplay` no-ops in non-TTY mode; tests run with `--capture=sys` or a non-TTY fixture |
