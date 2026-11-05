@@ -62,11 +62,14 @@ jobs:
     outputs:
       dists_sha256: ${{ steps.dists.outputs.sha256 }}
     steps:
+      # These artifacts are uploaded with archive: false, so each one is the release file itself.
+      # skip-decompress keeps the Windows .zip as a file; by default download-artifact unpacks it.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: ${{ inputs.artifact_base }}-*
           path: assets
           merge-multiple: true
+          skip-decompress: true
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
