@@ -16,6 +16,60 @@ HANDLES = {
     "ext": [".7z"],
 }
 
+# The py7zr releases _fix_py7zr_read_ahead() was checked against.  pyproject.toml
+# pins py7zr to this release; test_7z_extract_does_not_read_ahead_of_output fails
+# if a different release still reads ahead.
+_PY7ZR_READ_AHEAD_FIX_VERSIONS: frozenset[str] = frozenset({"1.1.3"})
+
+
+def _first_coder_needs_input(decompressor: Any) -> bool:
+    """Whether the first coder in a py7zr chain has used up the input it was given.
+
+    lzma.LZMADecompressor and bz2.BZ2Decompressor report this as needs_input.
+    py7zr's LZMA1Decompressor wraps an LZMADecompressor without exposing it.
+    Any other coder (zstd, Deflate64, PPMd, copy, ...) cannot tell, so it is
+    treated as needing input, which is py7zr's own behavior.
+    """
+    if hasattr(decompressor, "needs_input"):
+        return bool(decompressor.needs_input)
+    inner = getattr(decompressor, "_decompressor", None)
+    return bool(getattr(inner, "needs_input", True))
+
+
+def _fix_py7zr_read_ahead() -> None:
+    """Stop py7zr from reading a solid folder's packed data faster than it decodes it.
+
+    SevenZipDecompressor._read_data() reads up to 1 MiB of packed input on every
+    decompress() call, whether or not the coder has used what it was last given.
+    Each call returns at most one member's output, so the unused input piles up
+    inside the LZMA or bzip2 decoder until it holds the whole packed folder: 250
+    MiB of growth for a 250 MiB folder, and the cause of workers going over
+    max_worker_memory_mb on large solid archives.  py7zr issue #626.
+
+    The replacement reads nothing while the first coder still has input to use,
+    and otherwise defers to py7zr.  Applied once, and only to a release listed in
+    _PY7ZR_READ_AHEAD_FIX_VERSIONS, so a newer py7zr is never patched blindly.
+    """
+    import py7zr
+    from py7zr import compressor
+
+    decompressor_class = compressor.SevenZipDecompressor
+    original = getattr(decompressor_class, "_read_data", None)
+    if (
+        py7zr.__version__ not in _PY7ZR_READ_AHEAD_FIX_VERSIONS
+        or original is None
+        or getattr(original, "_piidigger_read_ahead_fix", False)
+    ):
+        return
+
+    def _read_data(self: Any, fp: Any) -> bytes:
+        if not _first_coder_needs_input(self.chain[0]):
+            return b""
+        return original(self, fp)  # type: ignore[no-any-return]
+
+    _read_data._piidigger_read_ahead_fix = True  # type: ignore[attr-defined]
+    decompressor_class._read_data = _read_data  # type: ignore[method-assign]
+
 
 def _is_symlink(info: Any) -> bool:
     """Return True if info is a symbolic link entry, not real file content."""
@@ -50,6 +104,8 @@ class SevenZArchiveHandler:
         """
         try:
             import py7zr  # lazy: only loaded when a .7z file is encountered
+
+            _fix_py7zr_read_ahead()
 
             with open_with_progress(archive_path, on_progress) as raw, py7zr.SevenZipFile(raw, mode="r") as szf:
                 all_encrypted = szf.needs_password()
@@ -113,6 +169,8 @@ class SevenZArchiveHandler:
         """
         try:
             import py7zr
+
+            _fix_py7zr_read_ahead()
 
             dest_dir.mkdir(parents=True, exist_ok=True)
             factory = _ScanWriterFactory(dest_dir, member_paths, on_started, on_extracted, on_failed)

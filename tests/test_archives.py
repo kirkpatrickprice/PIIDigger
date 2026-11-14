@@ -19,6 +19,7 @@ import logging
 import multiprocessing as mp
 import os
 import queue
+import random
 import stat
 import struct
 import zipfile
@@ -32,6 +33,7 @@ from typing import Any
 import pytest
 
 import piidigger.orchestration.secure_delete as secure_delete_mod
+from piidigger.exceptions import ArchiveReadError
 from piidigger.models.archive import MemberInfo
 from piidigger.models.config import ArchiveConfig, Config
 from piidigger.models.tasks import Task, TaskProgress, TaskResult, TaskType
@@ -773,6 +775,78 @@ def test_7z_handler_extract_members(tmp_path: Path) -> None:
         archive, ["fox.txt"], dest_dir, on_extracted=lambda member, path: got.update({member: path.read_bytes()})
     )
     assert got == {"fox.txt": payload}
+
+
+def _solid_7z(path: Path, filters: list[dict[str, Any]], members: int, size: int) -> dict[str, bytes]:
+    """Write one solid 7z folder of random, incompressible members; return them by name."""
+    import py7zr
+
+    rng = random.Random(626)  # noqa: S311 — reproducible test data, not cryptography
+    contents = {f"f{i:04d}.bin": rng.randbytes(size) for i in range(members)}
+    with py7zr.SevenZipFile(path, "w", filters=filters) as szf:
+        for name, data in contents.items():
+            szf.writestr(data, name)
+    return contents
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("method", ["LZMA2", "LZMA", "BZIP2"])
+def test_7z_extract_does_not_read_ahead_of_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str) -> None:
+    """py7zr #626: a solid folder's packed input must be read about as fast as it is decoded.
+
+    Unpatched, py7zr 1.1.3 reads 1 MiB of packed input per decompress() call
+    while each call returns one 16 KiB member, so by the 100th of 400 members it
+    has read the whole 6.25 MiB folder into the decoder.  With the fix it has
+    read about 2 MiB: the 1.56 MiB decoded so far plus one 1 MiB read.
+    """
+    import py7zr
+    from py7zr import compressor
+
+    from piidigger.archivehandlers._7z import handler as szhandler
+
+    filters = [{"id": getattr(py7zr, f"FILTER_{method}")}]
+    archive = tmp_path / "solid.7z"
+    contents = _solid_7z(archive, filters, members=400, size=16 * 1024)
+
+    decompressors: list[Any] = []
+    original_init = compressor.SevenZipDecompressor.__init__
+
+    def spy_init(self: Any, *args: Any, **kwargs: Any) -> None:
+        original_init(self, *args, **kwargs)
+        decompressors.append(self)
+
+    monkeypatch.setattr(compressor.SevenZipDecompressor, "__init__", spy_init)
+
+    got: dict[str, bytes] = {}
+    consumed_at_100: list[int] = []
+
+    def extracted(member: str, path: Path) -> None:
+        got[member] = path.read_bytes()
+        if len(got) == 100:
+            consumed_at_100.append(max(d.consumed for d in decompressors))
+
+    szhandler.extract_members(archive, list(contents), tmp_path / "out", on_extracted=extracted)
+
+    assert got == contents
+    assert consumed_at_100[0] < 3 * 1024 * 1024
+
+
+@pytest.mark.unit
+def test_7z_corrupt_solid_folder_still_fails_with_read_ahead_fix(tmp_path: Path) -> None:
+    """Reading less eagerly must not let damaged data through: the CRC check still fails the run."""
+    import py7zr
+
+    from piidigger.archivehandlers._7z import handler as szhandler
+
+    archive = tmp_path / "solid.7z"
+    contents = _solid_7z(archive, [{"id": py7zr.FILTER_LZMA2, "preset": 1}], members=40, size=128 * 1024)
+    data = bytearray(archive.read_bytes())
+    middle = len(data) // 2
+    data[middle : middle + 16] = bytes(b ^ 0xFF for b in data[middle : middle + 16])
+    archive.write_bytes(bytes(data))
+
+    with pytest.raises(ArchiveReadError, match="CrcError"):
+        szhandler.extract_members(archive, list(contents), tmp_path / "out", on_extracted=lambda member, path: None)
 
 
 @pytest.mark.unit

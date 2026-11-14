@@ -201,3 +201,6 @@ testdata/plaintext/json-logs/*.jsonl
 # Ignore macOS system files
 .DS_Store
 python.zip
+
+# Ignore local scratch files
+scratch/
