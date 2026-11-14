@@ -66,6 +66,33 @@ Finally, PIIDigger's primary detection method is regular expressions and is ther
 1. **Is the file type supported?** Run `piidigger inspect file <path>` (see [Inspect Command Guide](inspect-command.md)). It shows the file's extension and detected MIME type, and whether your config lets a scan read it. A plain-text extension is always read as text, so a real PDF named `report.txt` has its PDF text missed. Rename the file to its real extension and scan it again.
 2. **Is the encoding supported?** For plain-text files, the same command shows the encoding. PIIDigger only scans encodings it can reliably map onto regex-friendly text; non-Latin encodings aren't currently supported.
 3. **Was the file inside an excluded directory, or too large?** Check `exclude_dirs`; for spreadsheets, the `[spreadsheet]` blank-row/column cutoffs; and for plain-text files, the `[plaintext] max_scan_mb` cutoff (only the first 64 MB is scanned by default) — see [Advanced Configuration](advanced-configuration.md).
+4. **Was the file read, but a card number in it not recognized?** See [A card number in a file wasn't found](#a-card-number-in-a-file-wasnt-found).
+
+### A card number in a file wasn't found
+
+**Symptoms:** A file was scanned, but a card number you can see in it isn't in the results.
+
+**Explanation:** The `pan` data handler reports a number only when it looks like a card in the way card brands print and issue them, and passes the Luhn checksum that every real card number carries. It checks:
+
+- **Brand and range:** the first digits must belong to a card brand:
+
+  | Brand | First digits | Length |
+  |---|---|---|
+  | Visa (`visa`) | 4 | 16 |
+  | Mastercard (`mc`) | 51–55, 2221–2720 | 16 |
+  | Discover (`discover`) | 6011, 644–649, 65 | 16 |
+  | American Express (`amex`) | 34, 37 | 15 |
+  | JCB (`jcb`) | 3528–3589 | 16 |
+  | JCB (`jcb`), discontinued | 2131, 1800 | 15 |
+
+  Other brands, such as UnionPay, aren't detected yet.
+- **Grouping:** the digits must be written together, or in the brand's own groups with the same separator throughout. The only separators are a space and a hyphen. That means 4-4-4-4 for 16-digit cards (`4111 1111 1111 1111`, `4111-1111-1111-1111`) and 4-6-5 for 15-digit cards (`3782 822463 10005`). A number split another way, such as `41111111 11111111`, or with mixed separators, such as `4111-1111 1111-1111`, isn't reported.
+- **Edges:** the number must not run on into other digits. A digit, or a hyphen, directly before or after it means it is part of a longer value, such as an ID. A dot counts only when it joins the number to another digit, as in a decimal (`1.4111111111111111`). So a card after `No.` or before a full stop is found.
+- **ASCII digits only:** the number must be written with the digits `0`–`9`. A card number typed with another script's digits isn't found. That includes fullwidth digits (`４１１１…`), which Japanese and Chinese input methods produce, and Arabic-Indic or Persian digits (`٤١١١…`, `۴۱۱۱…`). This is a known limitation.
+
+Line breaks, tabs and spreadsheet cell boundaries reach the `pan` handler as spaces. So values on separate lines or in adjacent cells can occasionally combine into what looks like a card number. Those appear in the results as findings to check, rather than being missed.
+
+**Solutions:** Run `piidigger inspect file <path>` first, to confirm the file was read. If it was, compare the number with the rules above. A number in another script's digits, or in a grouping no card brand uses, won't be reported. To have such numbers found, open a feature request on the [issue tracker](https://github.com/kirkpatrickprice/PIIDigger/issues).
 
 ### Why am I seeing PDF pages that could not be read in the log?
 

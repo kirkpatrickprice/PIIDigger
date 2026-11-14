@@ -131,6 +131,15 @@ Known gaps we chose not to fix yet. Each entry says what is wrong, why it was de
 - **Where:** `filehandlers/__init__.py` (`select_handler`), `getmime.py`.
 - **Suggested fix:** When puremagic reports nothing useful, test the file with `detect_file_encoding()` and treat a confident result as `text/plain`.
 
+### Short values on separate lines or cells can read as one card number
+- **What:** Before the data handlers see the text, `ContentBuffer` turns line breaks and tabs into spaces, and the xlsx and xls handlers join a row's cells with spaces. So values in a brand's own grouping can be reported as one card, whether they sit on separate lines, in tab-separated columns or in adjacent spreadsheet cells:
+  - four 4-digit values reach the PAN handler as `4111 1111 1111 1111`, a 16-digit card;
+  - a 4-digit, a 6-digit and a 5-digit value reach it as `3782 822463 10005`, a 15-digit Amex or JCB card.
+  - **How often:** a false positive needs a valid brand prefix and a Luhn pass, about 1 time in 10. The PAN handler tries every group boundary as a start, so it doesn't miss a card that follows another value and a space. A hyphen before a number still blocks the match, as protection against UUID-like runs. In text made only of 4-digit groups, that gives about 4,700 hits per MiB. It is reported, never lost. Two 8-digit values on adjacent lines are not affected: the PAN handler accepts only a brand's own grouping.
+- **Why deferred:** The fix changes how every data handler gets its text, including email, and how content is chunked. That is too large for a 2.0 fix.
+- **Where:** `filehandlers/_sharedfuncs.py` (`ContentBuffer.replace_chars`, `append_content`), `filehandlers/xlsx.py` and `xls.py` (the row joins), `datahandlers/pan.py`.
+- **Suggested fix:** Keep the boundaries the data handlers must not cross: `\n` between lines, `\t` between columns, and a cell separator such as `\t` in the spreadsheet handlers. Then no separator a data handler accepts can cross one. Check the email handler and the chunk boundaries against it.
+
 ### A value split by the 1 MiB read boundary is missed
 - **What:** `PlaintextHandler` reads a line of over 1 MiB in pieces. A PAN or email that straddles a cut is usually missed, in plain ASCII as well as UTF-16.
 - **Why deferred:** It needs a value exactly on a cut in a very long line.
