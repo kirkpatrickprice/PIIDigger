@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from piidigger.orchestration.coordinator import (
+    FullDiskAccessNotice,
     _denied_path,
     _findings_summary,
     _short_error,
@@ -313,3 +314,100 @@ def test_archive_batch_refused_mid_member_is_not_requeued(caplog: pytest.LogCapt
     work = progress.incomplete
     assert (work.failed, work.access_denied) == (0, 1)
     assert progress._counters["files_not_scanned"] == 3
+
+
+def _feed_denied_results(
+    caplog: pytest.LogCaptureFixture,
+    *,
+    notice: FullDiskAccessNotice | None,
+    count: int,
+    kinds: tuple[str, ...] = ("not_permitted",),
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Feed count access-denied ENUM_DIR results to _handle_result: the WARNING lines and the events.
+
+    The nth result has kinds[n], or the last of kinds once they run out.
+    """
+    import logging
+
+    from piidigger.models.tasks import Task, TaskResult, TaskType
+    from piidigger.orchestration.coordinator import _handle_result
+    from piidigger.orchestration.progress import ProgressDisplay
+    from piidigger.orchestration.registry import TaskRegistry
+
+    logger = logging.getLogger("tests.coordinator_helpers.full_disk_access")
+    registry = TaskRegistry(lambda _task: None)
+    progress = ProgressDisplay()
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        for n in range(count):
+            folder = f"/Users/x/Library/Folder{n}"
+            task = Task(task_type=TaskType.ENUM_DIR, payload={"path": folder})
+            registry.enqueue(task)
+            result = TaskResult(
+                task_id=task.task_id,
+                task_type=task.task_type,
+                status="error",
+                error_message=f"[Errno 1] Operation not permitted: '{folder}'",
+                error_kind=kinds[min(n, len(kinds) - 1)],  # type: ignore[arg-type]
+            )
+            _handle_result(result, registry, [], progress, logger, notice=notice)
+    return [r.getMessage() for r in caplog.records], list(progress._events)
+
+
+@pytest.mark.unit
+def test_full_disk_access_warning_is_given_once_at_the_first_access_denied(caplog: pytest.LogCaptureFixture) -> None:
+    """A refusal the startup check did not list still gets the hint during the scan, once."""
+    lines, events = _feed_denied_results(caplog, notice=FullDiskAccessNotice(), count=3)
+
+    hints = [line for line in lines if "Full Disk Access" in line]
+    assert len(hints) == 1
+    assert lines.index(hints[0]) == 1, "right after the first access denied line"
+    assert "System Settings › Privacy & Security › Full Disk Access" in hints[0]
+    assert "access denied" not in hints[0].lower(), "the summary's search for refused paths must not find it"
+    assert sum("Full Disk Access" in text for _, text in events) == 1
+
+
+@pytest.mark.unit
+def test_no_full_disk_access_warning_unless_armed(caplog: pytest.LogCaptureFixture) -> None:
+    """Off macOS, or when the startup check already named the folders, run_scan does not arm it."""
+    lines, events = _feed_denied_results(caplog, notice=None, count=2)
+
+    assert not any("Full Disk Access" in line for line in lines)
+    assert not any("Full Disk Access" in text for _, text in events)
+
+
+@pytest.mark.unit
+def test_full_disk_access_warning_waits_for_operation_not_permitted(caplog: pytest.LogCaptureFixture) -> None:
+    """Permission denied is ordinary permissions: Full Disk Access would not help, so it must not spend the notice."""
+    lines, _ = _feed_denied_results(
+        caplog, notice=FullDiskAccessNotice(), count=3, kinds=("access_denied", "access_denied", "not_permitted")
+    )
+
+    hints = [n for n, line in enumerate(lines) if "Full Disk Access" in line]
+    assert hints == [3], "given once, after the third refusal, the first not permitted"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("kind", "not_permitted"), [("not_permitted", 1), ("access_denied", 0)])
+def test_operation_not_permitted_counts_as_access_denied_and_on_its_own(
+    caplog: pytest.LogCaptureFixture, kind: str, not_permitted: int
+) -> None:
+    """One access-denied row for both; the not permitted count decides the summary's macOS hint."""
+    import logging
+
+    from piidigger.models.tasks import Task, TaskResult, TaskType
+    from piidigger.orchestration.coordinator import _handle_result
+    from piidigger.orchestration.progress import ProgressDisplay
+    from piidigger.orchestration.registry import TaskRegistry
+
+    registry = TaskRegistry(lambda _task: None)
+    task = Task(task_type=TaskType.ENUM_DIR, payload={"path": "/Users/x/Library/Mail"})
+    registry.enqueue(task)
+    progress = ProgressDisplay()
+    result = TaskResult(
+        task_id=task.task_id, task_type=task.task_type, status="error", error_message="refused", error_kind=kind
+    )  # type: ignore[arg-type]
+
+    _handle_result(result, registry, [], progress, logging.getLogger("tests.coordinator_helpers.kinds"))
+
+    work = progress.incomplete
+    assert (work.failed, work.access_denied, work.not_permitted) == (0, 1, not_permitted)

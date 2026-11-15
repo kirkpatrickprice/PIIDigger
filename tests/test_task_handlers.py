@@ -22,7 +22,7 @@ from piidigger.models.tasks import Task, TaskProgress, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.logging_setup import build_worker_logger
 from piidigger.orchestration.worker import handle_enum_dir, handle_scan_file, resolve_exclude_dirs
-from piidigger.orchestration.worker._enum_dir import _is_excluded
+from piidigger.orchestration.worker._enum_dir import is_excluded_dir
 from tests._fs import make_dir_alias
 from tests._not_content_samples import appledouble_bytes, office_lock_bytes, xlsx_bytes
 from tests._ole import encrypted_office_file
@@ -130,7 +130,7 @@ def test_enum_dir_exclude_dirs_forward_slash_pattern(tmp_path: Path) -> None:
 
     The default config stores Windows paths as 'C:/Program Files' (forward
     slashes) while Path.resolve() returns backslash paths on Windows.
-    _is_excluded must normalise both sides so the exclusion fires correctly.
+    is_excluded_dir must normalise both sides so the exclusion fires correctly.
     """
     root = tmp_path / "root"
     root.mkdir()
@@ -157,7 +157,7 @@ def test_resolve_exclude_dirs_matches_pattern_written_through_alias(tmp_path: Pa
 
     Regression test: on macOS, mkdtemp() returns /var/folders/... but entries
     resolve to /private/var/...; the same applies to the /etc default.
-    _is_excluded() resolves the entry, so the pattern must be resolved too.
+    is_excluded_dir() resolves the entry, so the pattern must be resolved too.
     """
     physical = tmp_path / "physical"
     excluded = physical / "skip_me"
@@ -167,8 +167,8 @@ def test_resolve_exclude_dirs_matches_pattern_written_through_alias(tmp_path: Pa
     make_dir_alias(alias, physical)
 
     aliased_pattern = str(alias / "skip_me")
-    assert not _is_excluded(excluded, [aliased_pattern]), "unresolved alias pattern should not match"
-    assert _is_excluded(excluded, resolve_exclude_dirs([aliased_pattern]))
+    assert not is_excluded_dir(excluded, [aliased_pattern]), "unresolved alias pattern should not match"
+    assert is_excluded_dir(excluded, resolve_exclude_dirs([aliased_pattern]))
 
     ctx = _make_ctx(tmp_path, exclude_dirs=resolve_exclude_dirs([aliased_pattern]))
     result = handle_enum_dir(_enum_dir_task(physical), ctx, _logger())
@@ -190,14 +190,14 @@ def test_resolve_exclude_dirs_strips_trailing_separator(tmp_path: Path) -> None:
 
     patterns = resolve_exclude_dirs([str(excluded) + os.sep, str(excluded).replace("\\", "/") + "/"])
 
-    assert all(_is_excluded(excluded / "child", [p]) for p in patterns)
+    assert all(is_excluded_dir(excluded / "child", [p]) for p in patterns)
 
 
 @pytest.mark.unit
 def test_resolve_exclude_dirs_keeps_missing_paths(tmp_path: Path) -> None:
     missing = tmp_path / "not_there"
 
-    assert _is_excluded(missing / "child", resolve_exclude_dirs([str(missing)]))
+    assert is_excluded_dir(missing / "child", resolve_exclude_dirs([str(missing)]))
 
 
 @pytest.mark.unit
@@ -212,7 +212,7 @@ def test_resolve_exclude_dirs_bare_drive_means_whole_drive(tmp_path: Path) -> No
     for pattern in (drive, drive + "/", drive + "\\"):
         resolved = resolve_exclude_dirs([pattern])
         assert resolved == [drive], pattern
-        assert _is_excluded(tmp_path, resolved), pattern
+        assert is_excluded_dir(tmp_path, resolved), pattern
 
 
 @pytest.mark.unit
@@ -1093,22 +1093,22 @@ def test_enum_dir_denied_junction_outside_the_scan_stays_a_failure(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "error",
+    ("error", "kind"),
     [
-        PermissionError(13, "Permission denied"),
+        (PermissionError(13, "Permission denied"), "access_denied"),
         # macOS privacy controls (no Full Disk Access): no phrase the old message match knew.
-        PermissionError(1, "Operation not permitted"),
+        (PermissionError(1, "Operation not permitted"), "not_permitted"),
     ],
 )
 def test_enum_dir_denied_listing_is_access_denied(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: PermissionError
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: PermissionError, kind: str
 ) -> None:
     monkeypatch.setattr(Path, "iterdir", lambda self: (_ for _ in ()).throw(error))
 
     result = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger())
 
     assert result.status == "error"
-    assert result.error_kind == "access_denied"
+    assert result.error_kind == kind
     assert result.counters == {"dirs_not_scanned": 1}
 
 

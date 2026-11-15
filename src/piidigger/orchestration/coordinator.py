@@ -13,12 +13,21 @@ import psutil
 from pydantic import ValidationError
 
 from piidigger.models.config import Config
-from piidigger.models.tasks import Task, TaskProgress, TaskResult, TaskStarted, TaskType, WorkerReady, WorkerRetiring
+from piidigger.models.tasks import (
+    ACCESS_DENIED_KINDS,
+    Task,
+    TaskProgress,
+    TaskResult,
+    TaskStarted,
+    TaskType,
+    WorkerReady,
+    WorkerRetiring,
+)
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.feeder import TaskFeeder
 from piidigger.orchestration.logging_setup import build_worker_logger, start_listener, stop_listener
 from piidigger.orchestration.pool import WorkerPool, spawn_worker
-from piidigger.orchestration.progress import ProgressDisplay
+from piidigger.orchestration.progress import FULL_DISK_ACCESS_MENU, ProgressDisplay
 from piidigger.orchestration.registry import AbandonReason, TaskRecord, TaskRegistry
 from piidigger.orchestration.sinks import GuardedSink
 from piidigger.orchestration.worker import broadcast_shutdown
@@ -93,6 +102,34 @@ class CoordinatorResult:
     unfinished: int = 0
     workers_failed: bool = False
     sinks_failed: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class FullDiskAccessNotice:
+    """A one-time warning about Full Disk Access, given at the first "Operation not permitted".
+
+    A dataclass, not a Pydantic model: its one field is ours.  Not frozen: it
+    is spent in place once given.  run_scan arms it only on macOS, and only
+    when the startup privacy check found nothing.  A refusal found later (a
+    folder deeper than the check lists) still gets the hint while the scan
+    runs, not only in the summary.
+    """
+
+    armed: bool = True
+
+    def give(self, logger: logging.Logger, progress: ProgressDisplay) -> None:
+        """Log the warning and show it, the first time only."""
+        if not self.armed:
+            return
+        self.armed = False
+        # Not in the words "access denied": the summary tells the user to
+        # search for those, to find the refused paths.
+        logger.warning(
+            "macOS may be refusing folders with its privacy protection.  To scan them, allow Full Disk Access "
+            "for the app that runs PIIDigger, then start the scan again: %s",
+            FULL_DISK_ACCESS_MENU,
+        )
+        progress.log_event("WARNING", "macOS privacy protection? Allow Full Disk Access to scan these folders")
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,6 +491,7 @@ def run_coordinator(
     progress: ProgressDisplay,
     *,
     seed_tasks: Sequence[Task] | None = None,
+    warn_full_disk_access: bool = False,
 ) -> CoordinatorResult:
     """Drive the fan-out scan until every task is accounted for.
 
@@ -478,6 +516,9 @@ def run_coordinator(
         seed_tasks: Initial tasks.  Defaults to one ENUM_DIR per
             config.start_dirs.  Tests pass their own to drive particular task
             types through the real loop.
+        warn_full_disk_access: Give FullDiskAccessNotice at the first
+            "Operation not permitted" (error_kind "not_permitted").  run_scan
+            sets it on macOS when its privacy check found nothing.
 
     Returns:
         CoordinatorResult describing how the run ended, for exit-code mapping.
@@ -500,7 +541,8 @@ def run_coordinator(
             registry.enqueue(task)
         logger.info("coordinator seeded %d initial task(s)", len(seeds))
 
-        _drain(ctx, registry, monitor, feeder, guarded, progress, logger)
+        notice = FullDiskAccessNotice() if warn_full_disk_access else None
+        _drain(ctx, registry, monitor, feeder, guarded, progress, logger, notice=notice)
         logger.info("coordinator: all tasks accounted for")
     except KeyboardInterrupt:
         interrupted = True
@@ -558,6 +600,8 @@ def _drain(
     sinks: list[Any],
     progress: ProgressDisplay,
     logger: logging.Logger,
+    *,
+    notice: FullDiskAccessNotice | None = None,
 ) -> None:
     """Consume results until the registry is empty, sweeping on a fixed cadence.
 
@@ -569,7 +613,7 @@ def _drain(
 
     def take(message: Any) -> None:
         monitor.observe(message)
-        _handle_message(message, registry, sinks, progress, logger)
+        _handle_message(message, registry, sinks, progress, logger, notice=notice)
         # Each TaskStarted frees one slot in the feeder's window.
         if isinstance(message, TaskStarted):
             feeder.started(message.task_id)
@@ -603,8 +647,10 @@ def _handle_message(
     sinks: list[Any],
     progress: ProgressDisplay,
     logger: logging.Logger,
+    *,
+    notice: FullDiskAccessNotice | None = None,
 ) -> None:
-    """Dispatch one result-queue message by type."""
+    """Dispatch one result-queue message by type.  notice: see _handle_result()."""
     if isinstance(message, WorkerReady):
         return  # pool bookkeeping only; HealthMonitor.observe() has recorded it
     if isinstance(message, WorkerRetiring):
@@ -625,7 +671,7 @@ def _handle_message(
     elif isinstance(message, TaskProgress):
         _handle_progress(message, registry, sinks, progress, logger)
     elif isinstance(message, TaskResult):
-        _handle_result(message, registry, sinks, progress, logger)
+        _handle_result(message, registry, sinks, progress, logger, notice=notice)
     else:
         logger.warning("coordinator received unexpected message type %s", type(message).__name__)
 
@@ -686,7 +732,7 @@ def _requeue_failed_batch(
     Returns True when the batch was re-queued (or finished) here; False when the
     result needs the usual handling.
     """
-    if result.error_kind == "access_denied":
+    if result.error_kind in ACCESS_DENIED_KINDS:
         return False
     record = registry.get(result.task_id)
     if record is None or not record.task.items or record.worker_pid != result.worker_pid:
@@ -712,6 +758,8 @@ def _handle_result(
     sinks: list[Any],
     progress: ProgressDisplay,
     logger: logging.Logger,
+    *,
+    notice: FullDiskAccessNotice | None = None,
 ) -> None:
     """Retire the task a result reports on, then act on what the result contains.
 
@@ -720,6 +768,9 @@ def _handle_result(
     Such a result is dropped whole.  The exception is a task the coordinator
     abandoned.  No other copy of it exists, so a late result is the only report
     of that work, and dropping it would lose real findings.
+
+    notice, when given, is given after the first not_permitted line: only
+    that refusal is one Full Disk Access can lift.
     """
     if result.status == "error" and _requeue_failed_batch(result, registry, progress, logger):
         return
@@ -739,7 +790,7 @@ def _handle_result(
     if result.status == "error":
         msg = result.error_message or "(no message)"
         err_path = _task_path(task)
-        denied = result.error_kind == "access_denied"
+        denied = result.error_kind in ACCESS_DENIED_KINDS
         # The only log line for a failed task: workers log theirs at DEBUG.
         # Access denied is expected (e.g. macOS privacy protection without Full
         # Disk Access), so it is a warning, as in the display.  It says "access
@@ -755,6 +806,8 @@ def _handle_result(
         )
         if denied:
             progress.log_event("WARNING", f"Access denied: {_truncate_path(_denied_path(msg))}")
+            if notice is not None and result.error_kind == "not_permitted":
+                notice.give(logger, progress)
         else:
             progress.log_event("ERROR", f"Error: {_truncate_path(err_path)} — {_short_error(msg)}")
 
@@ -794,11 +847,13 @@ def _handle_result(
     # Unreported members count as not scanned, as _requeue_failed_batch() counts
     # its failed member, so the files bar still reaches files_found.
     update = {**result.counters, "tasks_completed": 1, "tasks_pending": len(registry)}
-    if result.status == "error" and result.error_kind == "access_denied":
+    if result.status == "error" and result.error_kind in ACCESS_DENIED_KINDS:
         # Once per result, as its one log line names it, even for a batch
         # refused as a whole.  An archive refused after it was listed counts
         # once per batch.  A batch's members still count as not scanned, below.
         update["tasks_access_denied"] = 1
+        if result.error_kind == "not_permitted":
+            update["tasks_not_permitted"] = 1
     elif result.status == "error" and not task.items:
         update["tasks_failed"] = 1
     elif unreported:

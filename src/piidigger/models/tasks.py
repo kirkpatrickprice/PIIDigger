@@ -40,7 +40,13 @@ class Task(PiiDiggerModel):
 
 # Why a task failed, when the coordinator treats that kind of failure apart from
 # the rest.  "access_denied": the OS refused to list a folder or open a file.
-type ErrorKind = Literal["access_denied"]
+# "not_permitted": the same refusal with EPERM, "Operation not permitted",
+# which on macOS is most likely privacy protection that Full Disk Access
+# lifts.  It counts as access denied, and also on its own for that hint.
+type ErrorKind = Literal["access_denied", "not_permitted"]
+
+# The kinds the summary counts as access denied.
+ACCESS_DENIED_KINDS: frozenset[str] = frozenset({"access_denied", "not_permitted"})
 
 
 class TaskResult(PiiDiggerModel):

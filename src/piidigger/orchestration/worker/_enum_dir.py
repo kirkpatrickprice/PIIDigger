@@ -27,7 +27,7 @@ _LIST_ATTEMPTS: int = 3
 _RECYCLE_STUB_STEM_LENGTH: int = 8
 
 
-def _is_excluded(path: Path, exclude_dirs: list[str]) -> bool:
+def is_excluded_dir(path: Path, exclude_dirs: list[str]) -> bool:
     """Return True if path matches any exclude pattern.
 
     Patterns that start with '*' are suffix-matched against the resolved path
@@ -65,7 +65,7 @@ def _is_excluded_file(path: Path, exclude_names: frozenset[str], exclude_files: 
 def resolve_exclude_dirs(exclude_dirs: list[str]) -> list[str]:
     """Return exclude_dirs with each absolute pattern resolved to its real path.
 
-    _is_excluded() compares against entry.resolve(), so a pattern that reaches
+    is_excluded_dir() compares against entry.resolve(), so a pattern that reaches
     its target through a symlink (macOS /etc -> /private/etc, /var ->
     /private/var) or a Windows 8.3 short name (RANDYB~1) never matches.
     Resolving once here, before the scan starts, keeps the per-entry check
@@ -75,7 +75,7 @@ def resolve_exclude_dirs(exclude_dirs: list[str]) -> list[str]:
     - A bare drive ('G:') is treated as its root; os.path.realpath() would
       otherwise resolve it to the current directory on that drive.
     - Trailing separators are stripped (a root becomes 'G:' or '') so the
-      prefix match in _is_excluded() still adds exactly one separator.
+      prefix match in is_excluded_dir() still adds exactly one separator.
     - Patterns that do not exist resolve as far as possible and still apply.
     """
     seps = os.sep + (os.altsep or "")
@@ -313,7 +313,7 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
             if entry.is_symlink():
                 continue
             if entry.is_dir():
-                if _is_excluded(entry, config.exclude_dirs):
+                if is_excluded_dir(entry, config.exclude_dirs):
                     continue
                 if _is_junction_cycle(entry, config.start_dirs):
                     logger.info("skipping %s: junction points back at a folder already walked", entry)

@@ -78,6 +78,8 @@ class IncompleteWork:
     * failed: the handler returned an error, for example an unreadable file.
     * access_denied: the OS refused to list a folder or open a file.  It has
       its own summary row, because the fix is a permission, not a bug report.
+    * not_permitted: the part of access_denied refused with "Operation not
+      permitted".  On macOS it adds the Full Disk Access hint to that row.
     * timed_out: ran past its deadline and was stopped.
     * abandoned: crashed its worker.  A file or folder is abandoned after
       crashing on every attempt the retry budget allowed.  An archive member is
@@ -93,6 +95,7 @@ class IncompleteWork:
 
     failed: int = 0
     access_denied: int = 0
+    not_permitted: int = 0
     timed_out: int = 0
     abandoned: int = 0
     over_memory: int = 0
@@ -117,7 +120,9 @@ class ResultsFile:
 
 
 # Counters about tasks, not display values; update() keeps them apart.
-_TASK_KEYS: frozenset[str] = frozenset({"tasks_completed", "tasks_pending", "tasks_failed", "tasks_access_denied"})
+_TASK_KEYS: frozenset[str] = frozenset(
+    {"tasks_completed", "tasks_pending", "tasks_failed", "tasks_access_denied", "tasks_not_permitted"}
+)
 
 
 def _row(count: int, text: str) -> str:
@@ -145,12 +150,17 @@ _INCOMPLETE_REASONS: tuple[tuple[str, str, str | None], ...] = (
     ("unfinished", "unfinished when the scan stopped", None),
 )
 
-# Printed under the access-denied row on macOS, where privacy controls refuse
+# Where a macOS user grants Full Disk Access.  Shared by the startup privacy
+# check, the coordinator's in-scan warning and the summary.
+FULL_DISK_ACCESS_MENU: str = "System Settings › Privacy & Security › Full Disk Access"
+
+# Printed under the access-denied row on macOS when some refusals were
+# "Operation not permitted" (IncompleteWork.not_permitted), where privacy controls refuse
 # folders such as ~/Library/Mail until the app running PIIDigger has Full Disk
 # Access.  Indented to the text column of the rows.
 _FULL_DISK_ACCESS_HINT: tuple[str, ...] = (
     f"{'':9}  On macOS this is most likely privacy protection. Allow Full Disk Access for the app that runs PIIDigger:",
-    f"{'':9}  System Settings › Privacy & Security › Full Disk Access",
+    f"{'':9}  {FULL_DISK_ACCESS_MENU}",
 )
 
 
@@ -171,7 +181,7 @@ def incomplete_rows(work: IncompleteWork, *, platform: str | None = None) -> lis
     if denied := work.access_denied:
         noun = _plural(denied, "folder or file", "folders or files")
         rows.append(_row(denied, f"{noun} not readable: access denied{_search_hint('access denied')}"))
-        if platform == "darwin":
+        if platform == "darwin" and work.not_permitted:
             rows.extend(_FULL_DISK_ACCESS_HINT)
     return rows
 
@@ -228,6 +238,7 @@ class ProgressDisplay:
         # known once the run ends, via report_incomplete().
         self._tasks_failed: int = 0
         self._tasks_access_denied: int = 0
+        self._tasks_not_permitted: int = 0
         self._timed_out: int = 0
         self._abandoned: int = 0
         self._over_memory: int = 0
@@ -395,7 +406,8 @@ class ProgressDisplay:
 
     def update(self, counters: dict[str, int]) -> None:
         """Accumulate counters and refresh the display.  No-op when not a TTY."""
-        # tasks_completed, tasks_failed and tasks_access_denied are cumulative;
+        # tasks_completed, tasks_failed, tasks_access_denied and
+        # tasks_not_permitted are cumulative;
         # tasks_pending is a snapshot — replace, not add.  None of them belongs
         # in self._counters: they are not display values.
         if "tasks_completed" in counters:
@@ -406,6 +418,8 @@ class ProgressDisplay:
             self._tasks_failed += counters["tasks_failed"]
         if "tasks_access_denied" in counters:
             self._tasks_access_denied += counters["tasks_access_denied"]
+        if "tasks_not_permitted" in counters:
+            self._tasks_not_permitted += counters["tasks_not_permitted"]
 
         for key, val in counters.items():
             if key not in _TASK_KEYS:
@@ -502,6 +516,7 @@ class ProgressDisplay:
         return IncompleteWork(
             failed=self._tasks_failed,
             access_denied=self._tasks_access_denied,
+            not_permitted=self._tasks_not_permitted,
             timed_out=self._timed_out,
             abandoned=self._abandoned,
             over_memory=self._over_memory,

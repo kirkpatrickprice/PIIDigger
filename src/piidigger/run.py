@@ -34,7 +34,8 @@ from piidigger.orchestration.logging_setup import (
     stop_listener,
 )
 from piidigger.orchestration.pool import WorkerPool, spawn_worker
-from piidigger.orchestration.progress import ProgressDisplay
+from piidigger.orchestration.privacy import PROBE_TIME_LIMIT, PrivacyProbe, probe_privacy_blocked
+from piidigger.orchestration.progress import FULL_DISK_ACCESS_MENU, ProgressDisplay
 from piidigger.orchestration.secure_delete import secure_rmtree
 from piidigger.orchestration.sleep import SleepStatus, prevent_sleep
 from piidigger.orchestration.worker import resolve_exclude_dirs
@@ -43,6 +44,11 @@ from piidigger.outputhandlers import HANDLER_REGISTRY, CsvSink, JsonSink, TextSi
 _ALL_FORMATS: frozenset[str] = frozenset(HANDLER_REGISTRY)
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 _PROMPT_TIMEOUT: int = 10
+# How many of the folders macOS privacy controls refused the startup prompt names.
+_PRIVACY_EXAMPLES: int = 2
+# The longest startup waits for the privacy probe: its own time limit, which
+# it checks between listings, and a second for the listing in progress.
+_PROBE_WAIT_SECONDS: float = PROBE_TIME_LIMIT + 1.0
 # A temp file another process holds open (antivirus, the Windows indexer)
 # usually frees up within a second or two, so the final cleanup retries.
 _TEMP_REMOVE_ATTEMPTS: int = 3
@@ -94,9 +100,11 @@ def _prompt_continue(question: str, timeout: int = _PROMPT_TIMEOUT) -> bool:
 
     Reads from stdin with a timeout.  Defaults to continuing (Y) if no input
     arrives within *timeout* seconds — non-interactive callers are not blocked.
-    Returns True to proceed, False to abort.
+    Returns True to proceed, False to abort.  A question that ends with a
+    newline puts the Continue prompt at the start of its own line.
     """
-    print(f"{question}  Continue (Y/n) [{timeout}s]: ", end="", flush=True)
+    separator = "" if question.endswith("\n") else "  "
+    print(f"{question}{separator}Continue (Y/n) [{timeout}s]: ", end="", flush=True)
     lines = _stdin_lines(sys.stdin)
     try:
         line = lines.get(timeout=float(timeout))
@@ -176,6 +184,92 @@ def _check_memory(warning: str | None, logger: logging.Logger) -> bool:
     if _prompt_continue(f"{warning}."):
         return True
     logger.warning("memory check: scan cancelled by the user")
+    return False
+
+
+def _probe_privacy(config: Config, logger: logging.Logger, *, platform: str | None = None) -> PrivacyProbe | None:
+    """On macOS, list the folders most likely to be privacy protected; elsewhere None.
+
+    See probe_privacy_blocked().  platform defaults to sys.platform, read at
+    each call.  Logs what it found; _check_privacy() decides what to do.
+    """
+    if (platform or sys.platform) != "darwin":
+        return None
+    # Advisory only: a failure here (Path.home() raises RuntimeError without
+    # HOME, say) is logged, and the scan goes on.  It counts as a probe that
+    # found nothing, so the coordinator's in-scan warning is still armed.
+    # In a thread: the probe's time limit is checked between listings, so a
+    # listing that hangs on a dead network mount would otherwise hold up the
+    # start, with no display and no recovery.  The scan's own listings have
+    # the deadline sweep; this one is left behind, as a daemon thread.
+    outcome: list[PrivacyProbe | BaseException] = []
+
+    def probe() -> None:
+        try:
+            outcome.append(
+                probe_privacy_blocked(config.start_dirs, resolve_exclude_dirs(config.exclude_dirs), home=Path.home())
+            )
+        except Exception as exc:  # noqa: BLE001 — reported by the caller
+            outcome.append(exc)
+
+    worker = threading.Thread(target=probe, name="privacy-probe", daemon=True)
+    worker.start()
+    worker.join(_PROBE_WAIT_SECONDS)
+    if not outcome:
+        logger.warning(
+            "privacy check: skipped, a folder listing did not return within %s seconds", f"{_PROBE_WAIT_SECONDS:g}"
+        )
+        return PrivacyProbe(blocked=(), listed=0, capped=True)
+    found = outcome[0]
+    if isinstance(found, BaseException):
+        logger.warning("privacy check: skipped, the check itself failed", exc_info=found)
+        return PrivacyProbe(blocked=(), listed=0, capped=False)
+    probe_result = found
+    logger.info(
+        "privacy check: listed %d folder(s)%s, %d refused by macOS privacy controls",
+        probe_result.listed,
+        " (stopped at its listing or time limit)" if probe_result.capped else "",
+        len(probe_result.blocked),
+    )
+    for folder in probe_result.blocked:
+        logger.debug("privacy check: %s: Operation not permitted", folder)
+    return probe_result
+
+
+def _privacy_warning(probe: PrivacyProbe) -> str:
+    """The startup prompt's text for folders macOS privacy controls refused."""
+    count = len(probe.blocked)
+    at_least = "at least " if probe.capped else ""
+    folders = "folder" if count == 1 else "folders"
+    examples = " and ".join(str(folder) for folder in probe.blocked[:_PRIVACY_EXAMPLES])
+    return (
+        f"macOS refused to list {at_least}{count} {folders} (for example {examples}), "
+        "most likely because of its privacy protection.  They will not be scanned.\n"
+        "To scan them, allow Full Disk Access for the app that runs PIIDigger, "
+        f"then start the scan again:\n  {FULL_DISK_ACCESS_MENU}\n"
+    )
+
+
+def _check_privacy(probe: PrivacyProbe | None, logger: logging.Logger) -> bool:
+    """Ask before scanning when macOS privacy controls refused folders the scan will reach.
+
+    probe is _probe_privacy()'s result, None when it did not run.  Prompts the
+    way the memory check does, and likewise continues on its own after the
+    timeout.  Not interactive: log the warning and continue.  Returns True to
+    proceed, False to abort.
+    """
+    if probe is None or not probe.blocked:
+        return True
+
+    warning = _privacy_warning(probe)
+    logger.warning("privacy check: %s", " ".join(warning.split()))
+    if not sys.stdin.isatty():
+        logger.info("privacy check: non-interactive mode — continuing without confirmation")
+        return True
+
+    if _prompt_continue(warning):
+        return True
+    logger.warning("privacy check: scan cancelled by the user")
     return False
 
 
@@ -433,7 +527,8 @@ def run_scan(config: Config) -> int:
       1. Start logging listener; create run-level logger; route library logs
       2. Admin privilege check (prompts user if not elevated and admin_check=True),
          then the memory check (prompts if workers x max_worker_memory_mb is
-         more than half the RAM)
+         more than half the RAM), then on macOS the privacy check (prompts if
+         privacy controls refuse folders the scan will reach)
       3. Build and open output sinks (create parent dirs as needed).  Any
          failure aborts the run: there would be nowhere to put the results.
       4. Build WorkerContext; start worker pool
@@ -468,7 +563,7 @@ def run_scan(config: Config) -> int:
     physical_cores = psutil.cpu_count(logical=False) or logical_cores
     worker_count = _resolve_workers(config.performance, physical_cores, logical_cores)
 
-    # The admin and memory checks and sink opening all happen before
+    # The admin, memory and privacy checks and sink opening all happen before
     # progress.start() takes over the terminal, so their prompts and errors
     # print cleanly.  CTRL-C at a prompt ends the run as one during the scan
     # does; any other failure still drains the listener and logs the exit code.
@@ -477,6 +572,8 @@ def run_scan(config: Config) -> int:
             config.max_worker_memory_mb, worker_count, psutil.virtual_memory().total
         )
         proceed = _check_admin(config, run_logger) and _check_memory(memory_warning, run_logger)
+        privacy = _probe_privacy(config, run_logger) if proceed else None
+        proceed = proceed and _check_privacy(privacy, run_logger)
         sinks = _open_sinks(config, timestamp, run_logger) if proceed else None
     except BaseException as exc:
         stop_listener(listener)
@@ -516,7 +613,7 @@ def run_scan(config: Config) -> int:
 
         # Skip the files this run is writing; see _output_exclusions().
         # Resolve every exclude pattern once so it matches the resolved paths
-        # _is_excluded() compares against; see resolve_exclude_dirs().
+        # is_excluded_dir() compares against; see resolve_exclude_dirs().
         output_dirs, output_files = _output_exclusions(config, sinks, run_logger)
         raw_exclude_dirs = [*config.exclude_dirs, *output_dirs, str(temp_base)]
         exclude_dirs = resolve_exclude_dirs(raw_exclude_dirs)
@@ -551,7 +648,13 @@ def run_scan(config: Config) -> int:
                 results_files=[path for sink in sinks for path in sink.paths],
             )
             handed_off = True
-            outcome = run_coordinator(worker_ctx, pool, listener, sinks, progress)
+            # On macOS (the only place the probe runs), the coordinator warns
+            # about Full Disk Access at the first access denied, unless the
+            # privacy check has already named it.
+            warn_full_disk_access = privacy is not None and not privacy.blocked
+            outcome = run_coordinator(
+                worker_ctx, pool, listener, sinks, progress, warn_full_disk_access=warn_full_disk_access
+            )
         returning = True
     except BaseException as exc:
         cause = exc

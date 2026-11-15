@@ -7,6 +7,7 @@ import logging
 import logging.handlers
 import math
 import os
+import queue
 import re
 import tempfile
 import threading
@@ -16,8 +17,10 @@ import pytest
 
 import piidigger.run as run_mod
 from piidigger.models.config import Config, ResultsConfig
+from piidigger.orchestration import privacy as privacy_mod
 from piidigger.orchestration.coordinator import CoordinatorResult
 from piidigger.orchestration.pool import WorkerPool
+from piidigger.orchestration.privacy import PrivacyProbe
 from piidigger.orchestration.progress import ProgressDisplay
 from piidigger.orchestration.sleep import SleepStatus
 from piidigger.outputhandlers import TextSink
@@ -29,11 +32,13 @@ from piidigger.run import (
     EXIT_OK,
     _build_sinks,
     _check_memory,
+    _check_privacy,
     _describe_platform,
     _emit_startup_info,
     _is_broad_folder,
     _memory_budget,
     _output_exclusions,
+    _probe_privacy,
     _prompt_continue,
     _remove_temp_workspace,
     _resolve_workers,
@@ -315,7 +320,7 @@ def test_run_scan_excludes_temp_workspace_reached_via_symlink_alias(
     through (e.g. macOS's /var -> /private/var).
 
     Regression test: temp_base must be resolved before being added to
-    exclude_dirs.  _is_excluded() always compares against entry.resolve(), so
+    exclude_dirs.  is_excluded_dir() always compares against entry.resolve(), so
     an unresolved alias path never matches an entry reached directly through
     the real (already-resolved) route, and a worker ends up scanning its own
     extracted archive members.
@@ -1078,3 +1083,244 @@ def test_stamped_log_file_leaves_a_symlink_alone(tmp_path: Path) -> None:
     link.symlink_to(target)
 
     assert _stamped_log_file(link, "20261031-153257") == link
+
+
+# ---------------------------------------------------------------------------
+# macOS privacy check
+# ---------------------------------------------------------------------------
+
+
+def _refuse_with(monkeypatch: pytest.MonkeyPatch, refused: dict[Path, int]) -> list[Path]:
+    """Fake os.scandir for the probe: raise each refused folder's errno.  Returns the folders listed."""
+    calls: list[Path] = []
+    real_scandir = os.scandir
+
+    def fake_scandir(path: Path) -> object:
+        calls.append(Path(path))
+        if (code := refused.get(Path(path))) is not None:
+            raise PermissionError(code, os.strerror(code), str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(privacy_mod.os, "scandir", fake_scandir)
+    return calls
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_privacy_probe_runs_only_on_macos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str) -> None:
+    calls = _refuse_with(monkeypatch, {})
+
+    assert _probe_privacy(Config(start_dirs=[tmp_path]), logging.getLogger("tests.privacy"), platform=platform) is None
+    assert calls == []
+
+
+@pytest.mark.unit
+def test_privacy_probe_counts_eperm_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import errno
+
+    for name in ("Mail", "Messages", "locked"):
+        (tmp_path / name).mkdir()
+    _refuse_with(
+        monkeypatch,
+        {tmp_path / "Mail": errno.EPERM, tmp_path / "Messages": errno.EPERM, tmp_path / "locked": errno.EACCES},
+    )
+    logger = logging.getLogger("tests.privacy")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        probe = _probe_privacy(Config(start_dirs=[tmp_path]), logger, platform="darwin")
+
+    assert probe is not None
+    assert sorted(probe.blocked) == [tmp_path / "Mail", tmp_path / "Messages"]
+    assert "privacy check: listed 4 folder(s), 2 refused by macOS privacy controls" in caplog.messages
+
+
+_BLOCKED = PrivacyProbe(
+    blocked=(Path("/Users/x/Library/Mail"), Path("/Users/x/Desktop"), Path("/Users/x/Documents")),
+    listed=40,
+    capped=False,
+)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("probe", [None, PrivacyProbe(blocked=(), listed=40, capped=False)])
+def test_privacy_check_passes_without_asking_when_nothing_is_blocked(
+    monkeypatch: pytest.MonkeyPatch, probe: PrivacyProbe | None
+) -> None:
+    monkeypatch.setattr(run_mod, "_prompt_continue", lambda question: pytest.fail("must not prompt"))
+
+    assert _check_privacy(probe, logging.getLogger("tests.privacy")) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("answer", [True, False])
+def test_privacy_check_prompts_on_a_terminal_and_follows_the_answer(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, answer: bool
+) -> None:
+    monkeypatch.setattr(run_mod.sys.stdin, "isatty", lambda: True, raising=False)
+    questions: list[str] = []
+    monkeypatch.setattr(run_mod, "_prompt_continue", lambda question: questions.append(question) or answer)
+    logger = logging.getLogger("tests.privacy")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        assert _check_privacy(_BLOCKED, logger) is answer
+
+    [question] = questions
+    assert "refused to list 3 folders (for example /Users/x/Library/Mail and /Users/x/Desktop)" in question
+    assert "/Users/x/Documents" not in question, "two examples at most"
+    assert "most likely" in question
+    assert "System Settings › Privacy & Security › Full Disk Access" in question
+    assert ("privacy check: scan cancelled by the user" in caplog.messages) is not answer
+
+
+@pytest.mark.unit
+def test_privacy_check_says_at_least_when_the_probe_stopped_at_its_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(run_mod.sys.stdin, "isatty", lambda: True, raising=False)
+    questions: list[str] = []
+    monkeypatch.setattr(run_mod, "_prompt_continue", lambda question: questions.append(question) or True)
+    capped = PrivacyProbe(blocked=(Path("/Users/x/Library/Mail"),), listed=1000, capped=True)
+
+    _check_privacy(capped, logging.getLogger("tests.privacy"))
+
+    assert "refused to list at least 1 folder (for example /Users/x/Library/Mail)" in questions[0]
+
+
+@pytest.mark.unit
+def test_privacy_check_continues_without_asking_when_not_interactive(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(run_mod.sys.stdin, "isatty", lambda: False, raising=False)
+    monkeypatch.setattr(run_mod, "_prompt_continue", lambda question: pytest.fail("must not prompt"))
+    logger = logging.getLogger("tests.privacy")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        assert _check_privacy(_BLOCKED, logger) is True
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "\n" not in warnings[0], "one log line"
+    assert "Full Disk Access" in warnings[0]
+    assert any("non-interactive mode" in m for m in caplog.messages)
+
+
+@pytest.mark.unit
+def test_prompt_continue_starts_a_line_of_its_own_after_a_multiline_question(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    lines: queue.Queue[str | None] = queue.Queue()
+    for answer in ("y\n", "y\n"):
+        lines.put(answer)
+    monkeypatch.setattr(run_mod, "_stdin_lines", lambda _stdin: lines)
+
+    _prompt_continue("Line one.\n  Menu › Path\n")
+    _prompt_continue("One line.")
+
+    out = capsys.readouterr().out
+    assert "  Menu › Path\nContinue (Y/n)" in out
+    assert "One line.  Continue (Y/n)" in out
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("probe", "expected"),
+    [
+        (None, False),  # not macOS
+        (PrivacyProbe(blocked=(), listed=3, capped=False), True),
+        (_BLOCKED, False),  # the startup check already named it
+    ],
+)
+def test_run_scan_arms_the_in_scan_full_disk_access_warning_only_when_the_startup_check_found_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, probe: PrivacyProbe | None, expected: bool
+) -> None:
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    monkeypatch.setattr(run_mod, "_probe_privacy", lambda _config, _logger: probe)
+    monkeypatch.setattr(run_mod.sys.stdin, "isatty", lambda: False, raising=False)
+    seen: dict[str, object] = {}
+
+    def fake_coordinator(*_args: object, **kwargs: object) -> CoordinatorResult:
+        seen.update(kwargs)
+        return CoordinatorResult()
+
+    monkeypatch.setattr(run_mod, "run_coordinator", fake_coordinator)
+
+    rc = run_scan(
+        Config(
+            start_dirs=[scan_root],
+            log_file=tmp_path / "test.log",
+            results=ResultsConfig(path=tmp_path / "results", formats=["text"]),
+        )
+    )
+
+    assert rc == EXIT_OK
+    assert seen["warn_full_disk_access"] is expected
+
+
+@pytest.mark.integration
+def test_run_scan_aborts_when_the_user_declines_the_privacy_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scan_root = tmp_path / "scan_root"
+    scan_root.mkdir()
+    monkeypatch.setattr(run_mod, "_probe_privacy", lambda _config, _logger: _BLOCKED)
+    monkeypatch.setattr(run_mod.sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(run_mod, "_check_admin", lambda _config, _logger: True)
+    monkeypatch.setattr(run_mod, "_prompt_continue", lambda _question: False)
+    monkeypatch.setattr(run_mod, "run_coordinator", lambda *_a, **_k: pytest.fail("must not scan"))
+
+    rc = run_scan(
+        Config(
+            start_dirs=[scan_root],
+            log_file=tmp_path / "test.log",
+            results=ResultsConfig(path=tmp_path / "results", formats=["text"]),
+        )
+    )
+
+    assert rc == EXIT_ABORTED
+
+
+@pytest.mark.unit
+def test_privacy_probe_that_fails_lets_the_scan_go_on_with_the_in_scan_warning_armed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An advisory check must not stop the scan: Path.home() raises RuntimeError when HOME is unset."""
+
+    def no_home() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(run_mod.Path, "home", no_home)
+    logger = logging.getLogger("tests.privacy")
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        probe = _probe_privacy(Config(start_dirs=[tmp_path]), logger, platform="darwin")
+
+    assert probe is not None
+    assert probe.blocked == ()
+    assert "privacy check: skipped, the check itself failed" in caplog.messages
+    assert _check_privacy(probe, logger) is True
+
+
+@pytest.mark.unit
+def test_privacy_probe_that_hangs_lets_the_scan_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A listing stuck on a dead network mount must not hold up the start: the scan's deadline sweep can't reach it."""
+    release = threading.Event()
+
+    def hangs(*_args: object, **_kwargs: object) -> PrivacyProbe:
+        release.wait()
+        return PrivacyProbe(blocked=(Path("/late"),), listed=1, capped=False)
+
+    monkeypatch.setattr(run_mod, "probe_privacy_blocked", hangs)
+    monkeypatch.setattr(run_mod, "_PROBE_WAIT_SECONDS", 0.05)
+    logger = logging.getLogger("tests.privacy")
+
+    try:
+        with caplog.at_level(logging.WARNING, logger=logger.name):
+            probe = _probe_privacy(Config(start_dirs=[tmp_path]), logger, platform="darwin")
+    finally:
+        release.set()
+
+    assert probe == PrivacyProbe(blocked=(), listed=0, capped=True), "found nothing, so the in-scan warning is armed"
+    assert "privacy check: skipped, a folder listing did not return within 0.05 seconds" in caplog.messages

@@ -279,7 +279,7 @@ def test_incomplete_work_has_a_row_per_reason_with_its_search_phrase() -> None:
 
 @pytest.mark.unit
 def test_full_disk_access_hint_follows_access_denied_on_macos_only() -> None:
-    denied = IncompleteWork(access_denied=2)
+    denied = IncompleteWork(access_denied=2, not_permitted=1)
 
     rows = incomplete_rows(denied, platform="darwin")
 
@@ -293,6 +293,9 @@ def test_full_disk_access_hint_follows_access_denied_on_macos_only() -> None:
     assert incomplete_rows(IncompleteWork(failed=1), platform="darwin") == [
         "        1  file, folder or archive member with errors"
     ], "no hint without access denied"
+    assert incomplete_rows(IncompleteWork(access_denied=2), platform="darwin") == rows[:1], (
+        "no hint when every refusal was Permission denied, which Full Disk Access does not lift"
+    )
 
 
 @pytest.mark.unit

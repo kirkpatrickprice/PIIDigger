@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 
@@ -28,10 +29,17 @@ def error_kind_of(exc: BaseException, *, path: str | os.PathLike[str] | None = N
     denied.  An archive batch passes its archive, so a refusal of the scan's
     own temp folder (an antivirus blocking an extracted member, say) stays an
     error: no permission on the archive would fix it.
+
+    EPERM ("Operation not permitted") is "not_permitted", on every platform.
+    On macOS it is most often privacy protection, which Full Disk Access
+    lifts, though System Integrity Protection and the immutable flag give it
+    too, and nothing supported tells them apart.  EACCES ("Permission
+    denied") is ordinary file permissions, which Full Disk Access does not
+    change.  Only macOS shows the Full Disk Access hint for it.
     """
     for candidate in (exc, exc.__cause__):
         if not isinstance(candidate, PermissionError) or getattr(candidate, "winerror", None) in _WINDOWS_LOCKED:
             continue
         if path is None or (candidate.filename is not None and Path(candidate.filename) == Path(path)):
-            return "access_denied"
+            return "not_permitted" if candidate.errno == errno.EPERM else "access_denied"
     return None

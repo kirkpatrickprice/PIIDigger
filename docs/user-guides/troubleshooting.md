@@ -197,7 +197,9 @@ Run `piidigger inspect datatypes` to list the data types you can name here. For 
     2. Turn on the terminal app you use, such as Terminal or iTerm. Use **+** to add it if it isn't listed.
     3. Quit and reopen the terminal app, then run the scan again.
 
-  The summary prints this pointer on macOS whenever it has an access-denied row. A message of `Permission denied` instead means ordinary file permissions, as on Linux.
+  The summary prints this pointer on macOS when at least one refusal was `Operation not permitted`. A message of `Permission denied` instead means ordinary file permissions, as on Linux, and Full Disk Access doesn't change it, so the summary leaves the pointer out when every refusal was that.
+
+  PIIDigger also checks for this before the scan starts, and asks whether to continue when macOS refuses folders the scan would reach. See [macOS privacy prompt](scan-command.md#macos-privacy-prompt).
 
 ### The summary says files were password protected
 

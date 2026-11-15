@@ -24,16 +24,18 @@ def _wrapped(cause: BaseException) -> ArchiveReadError:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "exc",
+    ("exc", "kind"),
     [
-        PermissionError(13, "Permission denied"),
-        PermissionError(1, "Operation not permitted"),
-        _windows_error(5),  # ERROR_ACCESS_DENIED
-        _wrapped(PermissionError(13, "Permission denied")),
+        (PermissionError(13, "Permission denied"), "access_denied"),
+        (_windows_error(5), "access_denied"),  # ERROR_ACCESS_DENIED
+        (_wrapped(PermissionError(13, "Permission denied")), "access_denied"),
+        # EPERM: on macOS, privacy protection, which Full Disk Access lifts.
+        (PermissionError(1, "Operation not permitted"), "not_permitted"),
+        (_wrapped(PermissionError(1, "Operation not permitted")), "not_permitted"),
     ],
 )
-def test_refused_access_is_access_denied(exc: BaseException) -> None:
-    assert error_kind_of(exc) == "access_denied"
+def test_refused_access_is_access_denied(exc: BaseException, kind: str) -> None:
+    assert error_kind_of(exc) == kind
 
 
 @pytest.mark.unit
