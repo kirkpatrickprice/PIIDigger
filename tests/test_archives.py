@@ -1703,7 +1703,10 @@ def _build_archive(tmp_path: Path, archive_type: str, members: dict[str, bytes],
         path = tmp_path / f"{name}.7z"
         with py7zr.SevenZipFile(path, "w") as szf:
             for member, data in members.items():
-                szf.writestr(data, member)
+                # _writestr(), not writestr(): on Windows, writestr() refuses a
+                # name such as notes/a:b.txt, which other tools do write, and
+                # which the extraction tests must read back.
+                szf._writestr(data, member)
     else:
         path = tmp_path / f"{name}.tar.gz"
         with tarfile.open(path, "w:gz") as tf:
