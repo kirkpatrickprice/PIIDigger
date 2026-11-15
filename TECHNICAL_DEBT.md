@@ -97,7 +97,7 @@ Known gaps we chose not to fix yet. Each entry says what is wrong, why it was de
 - **Suggested fix:** When a run's first character directly follows another printable character, treat the NUL after that character as a delimiter. Take care that the big-endian branch doesn't consume the same NUL.
 
 ### Encoded mail is read as raw text
-- **What:** `.eml` files and detected mail go through the text handler, so base64 bodies, quoted-printable soft line breaks and attachments are never decoded. A card number in such a body or a `.docx` attachment is missed, and nothing reports it. Only headers and unencoded bodies are searched. Mail with no recognized extension, such as `.bak` or none, now counts as scanned on the same terms. Before `message/rfc822` was registered, it wasn't read at all and counted as unsupported.
+- **What:** `.eml`, `.mbox` and `.mbx` files and detected mail go through the text handler, so base64 bodies, quoted-printable soft line breaks and attachments are never decoded. A card number in such a body or a `.docx` attachment is missed, and nothing reports it. Only headers and unencoded bodies are searched. Mail with no recognized extension, such as `.bak` or none, now counts as scanned on the same terms. Before `message/rfc822` was registered, it wasn't read at all and counted as unsupported.
 - **Why deferred:** Decoding mail and extracting its attachments is a new file handler, which is 2.1 work.
 - **Where:** `filehandlers/plaintext.py`.
 - **Suggested fix:** Add a mail handler using the standard `email` package that yields decoded bodies, and treat attachments like archive members.
@@ -121,7 +121,7 @@ Known gaps we chose not to fix yet. Each entry says what is wrong, why it was de
 - **Suggested fix:** Register the extensions and MIME types, and test real files from Word.
 
 ### Text with no recognized extension can go undetected
-- **What:** A file with no recognized extension is only scanned if puremagic gives a MIME type with a handler. Prose starting `This is ` matches a GNU Info signature and returns an empty type, and prose starting `From the` sniffs as `application/mbox`. About 30 other text-like MIME types in puremagic's data have no handler, such as `message/news`, `text/x-patch`, `text/vtt` and `application/x-yaml`. These count as unsupported types in the log, not as unread files.
+- **What:** A file with no recognized extension is only scanned if puremagic gives a MIME type with a handler. Prose starting `This is ` matches a GNU Info signature and returns an empty type. Prose starting `From ` sniffs as `application/mbox`, which is read as text, so it is scanned. About 30 other text-like MIME types in puremagic's data have no handler, such as `message/news`, `text/x-patch`, `text/vtt` and `application/x-yaml`. These count as unsupported types in the log, not as unread files.
 - **Why deferred:** It needs a guess about what is text beyond what puremagic reports, and `.bak`-style files are a small share of what a scan reads.
 - **Where:** `filehandlers/__init__.py` (`select_handler`), `getmime.py`.
 - **Suggested fix:** When puremagic reports nothing useful, test the file with `detect_file_encoding()` and treat a confident result as `text/plain`.

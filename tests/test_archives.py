@@ -2748,7 +2748,8 @@ def test_document_extension_goes_by_mime_first(ext: str, mime: str | None, expec
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "mime", ["message/rfc822", "text/calendar", "text/csv", "text/vcard", "text/x-ldif", "text/x-python"]
+    "mime",
+    ["application/mbox", "message/rfc822", "text/calendar", "text/csv", "text/vcard", "text/x-ldif", "text/x-python"],
 )
 def test_text_like_mime_types_go_to_the_text_handler(mime: str) -> None:
     from piidigger.filehandlers import get_handler_for

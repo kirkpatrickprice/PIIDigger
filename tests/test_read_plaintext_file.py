@@ -4,8 +4,10 @@ from pathlib import Path
 import pytest
 
 from piidigger.exceptions import UndetectableEncodingError
+from piidigger.filehandlers import select_handler
 from piidigger.filehandlers.plaintext import _MAX_LINE_CHARS, PlaintextHandler
 from piidigger.getencoding import _ENCODING_SAMPLE_BYTES, _FALLBACK_ENCODING, detect_file_encoding
+from piidigger.getmime import get_mime
 from piidigger.models.config import BufferConfig, Config, PlaintextConfig
 from piidigger.orchestration.sources import FilesystemItem
 
@@ -292,3 +294,40 @@ def test_plaintext_memory_does_not_scale_with_file_size(tmp_path: Path) -> None:
     # whole file at once peaked at >= 3.49x the file size (~58 MiB here).
     detection_allowance = 3 * _ENCODING_SAMPLE_BYTES
     assert peak < detection_allowance + size / 4
+
+
+# rbclark: mailboxes, calendars and JSON Lines files were counted as unsupported types.
+# Related text formats are registered with them: more JSON variants, LDIF, vCard and .mbx mailboxes.
+_MAIL_TEXT_SAMPLES = {
+    ".mbox": b"From jane.doe@example.com Mon Jan  1 00:00:00 2024\nSubject: hi\n\nCard 4111 1111 1111 1111\n",
+    ".ics": b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nDESCRIPTION:jane.doe@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+    ".jsonl": b'{"email": "jane.doe@example.com"}\n{"email": "john.roe@example.com"}\n',
+    ".ndjson": b'{"email": "jane.doe@example.com"}\n{"email": "john.roe@example.com"}\n',
+    ".geojson": b'{"type": "Feature", "properties": {"owner": "jane.doe@example.com"}}\n',
+    ".ldif": b"dn: cn=Jane Doe,dc=example,dc=com\nobjectClass: person\nmail: jane.doe@example.com\n",
+    ".mbx": b"From jane.doe@example.com Mon Jan  1 00:00:00 2024\nSubject: hi\n\nbody\n",
+    ".vcard": b"BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Jane Doe\r\nEMAIL:jane.doe@example.com\r\nEND:VCARD\r\n",
+}
+
+
+@pytest.mark.filehandlers
+@pytest.mark.parametrize("ext", sorted(_MAIL_TEXT_SAMPLES))
+def test_plaintext_reads_mail_calendar_and_json_text_extensions(tmp_path: Path, ext: str) -> None:
+    # Archive members have no MIME type, so the extension alone must choose the reader.
+    assert isinstance(select_handler(ext, None, ["all"], ["all"]), PlaintextHandler)
+    path = tmp_path / f"sample{ext}"
+    path.write_bytes(_MAIL_TEXT_SAMPLES[ext])
+
+    assert "jane.doe@example.com" in " ".join(_read(path))
+
+
+@pytest.mark.filehandlers
+def test_plaintext_reads_a_mailbox_with_no_extension_by_mime(tmp_path: Path) -> None:
+    path = tmp_path / "Inbox"
+    path.write_bytes(_MAIL_TEXT_SAMPLES[".mbox"])
+    mime = get_mime(str(path))
+
+    assert mime == "application/mbox"
+    handler = select_handler("", mime, ["all"], ["all"])
+    assert isinstance(handler, PlaintextHandler)
+    assert "jane.doe@example.com" in " ".join(handler.read(FilesystemItem(path), Config()))
