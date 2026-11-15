@@ -10,6 +10,7 @@ went unnoticed.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import pytest
 
@@ -17,7 +18,7 @@ from piidigger.models.tasks import Task, TaskStarted, TaskType, WorkerReady
 from piidigger.orchestration.coordinator import HealthMonitor, SweepResult
 from piidigger.orchestration.feeder import TaskFeeder
 from piidigger.orchestration.pool import WorkerPool
-from piidigger.orchestration.registry import MAX_RETRIES, TaskRegistry
+from piidigger.orchestration.registry import MAX_RETRIES, AbandonReason, TaskRegistry
 from tests._fakes import FakeClock, FakeProcess, Spawner
 
 _LOG = logging.getLogger("tests.health_monitor")
@@ -768,3 +769,81 @@ def test_worker_replaced_for_a_timeout_is_not_replaced_again_for_memory() -> Non
     assert sweep.over_memory == []
     assert worker.terminate_calls == 1
     assert len(h.spawner.spawned) == 4, "one replacement, not two"
+
+
+# ---------------------------------------------------------------------------
+# The summary's search phrases find the log lines they point to
+# ---------------------------------------------------------------------------
+
+
+def _whole_task_timed_out(h: Harness) -> None:
+    h.run(h.worker(0), timeout=30)
+    h.clock.advance(61.0)
+
+
+def _member_timed_out(h: Harness) -> None:
+    worker = h.worker(0)
+    assert worker.pid is not None
+    task = _run_batch(h, worker, "a", "b")
+    h.registry.record_progress(task.task_id, worker.pid, "item_started", "a")
+    h.clock.advance(61.0)
+
+
+def _whole_task_crashed(h: Harness) -> None:
+    h.run(h.worker(0))
+    h.worker(0).crash()
+
+
+def _member_crashed(h: Harness) -> None:
+    worker = h.worker(0)
+    assert worker.pid is not None
+    task = _run_batch(h, worker, "a", "b")
+    h.registry.record_progress(task.task_id, worker.pid, "item_started", "a")
+    worker.crash()
+
+
+def _whole_task_over_memory(h: Harness) -> None:
+    worker = h.worker(0)
+    assert worker.pid is not None
+    h.run(worker)
+    h.rss[worker.pid] = _LIMIT + 1
+
+
+def _member_over_memory(h: Harness) -> None:
+    worker = h.worker(0)
+    assert worker.pid is not None
+    task = _run_batch(h, worker, "a", "b")
+    h.registry.record_progress(task.task_id, worker.pid, "item_started", "a")
+    h.rss[worker.pid] = _LIMIT + 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("make", "summary_field", "reason"),
+    [
+        (_whole_task_timed_out, "timed_out", "timed_out"),
+        (_member_timed_out, "timed_out", "timed_out"),
+        (_whole_task_crashed, "abandoned", "crashed"),
+        (_member_crashed, "abandoned", "crashed"),
+        (_whole_task_over_memory, "over_memory", "over_memory"),
+        (_member_over_memory, "over_memory", "over_memory"),
+    ],
+)
+def test_summary_search_phrase_is_in_the_log_line_for_that_reason(
+    caplog: pytest.LogCaptureFixture, make: Callable[[Harness], None], summary_field: str, reason: AbandonReason
+) -> None:
+    """A whole task and one batch member are logged by different lines; the phrase must find both."""
+    from piidigger.orchestration.coordinator import _report_sweep
+    from piidigger.orchestration.progress import _INCOMPLETE_REASONS, ProgressDisplay
+
+    [phrase] = [phrase for field, _, phrase in _INCOMPLETE_REASONS if field == summary_field]
+    assert phrase is not None
+    h = Harness(max_retries=0, memory_limit_bytes=_LIMIT)
+    make(h)
+    sweep = h.monitor.tick()
+    with caplog.at_level(logging.WARNING, logger=_LOG.name):
+        _report_sweep(sweep, h.registry, ProgressDisplay(), _LOG)
+
+    assert h.registry.count_abandoned(reason) == 1, "the summary counts this one"
+    lines = [r.getMessage() for r in caplog.records]
+    assert [line for line in lines if phrase in line], f"no log line holds {phrase!r}: {lines}"

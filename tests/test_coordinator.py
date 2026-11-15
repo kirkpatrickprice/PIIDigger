@@ -670,11 +670,11 @@ def test_failed_task_is_reported_as_not_scanned(tmp_path: Path, capsys: pytest.C
 
     assert outcome == CoordinatorResult(interrupted=False, unfinished=0)
     assert progress.incomplete.failed == 1
-    assert "1  file, folder or archive member: 1 error" in capsys.readouterr().out
+    assert "1  file, folder or archive member with errors" in capsys.readouterr().out
     # The same line reaches the log, so a log-only review sees what was skipped.
     # The log is UTF-8 on every platform; read_text() alone would use cp1252 on Windows.
     log_text = log_file.read_text(encoding="utf-8")
-    assert "1  file, folder or archive member: 1 error" in log_text
+    assert "1  file, folder or archive member with errors" in log_text
     assert log_text.count("Not fully scanned") == 1
     assert "See the log for details" not in log_text
 

@@ -47,12 +47,15 @@ DISPATCH_WINDOW_PER_WORKER: int = 4
 
 _MB: int = 1024 * 1024
 
-# How a skipped batch member's worker failed, as "its worker <text> on it" in
-# the log and "worker <text>" in the events panel.
+# How a skipped batch member's worker failed, as "its worker <text>" in the log
+# and "worker <text>" in the events panel.  Each log text holds the phrase the
+# summary tells the user to search for ("deadline exceeded", "crashed",
+# "memory limit exceeded"), the same phrase the whole-task line for that reason
+# holds.
 _SKIP_REASON_TEXT: dict[AbandonReason, str] = {
-    "timed_out": "hung",
-    "crashed": "crashed",
-    "over_memory": "went over max_worker_memory_mb",
+    "timed_out": "hung on it (deadline exceeded)",
+    "crashed": "crashed on it",
+    "over_memory": "went over max_worker_memory_mb on it (memory limit exceeded)",
 }
 _SKIP_EVENT_TEXT: dict[AbandonReason, str] = {
     "timed_out": "hung",
@@ -739,12 +742,15 @@ def _handle_result(
         denied = result.error_kind == "access_denied"
         # The only log line for a failed task: workers log theirs at DEBUG.
         # Access denied is expected (e.g. macOS privacy protection without Full
-        # Disk Access), so it is a warning, as in the display.
+        # Disk Access), so it is a warning, as in the display.  It says "access
+        # denied" in those words, which the summary tells the user to search
+        # for: Windows' own message is "Access is denied".
         logger.log(
             logging.WARNING if denied else logging.ERROR,
-            "[%s]%s: %s",
+            "[%s]%s: %s%s",
             result.task_type.value,
             f" path={err_path}" if err_path else "",
+            "access denied: " if denied else "",
             msg,
         )
         if denied:
@@ -859,7 +865,7 @@ def _report_sweep(
         what = _SKIP_REASON_TEXT[skip.reason]
         member = f"{_task_path(skip.record.task)}::{skip.item}"
         logger.warning(
-            "[%s] skipping %s: its worker (pid=%s) %s on it%s",
+            "[%s] skipping %s: its worker (pid=%s) %s%s",
             skip.record.task.task_type.value,
             member,
             skip.worker_pid,

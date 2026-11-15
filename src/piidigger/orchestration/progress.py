@@ -98,10 +98,6 @@ class IncompleteWork:
     over_memory: int = 0
     unfinished: int = 0
 
-    @property
-    def total(self) -> int:
-        return self.failed + self.access_denied + self.timed_out + self.abandoned + self.over_memory + self.unfinished
-
 
 @dataclass(frozen=True, slots=True)
 class ResultsFile:
@@ -133,34 +129,51 @@ def _plural(count: int, singular: str, plural: str) -> str:
     return singular if count == 1 else plural
 
 
-def describe_incomplete(work: IncompleteWork) -> str | None:
-    """A summary row for the work that did not finish and why, or None if nothing.
+def _search_hint(phrase: str) -> str:
+    """The pointer to the log lines that name each path a summary row counts."""
+    return f' (search the log for "{phrase}")'
 
-    Failed includes a file read only in part, whose findings are kept, so the row
-    does not claim that any of this was skipped outright.  Access denied is left
-    out: describe_access_denied() gives it a row of its own.
+
+# What the summary says after each kind of incomplete work, and the phrase
+# that the coordinator's log line for each one holds.  None: no hint, because
+# no one phrase marks those lines.
+_INCOMPLETE_REASONS: tuple[tuple[str, str, str | None], ...] = (
+    ("failed", "with errors", None),
+    ("timed_out", "timed out", "deadline exceeded"),
+    ("abandoned", "crashed a worker", "crashed"),
+    ("over_memory", "over the memory limit", "memory limit exceeded"),
+    ("unfinished", "unfinished when the scan stopped", None),
+)
+
+# Printed under the access-denied row on macOS, where privacy controls refuse
+# folders such as ~/Library/Mail until the app running PIIDigger has Full Disk
+# Access.  Indented to the text column of the rows.
+_FULL_DISK_ACCESS_HINT: tuple[str, ...] = (
+    f"{'':9}  On macOS this is most likely privacy protection. Allow Full Disk Access for the app that runs PIIDigger:",
+    f"{'':9}  System Settings › Privacy & Security › Full Disk Access",
+)
+
+
+def incomplete_rows(work: IncompleteWork, *, platform: str | None = None) -> list[str]:
+    """Summary rows for the work that did not finish, one row per reason.  Empty if nothing.
+
+    Failed includes a file read only in part, whose findings are kept, so the
+    rows do not claim that any of this was skipped outright.  platform defaults
+    to sys.platform, read at each call.
     """
-    total = work.total - work.access_denied
-    if not total:
-        return None
-    reasons = [
-        (work.failed, _plural(work.failed, "error", "errors")),
-        (work.timed_out, "timed out"),
-        (work.abandoned, "crashed a worker"),
-        (work.over_memory, "over the memory limit"),
-        (work.unfinished, "unfinished when the scan stopped"),
-    ]
-    detail = ", ".join(f"{n:,} {why}" for n, why in reasons if n)
-    noun = _plural(total, "file, folder or archive member", "files, folders or archive members")
-    return _row(total, f"{noun}: {detail}")
-
-
-def describe_access_denied(work: IncompleteWork) -> str | None:
-    """A summary row for the folders and files the OS would not let the scan read, or None if none."""
-    if not (denied := work.access_denied):
-        return None
-    noun = _plural(denied, "folder or file", "folders or files")
-    return _row(denied, f"{noun} not readable: access denied")
+    if platform is None:
+        platform = sys.platform
+    rows = []
+    for field, why, phrase in _INCOMPLETE_REASONS:
+        if count := getattr(work, field):
+            noun = _plural(count, "file, folder or archive member", "files, folders or archive members")
+            rows.append(_row(count, f"{noun} {why}{_search_hint(phrase) if phrase else ''}"))
+    if denied := work.access_denied:
+        noun = _plural(denied, "folder or file", "folders or files")
+        rows.append(_row(denied, f"{noun} not readable: access denied{_search_hint('access denied')}"))
+        if platform == "darwin":
+            rows.extend(_FULL_DISK_ACCESS_HINT)
+    return rows
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -523,23 +536,19 @@ class ProgressDisplay:
 
     def _not_fully_scanned_rows(self) -> list[str]:
         """One row per kind of content that was not read and might hold PII."""
-        rows = []
-        if (incomplete := describe_incomplete(self.incomplete)) is not None:
-            rows.append(incomplete)
-        if (denied := describe_access_denied(self.incomplete)) is not None:
-            rows.append(denied)
+        rows = incomplete_rows(self.incomplete)
         count = self._counters.get
         if unreadable := count("files_unreadable", 0):
             noun = _plural(unreadable, "file", "files")
             rows.append(
                 _row(
                     unreadable,
-                    f'{noun} not read: text encoding could not be detected (search the log for "text encoding")',
+                    f"{noun} not read: text encoding could not be detected{_search_hint('text encoding')}",
                 )
             )
         if no_text := count("pdfs_no_text", 0):
             noun = _plural(no_text, "PDF", "PDFs")
-            rows.append(_row(no_text, f'{noun} with no extractable text (search the log for "no extractable text")'))
+            rows.append(_row(no_text, f"{noun} with no extractable text{_search_hint('no extractable text')}"))
         rejected = [(count(key, 0), words) for key, words in _REJECTED_MEMBERS]
         if total := sum(n for n, _ in rejected):
             detail = ", ".join(f"{n:,} {words}" for n, words in rejected if n)

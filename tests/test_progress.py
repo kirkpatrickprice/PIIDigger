@@ -11,8 +11,7 @@ from piidigger.orchestration.progress import (
     ProgressDisplay,
     ResultsFile,
     _fmt_duration,
-    describe_access_denied,
-    describe_incomplete,
+    incomplete_rows,
 )
 
 
@@ -131,7 +130,9 @@ def test_incomplete_work_gets_its_own_block(monkeypatch: pytest.MonkeyPatch) -> 
         "  Scanned: 10 files",
         "",
         "Not fully scanned. See the log for details.",
-        "        4  files, folders or archive members: 2 errors, 1 timed out, 1 crashed a worker",
+        "        2  files, folders or archive members with errors",
+        '        1  file, folder or archive member timed out (search the log for "deadline exceeded")',
+        '        1  file, folder or archive member crashed a worker (search the log for "crashed")',
     ]
 
 
@@ -144,7 +145,7 @@ def test_interrupted_scan_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
     lines = [text for _, text in display.summary_lines()]
 
     assert lines[0].startswith("Scan interrupted after ")
-    assert "12 unfinished when the scan stopped" in lines[-1]
+    assert lines[-1] == "       12  files, folders or archive members unfinished when the scan stopped"
 
 
 @pytest.mark.unit
@@ -166,7 +167,7 @@ def test_incomplete_summary_uses_singular_for_one_item(monkeypatch: pytest.Monke
 
     assert display.summary_lines()[-1] == (
         logging.WARNING,
-        "        1  file, folder or archive member: 1 timed out",
+        '        1  file, folder or archive member timed out (search the log for "deadline exceeded")',
     )
 
 
@@ -178,7 +179,9 @@ def test_files_over_the_memory_limit_are_reported_as_not_scanned(monkeypatch: py
     lines = [text for _, text in display.summary_lines()]
 
     assert lines[0].startswith("Scan complete in ")
-    assert lines[-1] == "        2  files, folders or archive members: 2 over the memory limit"
+    assert lines[-1] == (
+        '        2  files, folders or archive members over the memory limit (search the log for "memory limit exceeded")'
+    )
 
 
 @pytest.mark.unit
@@ -221,14 +224,14 @@ def test_summary_lines_for_the_log_drop_the_pointer_to_the_log(monkeypatch: pyte
     assert [text for _, text in screen][1:] == [
         "",
         "Not fully scanned. See the log for details.",
-        "        1  file, folder or archive member: 1 error",
+        "        1  file, folder or archive member with errors",
         "",
         "Results files incomplete (0 results found). See the log for details.",
         "        0  results.csv  (stopped after an error: disk full)",
     ]
     assert log[1:] == [
         (logging.WARNING, "Not fully scanned."),
-        (logging.WARNING, "        1  file, folder or archive member: 1 error"),
+        (logging.WARNING, "        1  file, folder or archive member with errors"),
         (logging.WARNING, "Results files incomplete (0 results found)."),
         (logging.WARNING, "        0  results.csv  (stopped after an error: disk full)"),
     ]
@@ -248,7 +251,7 @@ def test_summary_heading_is_a_warning_when_the_scan_did_not_finish(monkeypatch: 
 
 @pytest.mark.unit
 def test_incomplete_summary_is_none_when_everything_finished() -> None:
-    assert describe_incomplete(IncompleteWork()) is None
+    assert incomplete_rows(IncompleteWork()) == []
 
 
 @pytest.mark.unit
@@ -261,13 +264,35 @@ def test_failures_are_counted_without_report_incomplete() -> None:
 
 
 @pytest.mark.unit
-def test_access_denied_has_its_own_row_and_is_not_an_error() -> None:
-    work = IncompleteWork(failed=2, access_denied=1)
+def test_incomplete_work_has_a_row_per_reason_with_its_search_phrase() -> None:
+    work = IncompleteWork(failed=2, access_denied=1, timed_out=1, abandoned=3, over_memory=4, unfinished=5)
 
-    assert describe_incomplete(work) == "        2  files, folders or archive members: 2 errors"
-    assert describe_access_denied(work) == "        1  folder or file not readable: access denied"
-    assert describe_incomplete(IncompleteWork(access_denied=3)) is None
-    assert describe_access_denied(IncompleteWork(failed=3)) is None
+    assert incomplete_rows(work, platform="linux") == [
+        "        2  files, folders or archive members with errors",
+        '        1  file, folder or archive member timed out (search the log for "deadline exceeded")',
+        '        3  files, folders or archive members crashed a worker (search the log for "crashed")',
+        '        4  files, folders or archive members over the memory limit (search the log for "memory limit exceeded")',
+        "        5  files, folders or archive members unfinished when the scan stopped",
+        '        1  folder or file not readable: access denied (search the log for "access denied")',
+    ]
+
+
+@pytest.mark.unit
+def test_full_disk_access_hint_follows_access_denied_on_macos_only() -> None:
+    denied = IncompleteWork(access_denied=2)
+
+    rows = incomplete_rows(denied, platform="darwin")
+
+    assert rows[0] == '        2  folders or files not readable: access denied (search the log for "access denied")'
+    assert rows[1:] == [
+        "           On macOS this is most likely privacy protection. "
+        "Allow Full Disk Access for the app that runs PIIDigger:",
+        "           System Settings › Privacy & Security › Full Disk Access",
+    ]
+    assert incomplete_rows(denied, platform="win32") == rows[:1]
+    assert incomplete_rows(IncompleteWork(failed=1), platform="darwin") == [
+        "        1  file, folder or archive member with errors"
+    ], "no hint without access denied"
 
 
 @pytest.mark.unit
@@ -280,7 +305,7 @@ def test_workers_failing_to_start_is_not_reported_as_complete(monkeypatch: pytes
 
     assert ": workers could not start." in lines[0]
     assert lines[0].startswith("Scan stopped early after ")
-    assert "2 crashed a worker" in lines[-1]
+    assert lines[-1] == '        2  files, folders or archive members crashed a worker (search the log for "crashed")'
 
 
 @pytest.mark.unit
@@ -315,6 +340,7 @@ def _laptop_run(monkeypatch: pytest.MonkeyPatch) -> ProgressDisplay:
 
     clock = iter([0.0, 2473.0])
     monkeypatch.setattr(progress_mod.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(progress_mod.sys, "platform", "linux")  # no macOS Full Disk Access hint
     display = _non_tty(monkeypatch)
     display.update(
         {
@@ -355,8 +381,9 @@ def test_summary_block_on_screen(monkeypatch: pytest.MonkeyPatch) -> None:
         "  Scanned: 28,036 folders, 108,826 files, 6.4 GB",
         "",
         "Not fully scanned. See the log for details.",
-        "       51  files, folders or archive members: 41 errors, 10 over the memory limit",
-        "        9  folders or files not readable: access denied",
+        "       41  files, folders or archive members with errors",
+        '       10  files, folders or archive members over the memory limit (search the log for "memory limit exceeded")',
+        '        9  folders or files not readable: access denied (search the log for "access denied")',
         '      562  files not read: text encoding could not be detected (search the log for "text encoding")',
         '       14  PDFs with no extractable text (search the log for "no extractable text")',
         "   15,703  archive members rejected: 15,696 too deep to reach, 3 over the archive's total size, "

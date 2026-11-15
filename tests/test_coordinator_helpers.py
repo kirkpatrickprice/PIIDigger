@@ -244,7 +244,7 @@ def test_access_denied_kind_is_a_warning_counted_apart(caplog: pytest.LogCapture
     message = "[Errno 1] Operation not permitted: '/Users/x/Library/Mail'"
     lines, counts, events = _error_result_log(caplog, message=message, error_kind="access_denied")
 
-    assert lines == [(logging.WARNING, f"[enum_dir] path=/Users/x/Library/Mail: {message}")]
+    assert lines == [(logging.WARNING, f"[enum_dir] path=/Users/x/Library/Mail: access denied: {message}")]
     assert counts == {"failed": 0, "access_denied": 1, "files_not_scanned": 0}
     assert events == [("WARNING", "Access denied: /Users/x/Library/Mail")]
 

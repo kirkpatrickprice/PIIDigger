@@ -182,6 +182,23 @@ Run `piidigger inspect datatypes` to list the data types you can name here. For 
 
 **Solutions:** Save the file as plain "UTF-8" and validate it again. See [Advanced Configuration](advanced-configuration.md#config-validate-reports-invalid-statement-at-line-1-column-1) for details.
 
+### The summary says folders or files were not readable
+
+**Symptoms:** The summary's "Not fully scanned" block has a row such as `9  folders or files not readable: access denied`.
+
+**Explanation:** The operating system refused to let PIIDigger list those folders or open those files. Search the log for `access denied` to find each one. Each line is logged at WARNING and names the path, followed by the operating system's own message.
+
+**Solutions:**
+
+- **Windows:** run the scan from a terminal opened with **Run as administrator**. PIIDigger's startup admin check warns when it isn't. Windows also reports a file that another program has open, such as an Outlook `.pst` file, as access denied. Close that program and scan again.
+- **Linux:** run the scan as a user that can read the folders, for example with `sudo`.
+- **macOS:** the message is usually `Operation not permitted`. macOS privacy controls protect folders such as `~/Library/Mail`, `~/Library/Messages` and other apps' data, even from an administrator. Give the app you run PIIDigger from Full Disk Access:
+    1. Open **System Settings › Privacy & Security › Full Disk Access**.
+    2. Turn on the terminal app you use, such as Terminal or iTerm. Use **+** to add it if it isn't listed.
+    3. Quit and reopen the terminal app, then run the scan again.
+
+  The summary prints this pointer on macOS whenever it has an access-denied row. A message of `Permission denied` instead means ordinary file permissions, as on Linux.
+
 ### A scan appears hung
 
 **Symptoms:** No progress-bar movement for a long time, and the log file shows nothing new.
