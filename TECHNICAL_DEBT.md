@@ -71,7 +71,7 @@ Known gaps we chose not to fix yet. Each entry says what is wrong, why it was de
 ### Archive members are matched by extension only
 - **What:** Members are never MIME-detected. A member with no extension, or a wrong one, is never scanned, even if its content is a supported type. Files on disk fall back to MIME detection.
 - **Why deferred:** Detecting MIME would mean sniffing the start of each unknown member during extraction, so the scan task, not enumeration, would decide what is scanned.
-- **Where:** `orchestration/worker/_enum_archive.py` (check 8), `filehandlers.select_handler()`.
+- **Where:** `orchestration/worker/_enum_archive.py` (check 3), `filehandlers.select_handler()`.
 - **Suggested fix:** Accept unknown-extension members at enumeration, sniff the first few KB in memory inside `extract_members()`, and skip the member there if its MIME type has no handler.
 
 ### A corrupt member in a solid 7z folder fails the rest of that folder
