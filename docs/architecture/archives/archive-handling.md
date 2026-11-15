@@ -131,24 +131,25 @@ Each module in `archivehandlers/` declares `ARCHIVE_TYPE: str` and `HANDLES = {"
 [orchestration/worker/_enum_archive.py](../../../src/piidigger/orchestration/worker/_enum_archive.py) applies, per member, in order:
 
 1. Path traversal (`../` or absolute), whatever the member's type: it marks a hostile archive, so it counts as unsafe
-2. macOS metadata: a `._*` AppleDouble file in a top-level `__MACOSX/` folder, or beside the member it describes. Not counted, and logged at DEBUG, because it holds none of the user's content. Other names are not assumed to be metadata.
-3. Nested archive (deferred — skipped for now)
-4. `include_exts` and a registered `FileHandler` for the member's extension, through `filehandlers.select_handler()` — the same rule `ENUM_DIR` applies to files on disk. Extensions match regardless of case. Members are never MIME-detected, so a member with no or an unrecognized extension is not scanned. Members skipped here are reported in one INFO line per archive, grouped by extension, listing the 15 most common.
-5. Repeated path: a path that appears twice in one archive (`tar -r` appends) is enumerated once, at its first occurrence, because a batch names its members by path. A later copy is skipped even when the first copy fails a later check: extraction takes the first entry for a name, so a later copy could never be scanned in its place.
-6. Encryption flag
-7. Individual uncompressed-size limit
-8. Compression-ratio bomb heuristic (skipped when `compressed_size == 0`, which is always true for tar and solid 7z)
-9. The **traversal cap** (below)
-10. Running total uncompressed-size limit
-11. Member count limit
+2. Nested archive (deferred — skipped for now)
+3. `include_exts` and a registered `FileHandler` for the member's extension, through `filehandlers.select_handler()` — the same rule `ENUM_DIR` applies to files on disk. Extensions match regardless of case. Members are never MIME-detected, so a member with no or an unrecognized extension is not scanned. Members skipped here are reported in one INFO line per archive, grouped by extension, listing the 15 most common.
+4. Repeated path: a path that appears twice in one archive (`tar -r` appends) is enumerated once, at its first occurrence, because a batch names its members by path. A later copy is skipped even when the first copy fails a later check: extraction takes the first entry for a name, so a later copy could never be scanned in its place.
+5. Encryption flag
+6. Individual uncompressed-size limit
+7. Compression-ratio bomb heuristic (skipped when `compressed_size == 0`, which is always true for tar and solid 7z)
+8. The **traversal cap** (below)
+9. Running total uncompressed-size limit
+10. Member count limit
 
-Checks 2 to 4 filter out members that could never be scanned before any limit applies. So a video or image does not use up the member count or the size budget, and cannot crowd out a scannable member later in the archive. Repeated unscannable members are not reported either. The member count comes last, so it counts only members that would otherwise be scanned.
+A member named `._name` whose original `name` is also in the archive *follows its original*. Enumeration considers it after every other member, so it can never crowd one out. [Files that hold none of the user's content](#files-that-hold-none-of-the-users-content) describes the rule.
 
-Enumeration checks every member, including those past the member count limit; it reads only the archive's listing, so this is cheap. Each skip reason is logged **once per archive**, with the count and the first three member names, never once per member: a hostile archive with a million bad entries costs one log line per reason. Check 4's line and the nested-archive line are INFO, the macOS line is DEBUG, and the rest are WARNING. Each reason except macOS metadata also has a counter, so the end-of-scan summary can tell a member lost to a limit from one of an unsupported type.
+Checks 2 and 3 filter out members that could never be scanned before any limit applies. So a video or image does not use up the member count or the size budget, and cannot crowd out a scannable member later in the archive. Repeated unscannable members are not reported either. The member count comes last, so it counts only members that would otherwise be scanned.
+
+Enumeration checks every member, including those past the member count limit; it reads only the archive's listing, so this is cheap. Each skip reason is logged **once per archive**, with the count and the first three member names, never once per member: a hostile archive with a million bad entries costs one log line per reason. Check 3's line, the nested-archive line and the macOS metadata line are INFO, and the rest are WARNING. Each reason also has a counter, so the end-of-scan summary can tell a member lost to a limit from one of an unsupported type.
 
 Check 1 normalises backslashes first, and also rejects names that start with a drive letter, so a name such as `\x\y.txt` or `C:x.txt` never reaches extraction.
 
-**Traversal cap.** In a compressed tar or a solid 7z, reaching a member means decompressing every byte stored before it, skipped members included. Unscannable members still count here, because they still have to be decompressed. `MemberInfo.decompress_offset` records that amount. Check 9 skips a member whose `decompress_offset` exceeds `max_decompress_depth_mb` (default 32 GiB). The member's own size is not part of this, because check 7 limits it. So no scan task has to decompress an unbounded amount of data to reach a member. Zip and uncompressed tar report offset 0 and are unaffected.
+**Traversal cap.** In a compressed tar or a solid 7z, reaching a member means decompressing every byte stored before it, skipped members included. Unscannable members still count here, because they still have to be decompressed. `MemberInfo.decompress_offset` records that amount. Check 8 skips a member whose `decompress_offset` exceeds `max_decompress_depth_mb` (default 32 GiB). The member's own size is not part of this, because check 6 limits it. So no scan task has to decompress an unbounded amount of data to reach a member. Zip and uncompressed tar report offset 0 and are unaffected.
 
 This limit is separate from `max_total_uncompressed_size_mb` (default 8 GiB), because they control different costs. The depth limit controls decompression time, and the total controls how many bytes get scanned per archive. The total can still fill up first, so later members in a large archive may be rejected as over the total. The summary reports both reasons.
 
@@ -159,15 +160,47 @@ Accepted members, in archive order, are then split into batches (below). Each ba
 
 1. Sends `TaskProgress` `item_started`
 2. Receives the extracted file in the `on_extracted` callback
-3. Runs the file handler and data handlers, building one `ResultRecord` per matching data handler, with lineage fields (`source_member_path`, `source_depth`, `source_container_type`)
-4. Calls `secure_delete()` on the file
-5. Sends `item_done` with that member's findings and counters
+3. Checks the member's content with [`not_content_reason()`](../../../src/piidigger/orchestration/worker/_not_content.py). An AppleDouble file or an Office lock file is deleted unread and reported done with `files_macos_metadata` or `files_office_lock`. See [Files that hold none of the user's content](#files-that-hold-none-of-the-users-content).
+4. Runs the file handler and data handlers, building one `ResultRecord` per matching data handler, with lineage fields (`source_member_path`, `source_depth`, `source_container_type`)
+5. Calls `secure_delete()` on the file
+6. Sends `item_done` with that member's findings and counters
 
 `on_progress` sends rate-limited `alive` messages while compressed bytes are read, which covers long prefix skips. A member can fail on its own: it has no file handler, the OS refuses its file, or its reader fails. The handler then reports it done with a failure count, and the batch goes on. Some members fail after their file was opened, as with a zip CRC mismatch. The handler then passes that partly written file to `on_discard`, and the worker securely deletes it. A broken stream ends the whole batch instead. Tar still passes the partly written file to `on_discard` first. The callback scans and deletes only paths inside the task's own temp folder. A delete that fails (a handle left open, an antivirus lock) is logged; the file is removed with the task folder when the task ends.
 
 When the archive itself cannot be read, the handler returns an error result. If that happened while a member was in progress, the coordinator counts only that member as failed and requeues the rest of the batch. If it happened before any member started, the archive is unreadable from that point on, and the remaining members are counted as failed.
 
 If the worker hangs or dies, the coordinator drops the member that was in progress and requeues the rest of the batch, as described in [Coordinator/Worker Task Pipeline](../orchestration/coordinator-worker-pipeline.md#tasks-with-items).
+
+### Files that hold none of the user's content
+Two kinds of file sit beside a user's files and hold none of their content. Without special handling, both show up as read errors.
+
+- **AppleDouble files** (macOS metadata). macOS writes `._name` beside `name` to hold its Finder metadata and resource fork on a volume that cannot store them, such as FAT, exFAT or a network share. Finder's zips move them into a top-level `__MACOSX/` folder. The file starts with the magic number `00 05 16 07` ([RFC 1740](https://datatracker.ietf.org/doc/html/rfc1740)).
+- **Office lock files.** Word, Excel and PowerPoint write `~$name.docx` beside a document while it is open. It holds only the name of the person who opened it, in a file of about 162 to 165 bytes. The name sits in a padded field at the start: a length byte, that many characters, then spaces or NULs.
+
+A name alone is not proof. A user can name their own file `._notes.txt` or `~$budget.xlsx`. So [orchestration/worker/\_not\_content.py](../../../src/piidigger/orchestration/worker/_not_content.py) applies two rules, the same way on disk and in archives.
+
+**1. Content decides whether a file is read.** `not_content_reason()` runs just before the scan would open a file. It runs in `handle_scan_file()`, in `handle_enum_archive_members()` before an archive on disk is listed, and in the batch scan for each extracted member.
+
+- An AppleDouble file has a `._` name and starts with the magic number.
+- An Office lock file has a `~$` name with a Word, Excel or PowerPoint extension, and a lock file's shape. It is 1 KiB or smaller. Its first byte is a length from 1 to 53, followed by that many printable characters and then a space or NUL. A real document fails the shape, including the HTML, XML, RTF and one-line text files that `.xls` and `.doc` often are. The shape was built from published descriptions of the format, so it errs toward reading: a lock file that doesn't match is read, and holds nothing to find.
+- The check reads up to 1,025 bytes, and only when the name has one of the two prefixes. The byte past 1 KiB is what tells a larger file apart.
+- A file it cannot read is left to the scan, which reports the error.
+
+A match is skipped unread, logged at INFO, and counted with `files_macos_metadata` or `files_office_lock`.
+
+**2. A name decides only which count a file goes in, and only when nothing reads its type.** A `._name` beside `name`, of a type nothing reads, is never opened. Nothing reads its type, so its original has the same type, and nothing readable is lost. A name never relabels a file for any other reason. A `._` file with a reader that goes unread for another reason, such as encryption or a limit, is reported under that reason, because it might be the user's own file. It is counted as macOS metadata instead of as a second unsupported file, or as a nested archive. Examples are `._photo.jpg` beside `photo.jpg`, and `._backup.zip` beside `backup.zip` inside an archive. The folder listing applies this rule from the names it already has, so it opens no file to decide. A folder of 20,000 `._IMG.jpg` files costs no extra reads.
+
+**In archives, metadata follows its original.** Enumeration sees only names and sizes, and applies the member count and size limits as it goes. A `._name` member is metadata in shape when its original `name` is in the archive (a file or a folder entry), or when it sits anywhere in Finder's top-level `__MACOSX/` folder. A member of that shape is set aside and considered after every other member:
+
+- Of a type nothing reads, it is counted as macOS metadata (rule 2). This covers a Finder stub such as `__MACOSX/._backup.zip`, which is not counted as a nested archive.
+- Otherwise it goes through checks 2 to 10 like any other member. When it passes, the batch scan checks its content (rule 1). When it fails, it is reported under that check's reason. So a password-protected Finder zip reports its encrypted `._` members of readable types along with its documents.
+- Up to two such members per accepted original are not charged to `max_members`, the most a real archive holds: `._name` beside it, and one under `__MACOSX/`. The two free places go to the first ones accepted, in archive order, and a rejected member uses none. Any further spellings of the same names (`./._a`, `.\._a`) are charged like any other member, and so is a member whose original was not accepted or is missing. An original counts as accepted when any spelling of it is. So a hostile archive cannot push work past `max_members` this way.
+- It counts toward the total size limit, but only after every other member, so it can never take an original's place.
+- A `._name` member outside `__MACOSX/` with no original in the archive is an ordinary member.
+
+The cost is that a Finder zip extracts about twice as many members, though each metadata member is small.
+
+**Counting.** Both counters are in `FILES_DONE`, so the progress bars still reach their totals. A file skipped by its content was already counted as found. One counted by its name counts as found and done at once. The end-of-scan summary shows both under "Skipped by design". `piidigger inspect file` applies both rules at the same points, so it gives the same answer as a scan.
 
 ### `ArchiveConfig`
 
@@ -261,7 +294,7 @@ To add a fourth archive format:
 ## Performance Considerations
 
 - **Batching** keeps decompression linear in archive size; see [Batching: the trade-offs](#batching-the-trade-offs).
-- **Bomb defense without per-member compressed size**: tar and solid 7z report `compressed_size` as `0`, which disables the ratio check (check 8) for those members. `max_total_uncompressed_size_mb`, `max_decompress_depth_mb` (which caps `decompress_offset`) and `max_members` are the primary defenses in that case.
+- **Bomb defense without per-member compressed size**: tar and solid 7z report `compressed_size` as `0`, which disables the ratio check (check 7) for those members. `max_total_uncompressed_size_mb`, `max_decompress_depth_mb` (which caps `decompress_offset`) and `max_members` are the primary defenses in that case.
 - **Streaming extraction for zip**: each member is copied to disk in chunks instead of being read into memory whole.
 - **Lazy `py7zr` import**: `_7z.py` only imports `py7zr` inside its methods, so processes that never encounter a `.7z` file never pay that import cost.
 

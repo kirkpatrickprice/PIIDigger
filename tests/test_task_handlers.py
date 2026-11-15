@@ -24,6 +24,7 @@ from piidigger.orchestration.logging_setup import build_worker_logger
 from piidigger.orchestration.worker import handle_enum_dir, handle_scan_file, resolve_exclude_dirs
 from piidigger.orchestration.worker._enum_dir import _is_excluded
 from tests._fs import make_dir_alias
+from tests._not_content_samples import appledouble_bytes, office_lock_bytes, xlsx_bytes
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1118,6 +1119,83 @@ def test_enum_dir_scans_user_files_named_like_stubs_inside_a_deleted_folder(tmp_
     result = handle_enum_dir(_enum_dir_task(deleted), _make_ctx(tmp_path), _logger())
 
     assert sorted(Path(t["payload"]["file_path"]).name for t in result.new_tasks) == ["$IABC123.txt", "$Invoices.csv"]
+
+
+@pytest.mark.unit
+def test_enum_dir_leaves_macos_metadata_and_lock_files_to_the_file_scan(tmp_path: Path) -> None:
+    """The listing goes by name: 20,000 ._IMG.jpg files on a share must not mean 20,000 opens in one task.
+
+    Only a file with a reader is checked, by the worker that scans it.
+    """
+    (tmp_path / "._IMG_0001.jpg").write_bytes(appledouble_bytes())
+    (tmp_path / "._report.pdf").write_bytes(appledouble_bytes())
+    (tmp_path / "~$report.docx").write_bytes(office_lock_bytes())
+
+    result = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger())
+
+    assert sorted(Path(t["payload"]["file_path"]).name for t in result.new_tasks) == ["._report.pdf", "~$report.docx"]
+    assert result.counters["files_unsupported_by_type:.jpg"] == 1
+
+
+@pytest.mark.unit
+def test_enum_dir_counts_metadata_beside_its_original_of_a_type_nothing_reads(tmp_path: Path) -> None:
+    """A Finder-written stick counts each photo once, without opening the ._ file."""
+    (tmp_path / "IMG_0001.jpg").write_bytes(b"\xff\xd8\xff")
+    (tmp_path / "._IMG_0001.jpg").write_bytes(appledouble_bytes())
+    (tmp_path / "Photos").mkdir()
+    (tmp_path / "._Photos").write_bytes(appledouble_bytes())
+    (tmp_path / "._orphan.jpg").write_bytes(appledouble_bytes())
+
+    result = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger())
+
+    assert result.counters["files_macos_metadata"] == 2
+    assert result.counters["files_found"] == 2, "found and done in one step, so the progress bar adds up"
+    assert result.counters["files_unsupported_by_type:.jpg"] == 2, "the photo, and the ._ file with no original"
+    assert [Path(t["payload"]["path"]).name for t in result.new_tasks] == ["Photos"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("name", "ext", "content", "counter"),
+    [
+        ("._report.pdf", ".pdf", appledouble_bytes(), "files_macos_metadata"),
+        ("~$report.docx", ".docx", office_lock_bytes(), "files_office_lock"),
+        ("~$budget.xlsx", ".xlsx", office_lock_bytes(), "files_office_lock"),
+    ],
+    ids=["appledouble", "word-lock", "excel-lock"],
+)
+def test_scan_file_skips_macos_metadata_and_office_lock_files_by_design(
+    tmp_path: Path, name: str, ext: str, content: bytes, counter: str
+) -> None:
+    """Counted under "Skipped by design", not as a failure: they hold none of the user's content."""
+    path = tmp_path / name
+    path.write_bytes(content)
+    result = handle_scan_file(_scan_file_task(path, ext=ext), _make_ctx(tmp_path), _logger())
+
+    assert result.status == "ok"
+    assert result.error_message is None
+    assert result.counters == {counter: 1, "bytes_not_scanned": len(content)}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("name", "ext", "content"),
+    [
+        ("._notes.txt", ".txt", b"card 4111111111111111\n"),
+        ("~$x.xlsx", ".xlsx", xlsx_bytes("4111111111111111")),
+    ],
+    ids=["text", "workbook"],
+)
+def test_scan_file_scans_user_files_named_like_macos_metadata_or_lock_files(
+    tmp_path: Path, name: str, ext: str, content: bytes
+) -> None:
+    path = tmp_path / name
+    path.write_bytes(content)
+
+    result = handle_scan_file(_scan_file_task(path, ext=ext), _make_ctx(tmp_path, data_handlers=["pan"]), _logger())
+
+    assert result.counters["files_scanned"] == 1
+    assert result.findings
 
 
 def _junction_to(monkeypatch: pytest.MonkeyPatch, junction: Path, target: Path) -> None:

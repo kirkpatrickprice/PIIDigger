@@ -18,6 +18,8 @@ from piidigger.orchestration.counters import (
     BYTES_DONE,
     DIRS_DONE,
     FILES_DONE,
+    FILES_MACOS_METADATA,
+    FILES_OFFICE_LOCK,
     RESULTS_BY_HANDLER,
     UNSUPPORTED_BY_TYPE,
     unsupported_tally_text,
@@ -527,12 +529,21 @@ class ProgressDisplay:
         return rows
 
     def _skipped_by_design_rows(self) -> list[str]:
-        """Rows for what PIIDigger has no reader for, or was told to leave out."""
+        """Rows for what PIIDigger has no reader for, was told to leave out, or found to hold none of the user's content."""
         rows = []
         if files := sum(self._by_prefix(UNSUPPORTED_BY_TYPE).values()):
             rows.append(_row(files, f"{_plural(files, 'file', 'files')} of unsupported types"))
         if members := self._counters.get("archive_members_unsupported", 0):
             rows.append(_row(members, f"archive {_plural(members, 'member', 'members')} of unsupported types"))
+        if metadata := self._counters.get(FILES_MACOS_METADATA, 0):
+            rows.append(
+                _row(
+                    metadata,
+                    f"macOS metadata {_plural(metadata, 'file', 'files')} (AppleDouble), on disk or in archives",
+                )
+            )
+        if locks := self._counters.get(FILES_OFFICE_LOCK, 0):
+            rows.append(_row(locks, f"Office lock {_plural(locks, 'file', 'files')}, on disk or in archives"))
         return rows
 
     def summary_lines(self, *, for_log: bool = False) -> list[tuple[int, str]]:

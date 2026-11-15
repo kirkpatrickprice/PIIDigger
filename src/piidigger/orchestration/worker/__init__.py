@@ -5,6 +5,7 @@ from piidigger.orchestration.worker._loop import (
     broadcast_shutdown,
     worker_loop,
 )
+from piidigger.orchestration.worker._not_content import not_content_reason, original_beside
 from piidigger.orchestration.worker._scan_file import handle_scan_file
 
 __all__ = [
@@ -12,6 +13,8 @@ __all__ = [
     "configured_archive_type",
     "handle_enum_dir",
     "handle_scan_file",
+    "not_content_reason",
+    "original_beside",
     "resolve_exclude_dirs",
     "worker_loop",
 ]

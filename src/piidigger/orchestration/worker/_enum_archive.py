@@ -11,10 +11,18 @@ from typing import Any
 
 from piidigger.archivehandlers import HANDLER_REGISTRY, get_handler
 from piidigger.exceptions import ArchivePartlyReadError, ArchiveReadError
+from piidigger.models.archive import MemberInfo
 from piidigger.models.payloads import EnumArchiveMembersPayload
 from piidigger.models.tasks import Task, TaskResult, TaskType
 from piidigger.orchestration.context import WorkerContext
-from piidigger.orchestration.counters import type_tally_text
+from piidigger.orchestration.counters import FILES_MACOS_METADATA, type_tally_text
+from piidigger.orchestration.worker._not_content import (
+    appledouble_original,
+    comparable_name,
+    in_macos_folder,
+    not_content_counters,
+    not_content_reason,
+)
 from piidigger.orchestration.worker._reporter import ProgressReporter
 
 # Extensions of archive formats we recognise as nested archives (skip for now).
@@ -23,14 +31,13 @@ _NESTED_ARCHIVE_EXTS: frozenset[str] = frozenset(f".{k}" for k in HANDLER_REGIST
 # A member name that starts with a Windows drive letter ("C:", "c:/...").
 _DRIVE_PREFIX: re.Pattern[str] = re.compile(r"^[A-Za-z]:")
 
+# How many metadata members of one accepted original are not charged to
+# max_members.  A real archive has at most two: "._name" beside it, and one
+# under "__MACOSX/".  The rides go to the first ones accepted, in archive order.
+_FREE_RIDES_PER_ORIGINAL: int = 2
+
 # How many member names a skip report lists before "and N more".
 _EXAMPLE_NAMES: int = 3
-
-# macOS metadata: AppleDouble files named "._<original>", binary and never the
-# user's content.  Finder's zips keep them in a top-level folder of this name, and
-# tar stores them beside the original.
-_MACOS_FOLDER: str = "__MACOSX"
-_APPLEDOUBLE_PREFIX: str = "._"
 
 
 @dataclass(slots=True)
@@ -65,26 +72,6 @@ class _SkipTally:
         logger.log(
             self.level, "archive %s: %d member(s) not scanned: %s (%s)", archive_path, self.count, self.reason, names
         )
-
-
-def _comparable_name(name: str) -> str:
-    """A member name in the form macOS metadata and its original are compared in."""
-    return name.replace("\\", "/").removeprefix("./")
-
-
-def _is_macos_metadata(parts: list[str], names: set[str]) -> bool:
-    """Return True only for the shapes macOS writes, so a user's file with a similar name is still scanned.
-
-    parts is the member's name split into path components; names is every member
-    name in the archive.  Both come from _comparable_name(), since "tar -C dir ."
-    stores "./a" and some tools store "a", and an archive may hold one of each.
-    """
-    if not parts[-1].startswith(_APPLEDOUBLE_PREFIX):
-        return False
-    if parts[0] == _MACOS_FOLDER:
-        return True
-    original = parts[-1].removeprefix(_APPLEDOUBLE_PREFIX)
-    return "/".join([*parts[:-1], original]) in names
 
 
 def batch_count(n_members: int, total_bytes: int, n_workers: int, max_batch_bytes: int) -> int:
@@ -130,22 +117,35 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
     Checks applied per member (in order):
       1. Path traversal (../ or absolute), whatever the member's type: it is a
          sign of a hostile archive, so it counts as unsafe
-      2. macOS metadata (see _is_macos_metadata()), which is not counted
-      3. Nested archive (deferred — skipped in milestone 1)
-      4. include_exts and a file handler for the extension (case-insensitive),
+      2. Nested archive (deferred — skipped in milestone 1)
+      3. include_exts and a file handler for the extension (case-insensitive),
          by the same rule as files on disk; see filehandlers.select_handler()
-      5. Repeated path
-      6. Encryption flag
-      7. Individual uncompressed size limit
-      8. Compression ratio > 1000:1 (bomb heuristic)
-      9. How deep in the archive the member sits (its decompress_offset),
+      4. Repeated path
+      5. Encryption flag
+      6. Individual uncompressed size limit
+      7. Compression ratio > 1000:1 (bomb heuristic)
+      8. How deep in the archive the member sits (its decompress_offset),
          against max_decompress_depth_mb
-     10. Running total uncompressed size limit
-     11. Member count limit
+      9. Running total uncompressed size limit
+     10. Member count limit
 
-    Members that could never be scanned are filtered out by checks 2 to 4,
+    A member named "._name" whose original "name" is also in the archive is
+    macOS metadata in shape (AppleDouble).  Its name alone never decides that
+    it is skipped.  It follows its original instead:
+      - It is considered after every other member, so it can never crowd one
+        out of max_total_uncompressed_size_mb or max_members.
+      - When its type is one nothing reads (a nested archive, or no file
+        handler), it is counted as macOS metadata, not as an unsupported or
+        nested member.  Its original has the same type, so nothing readable is
+        lost; the name decides only which count it goes in.
+      - Otherwise it goes through checks 2 to 10 like any other member, and is
+        not charged to max_members when its original was accepted.  The batch
+        scan then checks its content once it is extracted (see
+        _not_content.py), so a user's own "._notes.txt" is still read.
+
+    Members that could never be scanned are filtered out by checks 2 and 3,
     before the limits.  So they do not use up the member count or the size
-    budget, and cannot crowd out scannable members later in the archive.  Check 9
+    budget, and cannot crowd out scannable members later in the archive.  Check 8
     is the exception by design: unscannable members stored ahead of a member
     still have to be decompressed to reach it.  The member count comes last,
     so it counts only members that would otherwise be scanned.
@@ -187,6 +187,18 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             worker_pid=os.getpid(),
         )
 
+    # An archive on disk can itself be macOS metadata (._backup.zip beside
+    # backup.zip), which no archive handler can list.
+    if (reason := not_content_reason(archive_path)) is not None:
+        logger.info("skipping %s: %s", archive_path, reason)
+        return TaskResult(
+            task_id=task.task_id,
+            task_type=task.task_type,
+            status="ok",
+            counters=not_content_counters(reason, None),
+            worker_pid=os.getpid(),
+        )
+
     reporter = ProgressReporter(ctx.result_queue.put, task.task_id)
     read_error: str | None = None
     try:
@@ -213,12 +225,10 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
     max_depth_bytes = arc_cfg.max_decompress_depth_mb * 1024 * 1024
     total_mb = arc_cfg.max_total_uncompressed_size_mb
     total_uncompressed: int = 0
-    accepted: list[tuple[str, int]] = []
     seen: set[str] = set()
     not_selected: Counter[str] = Counter()
 
     traversal = _SkipTally(logging.WARNING, "path traversal rejected", "archive_members_unsafe")
-    macos = _SkipTally(logging.DEBUG, "macOS metadata")
     nested = _SkipTally(
         logging.INFO, "nested archive (nested archives are deferred to a future milestone)", "archive_members_nested"
     )
@@ -247,94 +257,142 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
     over_count = _SkipTally(
         logging.WARNING, f"max_members ({arc_cfg.max_members:,}) reached", "archive_members_limited"
     )
-    tallies = [traversal, macos, nested, repeated, encrypted, oversize, bomb, too_deep, over_total, over_count]
+    tallies = [traversal, nested, repeated, encrypted, oversize, bomb, too_deep, over_total, over_count]
 
-    member_names = {_comparable_name(member.name) for member in member_list}
+    macos = _SkipTally(logging.INFO, "macOS metadata, of a type nothing reads", FILES_MACOS_METADATA)
+    tallies.append(macos)
 
-    for member in member_list:
+    # A "._name" member is macOS metadata in shape when its original "name" is
+    # in the archive, or when it sits in Finder's top-level "__MACOSX/" folder
+    # (see appledouble_original()).  It follows its original: it is considered
+    # only after every other member, so it can never crowd one out, and it is
+    # not charged to max_members when its original was accepted.  wanted holds
+    # the names the "._" members point at, and originals those of them that are
+    # members (a file or a folder entry).  Both stay empty in an archive with no
+    # "._" member, so they never grow with the archive alone.
+    wanted = {
+        original
+        for member in member_list
+        if (original := appledouble_original(comparable_name(member.name))) is not None
+    }
+    originals = {name for member in member_list if (name := comparable_name(member.name).rstrip("/")) in wanted}
+    outcomes: dict[str, bool] = {}  # each wanted original: whether any copy of it was accepted
+    pending: list[tuple[int, MemberInfo, str]] = []
+    accepted_at: list[tuple[int, str, int]] = []
+    counted = 0  # members charged to max_members
+
+    def consider(index: int, member: MemberInfo, *, metadata: bool, charged: bool) -> bool:
+        """Apply checks 2 to 10 to one member, and return whether it is accepted.
+
+        A metadata member of a type nothing reads (check 2 or 3) is counted as
+        macOS metadata: nothing could read it anyway, so its name decides only
+        which count it goes in.  Any other reason it is not read is reported
+        under that reason, since it might be the user's own file.
+        """
+        nonlocal total_uncompressed, counted, files_found, bytes_found
         member_name = member.name
-
-        # Skip directory entries
-        if member.is_dir:
-            continue
-
         uncompressed_size = member.uncompressed_size
         compressed_size = member.compressed_size
         ext = file_ext(member_name)
 
-        # 1. Path traversal.  Normalise backslashes first: on Windows a name
-        # like "\x\y.txt" is rooted at the drive, and "C:x.txt" names a drive.
-        normalized = member_name.replace("\\", "/")
-        parts = normalized.split("/")
-        if ".." in parts or normalized.startswith("/") or _DRIVE_PREFIX.match(normalized):
-            traversal.add(member_name)
-            continue
+        def reject(tally: _SkipTally) -> bool:
+            tally.add(member_name)
+            return False
 
-        # 2. macOS metadata.  After the traversal check, so a hostile name
-        # cannot hide behind this folder name.
-        if _is_macos_metadata(_comparable_name(member_name).split("/"), member_names):
-            macos.add(member_name)
-            continue
-
-        # 3. Nested archive — deferred to a future milestone
+        # 2. Nested archive — deferred to a future milestone
         if ext.lower() in _NESTED_ARCHIVE_EXTS:
-            nested.add(member_name)
-            continue
+            return reject(macos if metadata else nested)
 
-        # 4. include_exts / include_mime, and a handler to read it with — the
+        # 3. include_exts / include_mime, and a handler to read it with — the
         # same rule handle_enum_dir applies to files on disk.  Members have no
         # detected MIME type, so only their extension can qualify them.
         if select_handler(ext, None, ctx.config.include_exts, ctx.config.include_mime) is None:
+            if metadata:
+                return reject(macos)
             not_selected[ext.lower() or "(no extension)"] += 1
-            continue
+            return False
 
-        # 5. A batch names its members by path, so only the first copy of a
+        # 4. A batch names its members by path, so only the first copy of a
         # path is considered.
         if member_name in seen:
-            repeated.add(member_name)
-            continue
+            return reject(repeated)
         seen.add(member_name)
 
-        # 6. Encryption
+        # 5. Encryption
         if member.is_encrypted:
-            encrypted.add(member_name)
-            continue
+            return reject(encrypted)
 
-        # 7. Individual size limit
+        # 6. Individual size limit
         if uncompressed_size > max_member_bytes:
-            oversize.add(member_name)
-            continue
+            return reject(oversize)
 
-        # 8. Compression ratio bomb heuristic
+        # 7. Compression ratio bomb heuristic
         if compressed_size > 0 and uncompressed_size > compressed_size * 1000:
-            bomb.add(member_name)
-            continue
+            return reject(bomb)
 
-        # 9. How deep the member sits: in a compressed tar or solid 7z,
+        # 8. How deep the member sits: in a compressed tar or solid 7z,
         # reaching it means decompressing every byte stored before it, skipped
         # members included.  This limit controls time, where the running total
         # below controls how much is scanned.  The member's own size has its own
-        # limit, in check 7.
+        # limit, in check 6.
         if member.decompress_offset > max_depth_bytes:
-            too_deep.add(member_name)
-            continue
+            return reject(too_deep)
 
-        # 10. Running total size limit, over scannable members only.
+        # 9. Running total size limit, over scannable members only.
         candidate_total = total_uncompressed + uncompressed_size
         if candidate_total > max_total_bytes:
-            over_total.add(member_name)
-            continue
+            return reject(over_total)
 
-        # 11. Member count limit, last, so it counts only members that would
-        # otherwise be scanned.
-        if files_found >= arc_cfg.max_members:
-            over_count.add(member_name)
-            continue
+        # 10. Member count limit, last, so it counts only members that would
+        # otherwise be scanned.  Up to two metadata members per accepted
+        # original are not charged (see the loop below).
+        if charged and counted >= arc_cfg.max_members:
+            return reject(over_count)
 
         total_uncompressed = candidate_total
-        accepted.append((member_name, uncompressed_size))
+        accepted_at.append((index, member_name, uncompressed_size))
+        counted += charged
         files_found += 1
         bytes_found += uncompressed_size
+        return True
+
+    for index, member in enumerate(member_list):
+        # Skip directory entries
+        if member.is_dir:
+            continue
+
+        # 1. Path traversal.  Normalise backslashes first: on Windows a name
+        # like "\x\y.txt" is rooted at the drive, and "C:x.txt" names a drive.
+        normalized = comparable_name(member.name)
+        parts = normalized.split("/")
+        if ".." in parts or normalized.startswith("/") or _DRIVE_PREFIX.match(normalized):
+            traversal.add(member.name)
+            continue
+
+        original = appledouble_original(normalized)
+        if original is not None and (original in originals or in_macos_folder(normalized)):
+            pending.append((index, member, original))
+            continue
+        was_accepted = consider(index, member, metadata=False, charged=True)
+        if normalized in wanted:
+            # Accepted if any spelling of it was ("a.txt" encrypted, "./a.txt" not).
+            outcomes[normalized] = outcomes.get(normalized, False) or was_accepted
+
+    # A real original has at most two metadata members: "._name" beside it,
+    # and one under "__MACOSX/".  Only that many ride free, the first ones
+    # accepted in archive order.  Any more are charged like any member, so a
+    # hostile archive cannot push work past max_members with other spellings
+    # of the same names ("./._a", ".\\._a").  In an unusual archive that holds
+    # two such spellings, the "__MACOSX/" member may be charged; it is still
+    # read, or reported under its own reason.  A ride is used up only by a
+    # member that is accepted, so one rejected for its own size costs nothing.
+    free_rides: Counter[str] = Counter()
+    for index, member, original in pending:
+        free = outcomes.get(original, False) and free_rides[original] < _FREE_RIDES_PER_ORIGINAL
+        if consider(index, member, metadata=True, charged=not free) and free:
+            free_rides[original] += 1
+
+    accepted = [(name, size) for _, name, size in sorted(accepted_at)]
 
     if not_selected:
         # One line per archive rather than one per member: an archive of
@@ -378,7 +436,8 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
         new_tasks=new_tasks,
         counters={
             "archives_opened": 1,
-            "files_found": files_found,
+            # Metadata counted by name is found and done in one step.
+            "files_found": files_found + macos.count,
             "bytes_found": bytes_found,
             **skip_counters,
         },

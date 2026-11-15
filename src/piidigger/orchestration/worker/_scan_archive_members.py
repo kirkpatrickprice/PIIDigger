@@ -16,6 +16,7 @@ from piidigger.orchestration.counters import result_counters
 from piidigger.orchestration.secure_delete import secure_delete
 from piidigger.orchestration.sources import FilesystemItem
 from piidigger.orchestration.worker._content import scan_content
+from piidigger.orchestration.worker._not_content import member_basename, not_content_counters, not_content_reason
 from piidigger.orchestration.worker._reporter import ProgressReporter
 from piidigger.protocols import DataHandler
 
@@ -110,6 +111,19 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             # archive handler bug that mapped a member name onto a host path
             # would otherwise wipe that host file.
             failed(member, f"extracted path {path} is outside the task folder")
+            return
+        # macOS metadata and Office lock files that enumeration could not tell
+        # from their names alone.  Checked before any reader opens the file, and
+        # counted under "Skipped by design", as on disk.
+        if (reason := not_content_reason(path, member_basename(member))) is not None:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            discard(member, path)
+            logger.info("skipping archive member %s::%s: %s", payload.archive_path, member, reason)
+            reported.add(member)
+            reporter.item_done(member, [], not_content_counters(reason, size))
             return
         try:
             findings, counters, unread_reason = _scan_member(

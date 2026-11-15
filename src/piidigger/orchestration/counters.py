@@ -13,10 +13,22 @@ from typing import Any
 
 from piidigger.orchestration.escaping import utf8_escaped
 
+# Files that hold none of the user's content, skipped unread by design: see
+# orchestration/worker/_not_content.py.
+FILES_MACOS_METADATA: str = "files_macos_metadata"
+FILES_OFFICE_LOCK: str = "files_office_lock"
+
 # What each progress bar counts as finished.
 DIRS_DONE: tuple[str, ...] = ("dirs_scanned", "dirs_not_scanned")
 # An archive counts as a file found, but only its members are scanned as files.
-FILES_DONE: tuple[str, ...] = ("files_scanned", "files_unreadable", "files_not_scanned", "archives_opened")
+FILES_DONE: tuple[str, ...] = (
+    "files_scanned",
+    "files_unreadable",
+    "files_not_scanned",
+    "archives_opened",
+    FILES_MACOS_METADATA,
+    FILES_OFFICE_LOCK,
+)
 BYTES_DONE: tuple[str, ...] = ("bytes_scanned", "bytes_not_scanned")
 
 # Prefixes of counters with one key per kind, so a new data handler or file type

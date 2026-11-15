@@ -14,7 +14,7 @@ from piidigger.filehandlers.plaintext import handler as plaintext_handler
 from piidigger.getencoding import detect_file_encoding
 from piidigger.getmime import get_mime
 from piidigger.models.config import Config
-from piidigger.orchestration.worker import configured_archive_type
+from piidigger.orchestration.worker import configured_archive_type, not_content_reason, original_beside
 
 
 @click.group(name="inspect")
@@ -49,6 +49,14 @@ def _not_scanned_reason(name: str, ext: str, mime: str | None, config: Config) -
     return f"its extension is not recognized and include_mime does not list {mime}"
 
 
+def _sibling_names(file_path: Path) -> set[str]:
+    """The names in file_path's folder, as the scan's folder listing sees them."""
+    try:
+        return {entry.name for entry in file_path.parent.iterdir()}
+    except OSError:
+        return set()
+
+
 @inspect_group.command(name="file")
 @click.argument("file_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
@@ -77,14 +85,20 @@ def inspect_file(file_path: Path, config_path: Path | None) -> None:
         mime = get_mime(str(file_path))
         handler = select_handler(ext, mime, config.include_exts, config.include_mime)
         archive_type = configured_archive_type(file_path.name, config)
-        reads_as_text = archive_type is None and handler is plaintext_handler
+        # The scan checks only a file it would open: an archive, or a file with a reader.
+        not_content = not_content_reason(file_path) if archive_type is not None or handler is not None else None
+        reads_as_text = not_content is None and archive_type is None and handler is plaintext_handler
         encoding = detect_file_encoding(file_path) if reads_as_text else None
         is_empty = file_path.stat().st_size == 0
     except OSError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    if archive_type is not None:
+    if not_content is not None:
+        outcome = f"Not scanned: it is {not_content}"
+    elif archive_type is not None:
         outcome = f"Scanned: members are read from this {archive_type} archive"
+    elif handler is None and (original := original_beside(file_path.name, _sibling_names(file_path))) is not None:
+        outcome = f"Not scanned: it is macOS metadata for {original}, of a type nothing reads"
     elif handler is None:
         outcome = f"Not scanned: {_not_scanned_reason(file_path.name, ext, mime, config)}"
     elif reads_as_text and not encoding and not is_empty:

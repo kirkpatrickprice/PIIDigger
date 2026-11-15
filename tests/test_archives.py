@@ -46,6 +46,7 @@ from piidigger.orchestration.worker._enum_archive import handle_enum_archive_mem
 from piidigger.orchestration.worker._enum_dir import handle_enum_dir
 from piidigger.orchestration.worker._scan_archive_members import handle_scan_archive_members
 from piidigger.protocols import ScannableItem
+from tests._not_content_samples import appledouble_bytes, office_lock_bytes, xlsx_bytes
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -3033,15 +3034,18 @@ def test_enum_archive_counts_each_skip_reason_apart(tmp_path: Path, monkeypatch:
 
 
 @pytest.mark.unit
-def test_enum_archive_ignores_macos_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Finder's metadata fails to read as text and holds nothing of the user's, so it is not even counted."""
+def test_enum_archive_leaves_macos_metadata_to_the_content_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A name is not proof: a user's own ._notes.txt beside notes.txt must still be read."""
     names = ("a.txt", "__MACOSX/._a.txt", "docs/b.txt", "docs/._b.txt", "__MACOSX/docs/._c.zip")
     members = [_member(n) for n in names]
 
     result = _enum_listed(monkeypatch, tmp_path, members, _logger(), {})
 
-    assert _member_paths(result) == ["a.txt", "docs/b.txt"]
-    assert _members_skipped(result) == 0
+    assert _member_paths(result) == ["a.txt", "__MACOSX/._a.txt", "docs/b.txt", "docs/._b.txt"]
+    assert "archive_members_nested" not in result.counters, "a stub in Finder's folder is not a nested archive"
+    assert result.counters["files_macos_metadata"] == 1
 
 
 @pytest.mark.unit
@@ -3118,19 +3122,6 @@ def test_enum_archive_type_line_lists_the_top_types_only(
     line = next(r.getMessage() for r in caplog.records if "by type" in r.getMessage())
     assert line.endswith("and 5 more types")
     assert line.count("×") == 15
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("metadata", "original"),
-    [("./._a.txt", "a.txt"), ("._a.txt", "./a.txt"), ("./._a.txt", "./a.txt"), ("./docs/._a.txt", "docs/a.txt")],
-)
-def test_enum_archive_ignores_macos_metadata_with_a_leading_dot_slash(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, metadata: str, original: str
-) -> None:
-    result = _enum_listed(monkeypatch, tmp_path, [_member(metadata), _member(original)], _logger(), {})
-
-    assert _member_paths(result) == [original]
 
 
 @pytest.mark.unit
@@ -3627,6 +3618,205 @@ def test_scan_batch_member_with_nothing_read_is_not_counted_as_scanned(tmp_path:
     assert outcome.done[0].counters["tasks_failed"] == 1
     assert "files_scanned" not in outcome.done[0].counters
     assert (outcome.done[0].error_message or "").startswith("PDF could not be read: ")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("archive_type", _FORMATS)
+def test_scan_batch_skips_macos_metadata_and_lock_files_enumeration_let_through(
+    tmp_path: Path, archive_type: str
+) -> None:
+    """Without its original beside it or a __MACOSX folder, only the content tells AppleDouble apart."""
+    members = {
+        "docs/._report.pdf": appledouble_bytes(),
+        "docs/~$report.docx": office_lock_bytes(),
+        "docs/._notes.txt": b"card 4111111111111111\n",
+        "docs/~$x.xlsx": xlsx_bytes("4111111111111111"),
+    }
+    archive = _build_archive(tmp_path, archive_type, members)
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+    enumerated = handle_enum_archive_members(_enum_archive_task(archive, archive_type=archive_type), ctx, _logger())
+    assert sorted(_member_paths(enumerated)) == sorted(members), "enumeration cannot tell these apart by name"
+    task = _scan_archive_task(archive, *members, archive_type=archive_type)
+
+    outcome = _scan(task, ctx)
+
+    assert outcome.status == "ok"
+    done = {p.item: p for p in outcome.done}
+    assert done.keys() == members.keys()
+    for skipped, counter in (
+        ("docs/._report.pdf", "files_macos_metadata"),
+        ("docs/~$report.docx", "files_office_lock"),
+    ):
+        assert done[skipped].counters == {counter: 1, "bytes_not_scanned": len(members[skipped])}
+        assert done[skipped].error_message is None, "skipped by design, not a failure"
+    assert sorted(f["source_member_path"] for f in outcome.findings) == ["docs/._notes.txt", "docs/~$x.xlsx"]
+    assert outcome.counters["files_scanned"] == 2
+    assert "tasks_failed" not in outcome.counters
+    assert not [p for p in ctx.task_workspace(task.task_id).rglob("*") if p.is_file()]
+
+
+@pytest.mark.unit
+def test_enum_archive_skips_an_archive_on_disk_that_is_macos_metadata(tmp_path: Path) -> None:
+    """A ._backup.zip beside backup.zip on a macOS-written stick is not an archive at all."""
+    sidecar = tmp_path / "._backup.zip"
+    sidecar.write_bytes(appledouble_bytes())
+
+    result = handle_enum_archive_members(_enum_archive_task(sidecar), _make_ctx(tmp_path), _logger())
+
+    assert result.status == "ok"
+    assert result.counters == {"files_macos_metadata": 1}
+
+
+@pytest.mark.unit
+def test_enum_archive_counts_metadata_of_a_type_nothing_reads_as_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Finder zip of photos counts each photo once, and a ._backup.zip stub is not a nested archive."""
+    names = ["pics/a.jpg", "pics/b.zip", "__MACOSX/pics/._a.jpg", "__MACOSX/pics/._b.zip"]
+
+    result = _enum_listed(monkeypatch, tmp_path, [_member(n) for n in names], _logger(), {})
+
+    assert _member_paths(result) == []
+    assert result.counters["archive_members_unsupported"] == 1
+    assert result.counters["archive_members_nested"] == 1
+    assert result.counters["files_macos_metadata"] == 2
+    assert result.counters["files_found"] == 2, "found and done in one step, so the progress bar adds up"
+
+
+@pytest.mark.unit
+def test_enum_archive_metadata_never_crowds_out_real_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Metadata riding with an accepted original is not charged to max_members, and stays in archive order."""
+    names = ["._a.txt", "a.txt", "b.txt", "__MACOSX/._b.txt"]
+
+    result = _enum_listed(monkeypatch, tmp_path, [_member(n) for n in names], _logger(), {"max_members": 2})
+
+    assert _member_paths(result) == names
+    assert "archive_members_limited" not in result.counters
+
+
+@pytest.mark.unit
+def test_enum_archive_metadata_of_a_rejected_original_is_charged_like_any_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Otherwise a hostile archive could pair a million originals over the limit with a million ._ members."""
+    names = ["x.txt", "a.txt", "._a.txt"]
+
+    result = _enum_listed(monkeypatch, tmp_path, [_member(n) for n in names], _logger(), {"max_members": 1})
+
+    assert _member_paths(result) == ["x.txt"]
+    assert result.counters["archive_members_limited"] == 2, "an unread ._ file with a reader might be the user's"
+
+
+@pytest.mark.unit
+def test_enum_archive_metadata_is_considered_after_the_other_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under the total size limit, an original is never lost to the metadata stored before it."""
+    names = ["._a.txt", "a.txt"]
+    members = [_member(n, size=600 * 1024) for n in names]
+
+    result = _enum_listed(monkeypatch, tmp_path, members, _logger(), {"max_total_uncompressed_size_mb": 1})
+
+    assert _member_paths(result) == ["a.txt"]
+    assert result.counters["archive_members_over_total"] == 1, "unread, and it might be the user's own file"
+
+
+@pytest.mark.unit
+def test_enum_archive_lets_only_two_metadata_members_per_original_ride_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every spelling of one name maps to the same original; the rest are charged, so max_members holds."""
+    names = ["a.txt", "._a.txt", "__MACOSX/._a.txt", "./._a.txt", ".\\._a.txt", "./__MACOSX/._a.txt"]
+
+    result = _enum_listed(monkeypatch, tmp_path, [_member(n) for n in names], _logger(), {"max_members": 1})
+
+    assert _member_paths(result) == ["a.txt", "._a.txt", "__MACOSX/._a.txt"]
+    assert result.counters["archive_members_limited"] == 3
+
+
+@pytest.mark.unit
+def test_enum_archive_a_rejected_metadata_member_does_not_use_up_a_free_ride(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    members = [
+        _member("a.txt"),
+        _member("._a.txt", size=200 * 1024 * 1024),
+        _member("./._a.txt"),
+        _member("__MACOSX/._a.txt"),
+    ]
+    archives = {"max_members": 1, "max_member_uncompressed_size_mb": 100}
+
+    result = _enum_listed(monkeypatch, tmp_path, members, _logger(), archives)
+
+    assert _member_paths(result) == ["a.txt", "./._a.txt", "__MACOSX/._a.txt"]
+    assert result.counters["archive_members_limited"] == 1, "the oversized one, under its own reason"
+
+
+@pytest.mark.unit
+def test_enum_archive_an_original_is_accepted_when_any_spelling_of_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    members = [_member("a.txt", encrypted=True), _member("./a.txt"), _member("__MACOSX/._a.txt")]
+
+    result = _enum_listed(monkeypatch, tmp_path, members, _logger(), {"max_members": 1})
+
+    assert _member_paths(result) == ["./a.txt", "__MACOSX/._a.txt"]
+
+
+@pytest.mark.unit
+def test_enum_archive_finder_metadata_without_its_original_still_follows_the_rules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-zipped folder can keep __MACOSX/ after its originals are gone; it must not crowd real files out."""
+    names = ["__MACOSX/._gone.jpg", "__MACOSX/._gone.txt", "real.txt"]
+
+    result = _enum_listed(monkeypatch, tmp_path, [_member(n) for n in names], _logger(), {"max_members": 1})
+
+    assert _member_paths(result) == ["real.txt"]
+    assert result.counters["files_macos_metadata"] == 1, "the .jpg: nothing could read it"
+    assert result.counters["archive_members_limited"] == 1, "the .txt might be the user's, so it is reported"
+
+
+@pytest.mark.unit
+def test_enum_archive_a_folder_entry_is_an_original(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    folder = MemberInfo(name="docs/", uncompressed_size=0, compressed_size=0, is_dir=True, is_encrypted=False)
+
+    result = _enum_listed(monkeypatch, tmp_path, [folder, _member("._docs")], _logger(), {})
+
+    assert result.counters["files_macos_metadata"] == 1
+    assert "archive_members_unsupported" not in result.counters
+
+
+@pytest.mark.unit
+def test_enum_archive_reports_encrypted_metadata_as_encrypted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An encrypted ._ member with a reader cannot be checked by content, so it might be the user's own file."""
+    names = ["a.docx", "__MACOSX/._a.docx", "photo.jpg", "__MACOSX/._photo.jpg"]
+    members = [_member(n, encrypted=True) for n in names]
+
+    result = _enum_listed(monkeypatch, tmp_path, members, _logger(), {})
+
+    assert result.counters["archive_members_encrypted"] == 2
+    assert result.counters["files_macos_metadata"] == 1, "the .jpg: nothing could read it, encrypted or not"
+
+
+@pytest.mark.unit
+def test_finder_zip_metadata_is_skipped_by_content_and_a_look_alike_is_scanned(tmp_path: Path) -> None:
+    """Finder's layout, plus a user's own ._notes.txt beside notes.txt: only the content tells them apart."""
+    zp = tmp_path / "finder.zip"
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr("docs/report.txt", "hello")
+        zf.writestr("__MACOSX/docs/._report.txt", appledouble_bytes())
+        zf.writestr("docs/notes.txt", "nothing here")
+        zf.writestr("docs/._notes.txt", "card 4111111111111111\n")
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+
+    enumerated = handle_enum_archive_members(_enum_archive_task(zp), ctx, _logger())
+    outcome = _scan(_scan_archive_task(zp, *_member_paths(enumerated)), ctx)
+
+    assert outcome.counters["files_macos_metadata"] == 1
+    assert [f["source_member_path"] for f in outcome.findings] == ["docs/._notes.txt"]
+    assert outcome.counters["files_scanned"] == 3
+    assert "tasks_failed" not in outcome.counters
 
 
 @pytest.mark.unit

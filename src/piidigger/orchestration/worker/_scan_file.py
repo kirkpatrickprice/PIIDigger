@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from piidigger.exceptions import UndetectableEncodingError
@@ -12,6 +13,7 @@ from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.counters import result_counters
 from piidigger.orchestration.sources import FilesystemItem
 from piidigger.orchestration.worker._content import scan_content
+from piidigger.orchestration.worker._not_content import not_content_counters, not_content_reason
 from piidigger.orchestration.worker._removed import was_removed
 from piidigger.orchestration.worker._reporter import ProgressReporter
 
@@ -31,6 +33,18 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
             status="error",
             error_message=f"no file handler for ext={payload.ext!r} mime={payload.mime!r}",
             counters={"files_not_scanned": 1, "bytes_not_scanned": payload.size},
+            worker_pid=os.getpid(),
+        )
+
+    # Here rather than in the folder listing: only files with a reader are
+    # checked, and the workers do it in parallel, as for archive members.
+    if (reason := not_content_reason(Path(payload.file_path))) is not None:
+        logger.info("skipping %s: %s", payload.display_path, reason)
+        return TaskResult(
+            task_id=task.task_id,
+            task_type=task.task_type,
+            status="ok",
+            counters=not_content_counters(reason, payload.size),
             worker_pid=os.getpid(),
         )
 

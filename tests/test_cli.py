@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from piidigger.cli.main import cli
+from tests._not_content_samples import appledouble_bytes, office_lock_bytes, xlsx_bytes
 
 
 @pytest.mark.unit
@@ -274,6 +275,60 @@ def test_inspect_file_says_a_symlink_is_skipped(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "Outcome:   Not scanned: symbolic links are skipped" in result.output
+
+
+@pytest.mark.unit
+def test_inspect_file_agrees_with_the_scan_on_macos_metadata_and_lock_files(tmp_path: Path) -> None:
+    default = _default_config(tmp_path)
+
+    assert "Outcome:   Not scanned: it is macOS metadata (an AppleDouble file)" in _inspect_file(
+        tmp_path, "._report.pdf", appledouble_bytes(), *default
+    )
+    assert "Outcome:   Not scanned: it is an Office lock file" in _inspect_file(
+        tmp_path, "~$report.docx", office_lock_bytes(), *default
+    )
+    assert "Outcome:   Scanned with" in _inspect_file(tmp_path, "._notes.txt", b"card 4111111111111111\n", *default)
+    assert "Outcome:   Scanned with" in _inspect_file(tmp_path, "~$x.xlsx", xlsx_bytes("hello"), *default)
+    assert "Outcome:   Not scanned: it is macOS metadata (an AppleDouble file)" in _inspect_file(
+        tmp_path, "._backup.zip", appledouble_bytes(), *default
+    )
+
+
+@pytest.mark.unit
+def test_inspect_file_checks_content_only_where_the_scan_does(tmp_path: Path) -> None:
+    """The scan never opens a file it has no reader for, so the type, or include_exts, is the reason given."""
+    default = _default_config(tmp_path)
+    config = tmp_path / "c.toml"
+    config.write_text('include_exts = [".txt"]\n', encoding="utf-8")
+
+    assert "Outcome:   Not scanned: its extension is not recognized" in _inspect_file(
+        tmp_path, "._photo.xyz", appledouble_bytes(), *default
+    )
+    assert "Outcome:   Not scanned: include_exts does not list .pdf" in _inspect_file(
+        tmp_path, "._report.pdf", appledouble_bytes(), "-f", str(config)
+    )
+
+
+@pytest.mark.unit
+def test_inspect_file_agrees_with_the_listing_on_metadata_beside_its_original(tmp_path: Path) -> None:
+    (tmp_path / "photo.xyz").write_bytes(b"\x00")
+
+    output = _inspect_file(tmp_path, "._photo.xyz", appledouble_bytes(), *_default_config(tmp_path))
+
+    assert "Outcome:   Not scanned: it is macOS metadata for photo.xyz, of a type nothing reads" in output
+
+
+@pytest.mark.unit
+def test_inspect_file_goes_by_the_folder_listing_as_the_scan_does(tmp_path: Path) -> None:
+    """An original that is a broken symlink is still in the listing, so the scan counts its ._ file as metadata."""
+    try:
+        (tmp_path / "photo.xyz").symlink_to(tmp_path / "missing")
+    except OSError:
+        pytest.skip("symlinks not available")
+
+    output = _inspect_file(tmp_path, "._photo.xyz", appledouble_bytes(), *_default_config(tmp_path))
+
+    assert "Outcome:   Not scanned: it is macOS metadata for photo.xyz, of a type nothing reads" in output
 
 
 @pytest.mark.unit

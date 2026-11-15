@@ -13,8 +13,9 @@ from piidigger.models.config import Config
 from piidigger.models.payloads import EnumDirPayload
 from piidigger.models.tasks import Task, TaskResult, TaskType
 from piidigger.orchestration.context import WorkerContext
-from piidigger.orchestration.counters import UNSUPPORTED_BY_TYPE
+from piidigger.orchestration.counters import FILES_MACOS_METADATA, UNSUPPORTED_BY_TYPE
 from piidigger.orchestration.worker._filesystems import is_remote_filesystem
+from piidigger.orchestration.worker._not_content import original_beside
 from piidigger.orchestration.worker._removed import was_removed
 from piidigger.orchestration.worker._reporter import ProgressReporter
 
@@ -237,6 +238,7 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
     files_found = 0
     bytes_found = 0
     unsupported: Counter[str] = Counter()
+    macos_metadata = 0
 
     try:
         entries = _list_dir(path)
@@ -302,6 +304,7 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
     # a directory of tens of thousands of files take minutes, and a listing
     # that keeps making progress must not be killed at its deadline.
     reporter = ProgressReporter(ctx.result_queue.put, task.task_id)
+    names = {entry.name for entry in entries}
     for entry in entries:
         reporter.alive()
         try:
@@ -359,6 +362,16 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
                 # include_exts / include_mime, and a handler to read it with.
                 # The same rule is applied to archive members.
                 if select_handler(ext, mime, config.include_exts, config.include_mime) is None:
+                    # "._name" beside "name" is macOS metadata in shape.  Nothing
+                    # reads its type, so it is never opened: its name decides
+                    # only that it is counted as metadata, not as a second file
+                    # of that type.  One a reader can open is checked by its
+                    # content when it is scanned (see _not_content.py).
+                    if (original := original_beside(entry.name, names)) is not None:
+                        logger.debug("skipping %s: macOS metadata for %s, of a type nothing reads", entry, original)
+                        macos_metadata += 1
+                        files_found += 1
+                        continue
                     unsupported[ext.lower() or "(no extension)"] += 1
                     continue
 
@@ -397,6 +410,7 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
             "files_found": files_found,
             "bytes_found": bytes_found,
             **{f"{UNSUPPORTED_BY_TYPE}{kind}": count for kind, count in unsupported.items()},
+            **({FILES_MACOS_METADATA: macos_metadata} if macos_metadata else {}),
         },
         worker_pid=os.getpid(),
     )

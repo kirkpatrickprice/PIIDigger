@@ -119,6 +119,8 @@ Not fully scanned. See the log for details: logs/piidigger-20261031-153257.log
 Skipped by design:
       120  files of unsupported types
    13,787  archive members of unsupported types
+       31  macOS metadata files (AppleDouble), on disk or in archives
+        1  Office lock file, on disk or in archives
 
 Results files: all 108,108 results written to every results file.
 ```
@@ -127,7 +129,7 @@ Rows with nothing to report are left out. So a clean run is just the first two l
 
 - **Scanned** counts only what was actually read.
 - **Not fully scanned** lists content that might hold PII but wasn't read. A file with an error may still have been partly read, and anything found in the part that was read stays in your results. A PDF with no extractable text opened without error but held no text, usually because its pages are scanned images. PIIDigger doesn't read text from images, so it counts these under "Scanned" and lists them here too. If this section lists rejected archive members, see [The summary says archive members were rejected](troubleshooting.md#the-summary-says-archive-members-were-rejected).
-- **Skipped by design** lists file types PIIDigger has no reader for, or that `include_exts` left out. It isn't a problem unless you expected those types to be scanned.
+- **Skipped by design** lists file types PIIDigger has no reader for, or that `include_exts` left out. It isn't a problem unless you expected those types to be scanned. It also counts files that hold none of your content, which are never read. A macOS metadata file is a `._name` file that macOS writes beside a file `name` on a USB drive or network share, or puts in a zip made by Finder. An Office lock file is the `~$name.docx` file that Word, Excel and PowerPoint write while a document is open. It holds only the name of the person who opened it. PIIDigger recognizes both by their content, not their names, so your own file named `._notes.txt` or `~$budget.xlsx` is still scanned. The one exception is a `._name` file of a type nothing reads, beside `name` or in a Finder zip's `__MACOSX/` folder, such as `._photo.jpg` beside `photo.jpg`. It is counted as macOS metadata without being opened, because nothing could read it anyway. Files skipped by their content are logged at INFO, with the words `macOS metadata` or `Office lock file`. Those counted by their name are logged at DEBUG on disk, and in one INFO line per archive. `piidigger inspect file` reports the same outcome as a scan.
 - **Results files** checks each results file against the number of results found. If any file received fewer than the total, this line becomes a "Results files incomplete" block instead. It lists every file with its count and what it is missing:
 
   ```text

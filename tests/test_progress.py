@@ -325,6 +325,8 @@ def _laptop_run(monkeypatch: pytest.MonkeyPatch) -> ProgressDisplay:
             "archive_members_encrypted": 5,
             "archive_members_nested": 7,
             "archive_members_unsupported": 13_787,
+            "files_macos_metadata": 31,
+            "files_office_lock": 1,
             "files_unsupported_by_type:.doc": 114,
             "files_unsupported_by_type:.rtf": 6,
         }
@@ -351,6 +353,8 @@ def test_summary_block_on_screen(monkeypatch: pytest.MonkeyPatch) -> None:
         "Skipped by design:",
         "      120  files of unsupported types",
         "   13,787  archive members of unsupported types",
+        "       31  macOS metadata files (AppleDouble), on disk or in archives",
+        "        1  Office lock file, on disk or in archives",
     ]
 
 
@@ -377,6 +381,7 @@ def test_summary_levels_tell_a_problem_from_a_design_choice(monkeypatch: pytest.
         == logging.WARNING
     )
     assert levels["   13,787  archive members of unsupported types"] == logging.INFO
+    assert levels["       31  macOS metadata files (AppleDouble), on disk or in archives"] == logging.INFO
 
 
 @pytest.mark.unit
