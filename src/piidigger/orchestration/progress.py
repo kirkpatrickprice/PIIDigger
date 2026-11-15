@@ -75,8 +75,9 @@ class IncompleteWork:
 
     Each field counts files, folders or archive members:
 
-    * failed: the handler returned an error, for example access denied or an
-      unreadable file.
+    * failed: the handler returned an error, for example an unreadable file.
+    * access_denied: the OS refused to list a folder or open a file.  It has
+      its own summary row, because the fix is a permission, not a bug report.
     * timed_out: ran past its deadline and was stopped.
     * abandoned: crashed its worker.  A file or folder is abandoned after
       crashing on every attempt the retry budget allowed.  An archive member is
@@ -91,6 +92,7 @@ class IncompleteWork:
     """
 
     failed: int = 0
+    access_denied: int = 0
     timed_out: int = 0
     abandoned: int = 0
     over_memory: int = 0
@@ -98,7 +100,7 @@ class IncompleteWork:
 
     @property
     def total(self) -> int:
-        return self.failed + self.timed_out + self.abandoned + self.over_memory + self.unfinished
+        return self.failed + self.access_denied + self.timed_out + self.abandoned + self.over_memory + self.unfinished
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +120,10 @@ class ResultsFile:
     problem: str | None = None
 
 
+# Counters about tasks, not display values; update() keeps them apart.
+_TASK_KEYS: frozenset[str] = frozenset({"tasks_completed", "tasks_pending", "tasks_failed", "tasks_access_denied"})
+
+
 def _row(count: int, text: str) -> str:
     """One line of a summary block: the count in its own column, then what it counts."""
     return f"{count:>9,}  {text}"
@@ -131,9 +137,11 @@ def describe_incomplete(work: IncompleteWork) -> str | None:
     """A summary row for the work that did not finish and why, or None if nothing.
 
     Failed includes a file read only in part, whose findings are kept, so the row
-    does not claim that any of this was skipped outright.
+    does not claim that any of this was skipped outright.  Access denied is left
+    out: describe_access_denied() gives it a row of its own.
     """
-    if not work.total:
+    total = work.total - work.access_denied
+    if not total:
         return None
     reasons = [
         (work.failed, _plural(work.failed, "error", "errors")),
@@ -143,8 +151,16 @@ def describe_incomplete(work: IncompleteWork) -> str | None:
         (work.unfinished, "unfinished when the scan stopped"),
     ]
     detail = ", ".join(f"{n:,} {why}" for n, why in reasons if n)
-    noun = _plural(work.total, "file, folder or archive member", "files, folders or archive members")
-    return _row(work.total, f"{noun}: {detail}")
+    noun = _plural(total, "file, folder or archive member", "files, folders or archive members")
+    return _row(total, f"{noun}: {detail}")
+
+
+def describe_access_denied(work: IncompleteWork) -> str | None:
+    """A summary row for the folders and files the OS would not let the scan read, or None if none."""
+    if not (denied := work.access_denied):
+        return None
+    noun = _plural(denied, "folder or file", "folders or files")
+    return _row(denied, f"{noun} not readable: access denied")
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -198,6 +214,7 @@ class ProgressDisplay:
         # Incomplete work.  Failures arrive through update(); the rest is only
         # known once the run ends, via report_incomplete().
         self._tasks_failed: int = 0
+        self._tasks_access_denied: int = 0
         self._timed_out: int = 0
         self._abandoned: int = 0
         self._over_memory: int = 0
@@ -365,18 +382,20 @@ class ProgressDisplay:
 
     def update(self, counters: dict[str, int]) -> None:
         """Accumulate counters and refresh the display.  No-op when not a TTY."""
-        # tasks_completed and tasks_failed are cumulative; tasks_pending is a
-        # snapshot — replace, not add.  None of them belongs in self._counters:
-        # they are not display values.
+        # tasks_completed, tasks_failed and tasks_access_denied are cumulative;
+        # tasks_pending is a snapshot — replace, not add.  None of them belongs
+        # in self._counters: they are not display values.
         if "tasks_completed" in counters:
             self._tasks_completed += counters["tasks_completed"]
         if "tasks_pending" in counters:
             self._tasks_pending = counters["tasks_pending"]
         if "tasks_failed" in counters:
             self._tasks_failed += counters["tasks_failed"]
+        if "tasks_access_denied" in counters:
+            self._tasks_access_denied += counters["tasks_access_denied"]
 
         for key, val in counters.items():
-            if key not in ("tasks_completed", "tasks_pending", "tasks_failed"):
+            if key not in _TASK_KEYS:
                 self._counters[key] = self._counters.get(key, 0) + val
 
         bars = self._bars
@@ -469,6 +488,7 @@ class ProgressDisplay:
         """Everything the scan did not finish, as currently known."""
         return IncompleteWork(
             failed=self._tasks_failed,
+            access_denied=self._tasks_access_denied,
             timed_out=self._timed_out,
             abandoned=self._abandoned,
             over_memory=self._over_memory,
@@ -506,6 +526,8 @@ class ProgressDisplay:
         rows = []
         if (incomplete := describe_incomplete(self.incomplete)) is not None:
             rows.append(incomplete)
+        if (denied := describe_access_denied(self.incomplete)) is not None:
+            rows.append(denied)
         count = self._counters.get
         if unreadable := count("files_unreadable", 0):
             noun = _plural(unreadable, "file", "files")

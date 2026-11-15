@@ -14,6 +14,7 @@ from piidigger.models.payloads import EnumDirPayload
 from piidigger.models.tasks import Task, TaskResult, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.counters import FILES_MACOS_METADATA, UNSUPPORTED_BY_TYPE
+from piidigger.orchestration.worker._error_kind import error_kind_of
 from piidigger.orchestration.worker._filesystems import is_remote_filesystem
 from piidigger.orchestration.worker._not_content import original_beside
 from piidigger.orchestration.worker._removed import was_removed
@@ -259,6 +260,7 @@ def handle_enum_dir(task: Task, ctx: WorkerContext, logger: logging.Logger) -> T
             task_type=task.task_type,
             status="error",
             error_message=str(exc),
+            error_kind=error_kind_of(exc),
             counters={"dirs_not_scanned": 1},
             worker_pid=os.getpid(),
         )

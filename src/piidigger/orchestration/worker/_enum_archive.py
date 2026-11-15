@@ -16,6 +16,7 @@ from piidigger.models.payloads import EnumArchiveMembersPayload
 from piidigger.models.tasks import Task, TaskResult, TaskType
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.counters import FILES_MACOS_METADATA, type_tally_text
+from piidigger.orchestration.worker._error_kind import error_kind_of
 from piidigger.orchestration.worker._not_content import (
     appledouble_original,
     comparable_name,
@@ -216,6 +217,7 @@ def handle_enum_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             task_type=task.task_type,
             status="error",
             error_message=str(exc),
+            error_kind=error_kind_of(exc, path=archive_path),
             counters={"files_not_scanned": 1},
             worker_pid=os.getpid(),
         )

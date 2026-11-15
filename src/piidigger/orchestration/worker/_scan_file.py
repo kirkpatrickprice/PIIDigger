@@ -13,6 +13,7 @@ from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.counters import result_counters
 from piidigger.orchestration.sources import FilesystemItem
 from piidigger.orchestration.worker._content import scan_content
+from piidigger.orchestration.worker._error_kind import error_kind_of
 from piidigger.orchestration.worker._not_content import not_content_counters, not_content_reason
 from piidigger.orchestration.worker._removed import was_removed
 from piidigger.orchestration.worker._reporter import ProgressReporter
@@ -94,6 +95,7 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
             status="error",
             # With the type: str() of a KeyError is only the key, e.g. '7'.
             error_message=f"{type(exc).__name__}: {exc}",
+            error_kind=error_kind_of(exc),
             counters={"files_not_scanned": 1, "bytes_not_scanned": payload.size},
             worker_pid=os.getpid(),
         )

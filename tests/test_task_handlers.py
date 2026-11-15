@@ -571,8 +571,21 @@ def test_scan_file_permission_denied_returns_error(tmp_path: Path) -> None:
         result = handle_scan_file(_scan_file_task(f), ctx, _logger())
 
     assert result.status == "error"
+    assert result.error_kind == "access_denied"
     assert result.counters.get("files_not_scanned") == 1
     assert "files_scanned" not in result.counters, "a file that could not be opened was not scanned"
+
+
+@pytest.mark.unit
+def test_scan_file_other_errors_have_no_error_kind(tmp_path: Path) -> None:
+    f = tmp_path / "broken.txt"
+    f.write_text("content")
+
+    with unittest.mock.patch("piidigger.getencoding.open", side_effect=OSError(5, "I/O error"), create=True):
+        result = handle_scan_file(_scan_file_task(f), _make_ctx(tmp_path), _logger())
+
+    assert result.status == "error"
+    assert result.error_kind is None
 
 
 @pytest.mark.unit
@@ -1074,6 +1087,38 @@ def test_enum_dir_denied_junction_outside_the_scan_stays_a_failure(
     result = handle_enum_dir(_enum_dir_task(junction), _make_ctx(tmp_path, start_dirs=[tmp_path]), _logger())
 
     assert result.status == "error"
+    assert result.error_kind == "access_denied"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "error",
+    [
+        PermissionError(13, "Permission denied"),
+        # macOS privacy controls (no Full Disk Access): no phrase the old message match knew.
+        PermissionError(1, "Operation not permitted"),
+    ],
+)
+def test_enum_dir_denied_listing_is_access_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: PermissionError
+) -> None:
+    monkeypatch.setattr(Path, "iterdir", lambda self: (_ for _ in ()).throw(error))
+
+    result = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger())
+
+    assert result.status == "error"
+    assert result.error_kind == "access_denied"
+    assert result.counters == {"dirs_not_scanned": 1}
+
+
+@pytest.mark.unit
+def test_enum_dir_other_listing_errors_have_no_error_kind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, "iterdir", lambda self: (_ for _ in ()).throw(OSError(5, "I/O error")))
+
+    result = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger())
+
+    assert result.status == "error"
+    assert result.error_kind is None
 
 
 @pytest.mark.unit
@@ -1276,3 +1321,18 @@ def test_scan_file_counts_a_pdf_with_no_text_without_failing_it(
     assert result.counters["pdfs_no_text"] == 1
     assert result.counters["files_scanned"] == 1
     assert f"no extractable text in PDF {path}" in caplog.text
+
+
+@pytest.mark.unit
+def test_enum_dir_folder_locked_by_another_program_is_not_access_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows raises a sharing violation (WinError 32) as a PermissionError too."""
+    error = PermissionError(13, "The process cannot access the file")
+    error.winerror = 32  # type: ignore[attr-defined]
+    monkeypatch.setattr(Path, "iterdir", lambda self: (_ for _ in ()).throw(error))
+
+    result = handle_enum_dir(_enum_dir_task(tmp_path), _make_ctx(tmp_path), _logger())
+
+    assert result.status == "error"
+    assert result.error_kind is None

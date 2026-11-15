@@ -11,6 +11,7 @@ from piidigger.orchestration.progress import (
     ProgressDisplay,
     ResultsFile,
     _fmt_duration,
+    describe_access_denied,
     describe_incomplete,
 )
 
@@ -254,8 +255,19 @@ def test_incomplete_summary_is_none_when_everything_finished() -> None:
 def test_failures_are_counted_without_report_incomplete() -> None:
     """Failures arrive with results, so they are visible even if the run ends abnormally."""
     display = ProgressDisplay()
-    display.update({"tasks_failed": 1})
-    assert display.incomplete == IncompleteWork(failed=1)
+    display.update({"tasks_failed": 1, "tasks_access_denied": 2})
+    assert display.incomplete == IncompleteWork(failed=1, access_denied=2)
+    assert "tasks_access_denied" not in display._counters, "a task count, not a display value"
+
+
+@pytest.mark.unit
+def test_access_denied_has_its_own_row_and_is_not_an_error() -> None:
+    work = IncompleteWork(failed=2, access_denied=1)
+
+    assert describe_incomplete(work) == "        2  files, folders or archive members: 2 errors"
+    assert describe_access_denied(work) == "        1  folder or file not readable: access denied"
+    assert describe_incomplete(IncompleteWork(access_denied=3)) is None
+    assert describe_access_denied(IncompleteWork(failed=3)) is None
 
 
 @pytest.mark.unit
@@ -314,6 +326,7 @@ def _laptop_run(monkeypatch: pytest.MonkeyPatch) -> ProgressDisplay:
             "files_scanned": 108_826,
             "bytes_scanned": 6_871_947_673,
             "tasks_failed": 41,
+            "tasks_access_denied": 9,
             "files_unreadable": 562,
             "pdfs_no_text": 14,
             "bytes_not_scanned": 999,
@@ -343,6 +356,7 @@ def test_summary_block_on_screen(monkeypatch: pytest.MonkeyPatch) -> None:
         "",
         "Not fully scanned. See the log for details.",
         "       51  files, folders or archive members: 41 errors, 10 over the memory limit",
+        "        9  folders or files not readable: access denied",
         '      562  files not read: text encoding could not be detected (search the log for "text encoding")',
         '       14  PDFs with no extractable text (search the log for "no extractable text")',
         "   15,703  archive members rejected: 15,696 too deep to reach, 3 over the archive's total size, "

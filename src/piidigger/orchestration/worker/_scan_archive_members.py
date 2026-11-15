@@ -16,6 +16,7 @@ from piidigger.orchestration.counters import result_counters
 from piidigger.orchestration.secure_delete import secure_delete
 from piidigger.orchestration.sources import FilesystemItem
 from piidigger.orchestration.worker._content import scan_content
+from piidigger.orchestration.worker._error_kind import error_kind_of
 from piidigger.orchestration.worker._not_content import member_basename, not_content_counters, not_content_reason
 from piidigger.orchestration.worker._reporter import ProgressReporter
 from piidigger.protocols import DataHandler
@@ -169,6 +170,7 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             task_type=task.task_type,
             status="error",
             error_message=str(exc),
+            error_kind=error_kind_of(exc, path=payload.archive_path),
             worker_pid=os.getpid(),
         )
 

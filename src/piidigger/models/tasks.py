@@ -38,6 +38,11 @@ class Task(PiiDiggerModel):
     items: tuple[str, ...] = ()
 
 
+# Why a task failed, when the coordinator treats that kind of failure apart from
+# the rest.  "access_denied": the OS refused to list a folder or open a file.
+type ErrorKind = Literal["access_denied"]
+
+
 class TaskResult(PiiDiggerModel):
     task_id: str
     task_type: TaskType
@@ -46,6 +51,9 @@ class TaskResult(PiiDiggerModel):
     findings: list[dict[str, Any]] = Field(default_factory=list)
     counters: dict[str, int] = Field(default_factory=dict)
     error_message: str | None = None
+    # Set by the worker from the exception's type, so the coordinator never
+    # reads the message to tell what kind of failure it was.
+    error_kind: ErrorKind | None = None
     duration_seconds: float = Field(default=0.0, ge=0.0)
     worker_pid: int | None = None
 

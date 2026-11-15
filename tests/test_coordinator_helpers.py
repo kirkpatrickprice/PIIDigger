@@ -11,7 +11,6 @@ import pytest
 from piidigger.orchestration.coordinator import (
     _denied_path,
     _findings_summary,
-    _is_access_denied,
     _short_error,
     _truncate_path,
 )
@@ -57,30 +56,6 @@ def test_truncate_path_no_separator_falls_back() -> None:
     result = _truncate_path(path, max_len=60)
     assert len(result) == 60
     assert result.endswith("...")
-
-
-# ---------------------------------------------------------------------------
-# _is_access_denied
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "msg",
-    [
-        "Access is denied: 'C:\\secret'",
-        "Permission denied: '/etc/shadow'",
-        "[WinError 5] Access is denied",
-        "[Errno 13] Permission denied",
-    ],
-)
-def test_is_access_denied_true(msg: str) -> None:
-    assert _is_access_denied(msg)
-
-
-@pytest.mark.unit
-def test_is_access_denied_false() -> None:
-    assert not _is_access_denied("FileNotFoundError: No such file or directory")
 
 
 # ---------------------------------------------------------------------------
@@ -217,3 +192,124 @@ def test_error_line_names_a_windows_path_with_single_backslashes(caplog: pytest.
         _handle_result(result, registry, [], ProgressDisplay(), logger)
 
     assert [r.getMessage() for r in caplog.records] == [f"[scan_file] path={_WINDOWS_PATH}: boom"]
+
+
+def _error_result_log(
+    caplog: pytest.LogCaptureFixture, *, message: str, error_kind: str | None, items: tuple[str, ...] = ()
+) -> tuple[list[tuple[int, str]], dict[str, int], list[tuple[str, str]]]:
+    """Feed one failed result to _handle_result: its log lines, the summary counts, and the events.
+
+    An ENUM_DIR task, or a SCAN_ARCHIVE_MEMBERS batch of items none of which started.
+    """
+    import logging
+
+    from piidigger.models.tasks import Task, TaskResult, TaskType
+    from piidigger.orchestration.coordinator import _handle_result
+    from piidigger.orchestration.progress import ProgressDisplay
+    from piidigger.orchestration.registry import TaskRegistry
+
+    logger = logging.getLogger("tests.coordinator_helpers.error_kind")
+    registry = TaskRegistry(lambda _task: None)
+    if items:
+        task = Task(task_type=TaskType.SCAN_ARCHIVE_MEMBERS, payload={"archive_path": "/Users/x/a.zip"}, items=items)
+    else:
+        task = Task(task_type=TaskType.ENUM_DIR, payload={"path": "/Users/x/Library/Mail"})
+    registry.enqueue(task)
+    result = TaskResult(
+        task_id=task.task_id,
+        task_type=task.task_type,
+        status="error",
+        error_message=message,
+        error_kind=error_kind,  # type: ignore[arg-type]
+    )
+    progress = ProgressDisplay()
+
+    with caplog.at_level(logging.DEBUG, logger=logger.name):
+        _handle_result(result, registry, [], progress, logger)
+
+    work = progress.incomplete
+    counts = {
+        "failed": work.failed,
+        "access_denied": work.access_denied,
+        "files_not_scanned": progress._counters.get("files_not_scanned", 0),
+    }
+    return [(r.levelno, r.getMessage()) for r in caplog.records], counts, list(progress._events)
+
+
+@pytest.mark.unit
+def test_access_denied_kind_is_a_warning_counted_apart(caplog: pytest.LogCaptureFixture) -> None:
+    """macOS privacy controls fail with EPERM, whose message no phrase list matched, so it logged as an error."""
+    import logging
+
+    message = "[Errno 1] Operation not permitted: '/Users/x/Library/Mail'"
+    lines, counts, events = _error_result_log(caplog, message=message, error_kind="access_denied")
+
+    assert lines == [(logging.WARNING, f"[enum_dir] path=/Users/x/Library/Mail: {message}")]
+    assert counts == {"failed": 0, "access_denied": 1, "files_not_scanned": 0}
+    assert events == [("WARNING", "Access denied: /Users/x/Library/Mail")]
+
+
+@pytest.mark.unit
+def test_archive_batch_refused_as_a_whole_counts_once_as_access_denied(caplog: pytest.LogCaptureFixture) -> None:
+    """One log line, one count: the row's search hint must find as many lines as the row counts."""
+    import logging
+
+    message = "[Errno 13] Permission denied: '/Users/x/a.zip'"
+    lines, counts, _ = _error_result_log(caplog, message=message, error_kind="access_denied", items=("a.txt", "b.txt"))
+
+    assert [level for level, _ in lines] == [logging.WARNING]
+    assert counts == {"failed": 0, "access_denied": 1, "files_not_scanned": 2}, "its members still count as not scanned"
+
+
+@pytest.mark.unit
+def test_failure_without_a_kind_is_an_error_whatever_its_message(caplog: pytest.LogCaptureFixture) -> None:
+    """The level comes from the worker's error_kind, never from words in the message."""
+    import logging
+
+    message = "[Errno 13] Permission denied: '/Users/x/Library/Mail'"
+    lines, counts, events = _error_result_log(caplog, message=message, error_kind=None)
+
+    assert [level for level, _ in lines] == [logging.ERROR]
+    assert counts == {"failed": 1, "access_denied": 0, "files_not_scanned": 0}
+    assert events[0][0] == "ERROR"
+
+
+@pytest.mark.unit
+def test_archive_batch_refused_mid_member_is_not_requeued(caplog: pytest.LogCaptureFixture) -> None:
+    """Re-queuing it would count the member in progress as an error, then the batch again as access denied."""
+    import logging
+
+    from piidigger.models.tasks import Task, TaskResult, TaskType
+    from piidigger.orchestration.coordinator import _handle_result
+    from piidigger.orchestration.progress import ProgressDisplay
+    from piidigger.orchestration.registry import TaskRegistry
+
+    logger = logging.getLogger("tests.coordinator_helpers.denied_batch")
+    dispatched: list[Task] = []
+    registry = TaskRegistry(dispatched.append)
+    task = Task(task_type=TaskType.SCAN_ARCHIVE_MEMBERS, payload={"archive_path": "/x/a.zip"}, items=("a", "b", "c"))
+    registry.enqueue(task)
+    registry.record_start(task.task_id, 42)
+    registry.record_progress(task.task_id, 42, "item_started", "a")
+    message = "[Errno 13] Permission denied: '/x/a.zip'"
+    result = TaskResult(
+        task_id=task.task_id,
+        task_type=task.task_type,
+        status="error",
+        error_message=message,
+        error_kind="access_denied",
+        worker_pid=42,
+    )
+    progress = ProgressDisplay()
+
+    with caplog.at_level(logging.DEBUG, logger=logger.name):
+        _handle_result(result, registry, [], progress, logger)
+
+    [record] = caplog.records
+    assert record.levelno == logging.WARNING
+    assert record.getMessage().startswith("[scan_archive_members] path=/x/a.zip: "), "the archive, not the member"
+    assert dispatched == [task], "not re-queued"
+    assert task.task_id not in registry
+    work = progress.incomplete
+    assert (work.failed, work.access_denied) == (0, 1)
+    assert progress._counters["files_not_scanned"] == 3

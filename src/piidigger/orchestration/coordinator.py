@@ -60,8 +60,6 @@ _SKIP_EVENT_TEXT: dict[AbandonReason, str] = {
     "over_memory": "over memory limit",
 }
 
-_ACCESS_DENIED_PHRASES: tuple[str, ...] = ("Access is denied", "Permission denied", "WinError 5", "Errno 13")
-
 
 @dataclass(frozen=True)
 class CoordinatorResult:
@@ -384,10 +382,6 @@ def _truncate_path(path: str, max_len: int = 60) -> str:
     return path[: max_len - 3] + "..."
 
 
-def _is_access_denied(error_message: str) -> bool:
-    return any(phrase in error_message for phrase in _ACCESS_DENIED_PHRASES)
-
-
 def _denied_path(error_message: str) -> str:
     """Extract the filesystem path from an OS access-denied error string."""
     if ": '" in error_message:
@@ -682,9 +676,15 @@ def _requeue_failed_batch(
     on, the re-queued batch fails again before starting any member, and its
     members are then counted as failed by the usual result handling.
 
+    Access denied is left to the usual handling, which counts the whole batch
+    once, at WARNING.  The member in progress is not to blame, and the next
+    copy of the batch would be refused the same way.
+
     Returns True when the batch was re-queued (or finished) here; False when the
     result needs the usual handling.
     """
+    if result.error_kind == "access_denied":
+        return False
     record = registry.get(result.task_id)
     if record is None or not record.task.items or record.worker_pid != result.worker_pid:
         return False
@@ -736,17 +736,18 @@ def _handle_result(
     if result.status == "error":
         msg = result.error_message or "(no message)"
         err_path = _task_path(task)
+        denied = result.error_kind == "access_denied"
         # The only log line for a failed task: workers log theirs at DEBUG.
         # Access denied is expected (e.g. macOS privacy protection without Full
         # Disk Access), so it is a warning, as in the display.
         logger.log(
-            logging.WARNING if _is_access_denied(msg) else logging.ERROR,
+            logging.WARNING if denied else logging.ERROR,
             "[%s]%s: %s",
             result.task_type.value,
             f" path={err_path}" if err_path else "",
             msg,
         )
-        if _is_access_denied(msg):
+        if denied:
             progress.log_event("WARNING", f"Access denied: {_truncate_path(_denied_path(msg))}")
         else:
             progress.log_event("ERROR", f"Error: {_truncate_path(err_path)} — {_short_error(msg)}")
@@ -782,14 +783,21 @@ def _handle_result(
         )
     # One update per result, so the display refreshes once.  tasks_pending is
     # read after the children above were enqueued.  A failed task counts as
-    # completed for the ETA, and separately as not scanned for the summary.
+    # completed for the ETA, and separately as not scanned for the summary,
+    # where access denied has its own count.
     # Unreported members count as not scanned, as _requeue_failed_batch() counts
     # its failed member, so the files bar still reaches files_found.
     update = {**result.counters, "tasks_completed": 1, "tasks_pending": len(registry)}
-    if result.status == "error" and not task.items:
+    if result.status == "error" and result.error_kind == "access_denied":
+        # Once per result, as its one log line names it, even for a batch
+        # refused as a whole.  An archive refused after it was listed counts
+        # once per batch.  A batch's members still count as not scanned, below.
+        update["tasks_access_denied"] = 1
+    elif result.status == "error" and not task.items:
         update["tasks_failed"] = 1
     elif unreported:
         update["tasks_failed"] = unreported
+    if unreported:
         update["files_not_scanned"] = update.get("files_not_scanned", 0) + unreported
     progress.update(update)
 

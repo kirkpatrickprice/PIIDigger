@@ -3879,3 +3879,63 @@ def test_scan_archive_logs_a_member_error_in_the_coordinator_form(
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
     assert errors[0].startswith(f"[scan_archive_members] path={zp}::bad.docx: ")
+
+
+# ---------------------------------------------------------------------------
+# An archive the OS will not let the scan open
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _unreadable(tmp_path: Path) -> Iterable[Any]:
+    """Build an archive and remove every permission on it, restoring them afterwards."""
+    if os.name == "nt" or os.geteuid() == 0:
+        pytest.skip("needs a POSIX user that file permissions apply to")
+    made: list[Path] = []
+
+    def build(archive_type: str) -> Path:
+        path = _build_archive(tmp_path, archive_type, {"a.txt": b"card 4111111111111111\n"})
+        path.chmod(0)
+        made.append(path)
+        return path
+
+    yield build
+    for path in made:
+        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("archive_type", _FORMATS)
+def test_enum_archive_denied_archive_is_access_denied(tmp_path: Path, _unreadable: Any, archive_type: str) -> None:
+    """Each handler wraps the PermissionError in ArchiveReadError; the kind must survive that."""
+    archive = _unreadable(archive_type)
+
+    result = handle_enum_archive_members(
+        _enum_archive_task(archive, archive_type=archive_type), _make_ctx(tmp_path), _logger()
+    )
+
+    assert result.status == "error"
+    assert result.error_kind == "access_denied"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("archive_type", _FORMATS)
+def test_scan_archive_denied_archive_is_access_denied(tmp_path: Path, _unreadable: Any, archive_type: str) -> None:
+    """Readable when listed, refused by the time its batch runs."""
+    archive = _unreadable(archive_type)
+
+    outcome = _scan(_scan_archive_task(archive, "a.txt", archive_type=archive_type), _make_ctx(tmp_path))
+
+    assert outcome.status == "error"
+    assert outcome.result.error_kind == "access_denied"
+
+
+@pytest.mark.unit
+def test_enum_archive_damaged_archive_has_no_error_kind(tmp_path: Path) -> None:
+    archive = tmp_path / "broken.zip"
+    archive.write_bytes(b"PK\x03\x04 not really a zip")
+
+    result = handle_enum_archive_members(_enum_archive_task(archive), _make_ctx(tmp_path), _logger())
+
+    assert result.status == "error"
+    assert result.error_kind is None
