@@ -74,11 +74,6 @@ Known gaps we chose not to fix yet. Each entry says what is wrong, why it was de
 - **Where:** `orchestration/worker/_enum_archive.py` (check 8), `filehandlers.select_handler()`.
 - **Suggested fix:** Accept unknown-extension members at enumeration, sniff the first few KB in memory inside `extract_members()`, and skip the member there if its MIME type has no handler.
 
-### Windows reserved device names in member names
-- **What:** On Windows before 11, a member named `con.txt`, `nul.txt`, `aux.txt` or `com1.txt` can resolve to a device instead of a file. Extracting `con.txt` could write the member's bytes to the console and then block when scanning it. Windows 11 treats these as ordinary files.
-- **Where:** `orchestration/worker/_enum_archive.py` (check 2).
-- **Suggested fix:** Reject member basenames whose stem is a reserved device name.
-
 ### A corrupt member in a solid 7z folder fails the rest of that folder
 - **What:** After a CRC error, the batch is requeued without the bad member. py7zr still re-checks the bad member's CRC while skipping past it, so the retry fails again before reaching later members in that folder.
   - **Quadratic cost:** each failure drops only the current member and requeues the rest. Every round decompresses the folder again from its start, so a batch of N members behind a corrupt block takes N rounds. That is the O(n²) decompression that contiguous batching removed for healthy archives, plus N `ERROR` log lines and display events. Tar avoids this, because a broken stream ends the walk with no culprit.

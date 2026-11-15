@@ -117,17 +117,23 @@ class ArchiveHandler(Protocol):
         on_started: Callable[[str], None] | None = None,
         on_failed: Callable[[str, str], None] | None = None,
         on_progress: Callable[[], None] | None = None,
+        on_discard: Callable[[str, Path], None] | None = None,
     ) -> None:
         """Extract the requested members to dest_dir in archive order, one at a time.
 
         For each member: on_started(member) just before it is extracted, then
         on_extracted(member, path) once it is on disk.  The handler does not
         move on until on_extracted returns, so the caller can scan and delete
-        the file and only one member is ever on disk.  The path may be nested
-        under dest_dir.  Creates dest_dir if it does not exist.
+        the file and only one member is ever on disk.  The path is a file
+        directly in dest_dir with a generated name, never the member's own name
+        (see archivehandlers/_dest_names.py).  Creates dest_dir if it does not
+        exist.
 
-        A member that cannot be extracted on its own (say, a filter rejects it)
-        is passed to on_failed(member, reason) and the run continues.  A
+        A member that cannot be extracted on its own (say, the OS refuses its file)
+        is passed to on_failed(member, reason) and the run continues.  If its
+        file was already created, on_discard(member, path) gets that partly
+        written file first, so the caller can delete it; without on_discard
+        it is left in dest_dir.  A
         requested member never reported to either callback was not found.
 
         on_progress is called as compressed bytes are read, including while

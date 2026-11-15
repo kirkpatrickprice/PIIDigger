@@ -75,9 +75,22 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
         reporter.item_done(member, [], {"files_not_scanned": 1, "tasks_failed": 1}, error_message=reason)
 
     def discard(member: str, path: Path) -> None:
-        # The file is overwritten and removed with the rest of task_temp when
-        # the task ends, so a failure here (a handle a file handler left open,
-        # an antivirus lock) only delays the deletion.
+        # Also the handler's on_discard, for the partly written file of a
+        # member that failed after its file was opened, so only one member is
+        # ever on disk.  Called from inside the archive handler, so it must
+        # never raise.  The file is overwritten and removed with the rest of
+        # task_temp when the task ends, so a failure here (a handle a file
+        # handler left open, an antivirus lock) only delays the deletion.
+        if not path.resolve().is_relative_to(temp_root):
+            # Never delete outside this task's own folder.  Only a handler bug
+            # gets here, and the file may hold PII, so say where it is.
+            logger.warning(
+                "not deleting %s for archive member %s::%s: it is outside the task folder",
+                path,
+                payload.archive_path,
+                member,
+            )
+            return
         try:
             secure_delete(path)
         except OSError as exc:
@@ -132,6 +145,7 @@ def handle_scan_archive_members(task: Task, ctx: WorkerContext, logger: logging.
             on_started=reporter.item_started,
             on_failed=failed,
             on_progress=reporter.alive,
+            on_discard=discard,
         )
     except ArchiveReadError as exc:
         # The coordinator logs the failure; this line only adds the traceback.

@@ -20,6 +20,7 @@ import multiprocessing as mp
 import os
 import queue
 import random
+import re
 import stat
 import struct
 import zipfile
@@ -50,7 +51,21 @@ from piidigger.protocols import ScannableItem
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-_LOG_QUEUE: mp.Queue = mp.Queue()  # type: ignore[type-arg]
+
+class _DroppingQueue:
+    """A log queue that keeps nothing: no test here reads the worker log records.
+
+    An mp.Queue's pipe fills after about 64 KiB of unread records, which then
+    blocks pytest at exit, and a plain queue.Queue would hold every record.
+    """
+
+    def put_nowait(self, item: Any) -> None:
+        pass
+
+    put = put_nowait
+
+
+_LOG_QUEUE: mp.Queue = _DroppingQueue()  # type: ignore[type-arg,assignment]
 _ZIP_FIXTURES = Path("testdata/zip")
 _7Z_FIXTURES = Path("testdata/7z")
 _TAR_FIXTURES = Path("testdata/tar")
@@ -746,7 +761,7 @@ def test_7z_handler_list_members_excludes_symlinks(tmp_path: Path, monkeypatch: 
     archive = tmp_path / "test.7z"
     archive.write_bytes(buf.getvalue())
 
-    monkeypatch.setattr(_7z, "_is_symlink", lambda info: info.filename == "link-to-readme.txt")
+    monkeypatch.setattr(_7z, "_is_special", lambda info: info.filename == "link-to-readme.txt")
 
     members = _7z.handler.list_members(archive)
     names = [m.name for m in members]
@@ -1112,7 +1127,7 @@ def test_enum_archive_7z_symlink_member_not_scanned(tmp_path: Path, monkeypatch:
     archive = tmp_path / "test.7z"
     archive.write_bytes(buf.getvalue())
 
-    monkeypatch.setattr(_7z, "_is_symlink", lambda info: info.filename == "link-to-readme.txt")
+    monkeypatch.setattr(_7z, "_is_special", lambda info: info.filename == "link-to-readme.txt")
 
     ctx = _make_ctx(tmp_path)
     result = handle_enum_archive_members(_enum_archive_task(archive, archive_type="7z"), ctx, _logger())
@@ -1761,22 +1776,18 @@ def test_extract_members_silently_skips_a_member_that_is_not_there(tmp_path: Pat
 
 
 @pytest.mark.unit
-def test_tar_extract_members_refuses_a_traversal_member_and_carries_on(tmp_path: Path) -> None:
-    """The data filter is a second line of defence behind enumeration's path check."""
+def test_tar_extract_members_writes_a_traversal_member_inside_dest(tmp_path: Path) -> None:
+    """Enumeration rejects "../" names; if one were asked for anyway, its file still lands in dest_dir."""
     archive = _tar_fixture("traversal-member.tar")
-    got: list[str] = []
-    failed: list[str] = []
+    dest = tmp_path / "out"
+    got: list[tuple[str, Path]] = []
 
     _archive_handler("tar").extract_members(
-        archive,
-        ["../traversal.txt", "clean.txt"],
-        tmp_path / "out",
-        on_extracted=lambda m, p: got.append(m),
-        on_failed=lambda m, reason: failed.append(m),
+        archive, ["../traversal.txt", "clean.txt"], dest, on_extracted=lambda m, p: got.append((m, p))
     )
 
-    assert failed == ["../traversal.txt"]
-    assert got == ["clean.txt"]
+    assert [member for member, _ in got] == ["../traversal.txt", "clean.txt"]
+    assert all(path.parent == dest for _, path in got)
     assert not (tmp_path / "traversal.txt").exists()
 
 
@@ -2056,11 +2067,11 @@ def test_enum_archive_rejects_rooted_and_drive_member_names(tmp_path: Path, name
 
 
 @pytest.mark.unit
-def test_tar_extract_members_hands_over_the_path_the_filter_wrote(tmp_path: Path) -> None:
-    """A leading backslash is stripped by the data filter; the path handed over must match.
+def test_tar_extract_members_hands_over_a_path_inside_dest_for_a_rooted_name(tmp_path: Path) -> None:
+    """A name with a leading backslash must not map to a host path.
 
-    Before the fix, dest_dir / "\\probe\\x.txt" named a file on the drive root
-    on Windows, and the scan handler would have wiped whatever lived there.
+    dest_dir / "\\probe\\x.txt" names a file on the drive root on Windows, and
+    the scan handler would wipe whatever lived there.
     """
     archive = _plain_tar(tmp_path, {"\\probe\\x.txt": b"member data"})
     dest = tmp_path / "out"
@@ -2096,6 +2107,32 @@ def test_scan_batch_never_touches_a_path_outside_its_task_folder(
 
 
 @pytest.mark.unit
+def test_scan_batch_warns_instead_of_discarding_a_path_outside_its_task_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partly written file handed over from outside task_temp is left alone, and the log says where it is."""
+    from piidigger.archivehandlers import _zip
+
+    host_file = tmp_path / "host.txt"
+    host_file.write_bytes(b"do not delete")
+
+    def misbehaving_extract(archive_path: Path, members: Any, dest_dir: Path, **kwargs: Any) -> None:
+        kwargs["on_discard"]("a.txt", host_file)
+        kwargs["on_failed"]("a.txt", "write failed")
+
+    monkeypatch.setattr(_zip.handler, "extract_members", misbehaving_extract)
+    archive = _build_archive(tmp_path, "zip", {"a.txt": b"x"})
+    logger = _logger()  # the same named logger _scan() uses
+    warnings: list[str] = []
+    monkeypatch.setattr(logger, "warning", lambda msg, *args: warnings.append(msg % args))
+
+    _scan(_scan_archive_task(archive, "a.txt"), _make_ctx(tmp_path))
+
+    assert host_file.read_bytes() == b"do not delete"
+    assert any("outside the task folder" in w and str(host_file) in w for w in warnings)
+
+
+@pytest.mark.unit
 def test_scan_batch_survives_a_member_it_cannot_delete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A file handle left open (or an antivirus lock) must not end the batch or lose findings."""
     from piidigger.orchestration.worker import _scan_archive_members as scan_mod
@@ -2117,11 +2154,22 @@ def test_scan_batch_survives_a_member_it_cannot_delete(tmp_path: Path, monkeypat
 
 @pytest.mark.unit
 @pytest.mark.parametrize("archive_type", _FORMATS)
-def test_extract_members_fails_only_the_member_the_os_refuses(tmp_path: Path, archive_type: str) -> None:
-    """A member whose file cannot be written (here, a directory is in the way) fails alone."""
+def test_extract_members_fails_only_the_member_the_os_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, archive_type: str
+) -> None:
+    """A member whose file the OS will not create (a full disk, an antivirus block) fails alone."""
     archive = _build_archive(tmp_path, archive_type, {"a.txt": b"blocked", "b.txt": b"fine"})
     dest = tmp_path / "out"
-    (dest / "a.txt").mkdir(parents=True)
+    real_open = Path.open
+    refused: list[Path] = []
+
+    def refuse_first_write(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if self.parent == dest and "w" in mode and not refused:
+            refused.append(self)
+            raise PermissionError(13, "refused", str(self))
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", refuse_first_write)
     got: list[str] = []
     failed: list[str] = []
 
@@ -2135,6 +2183,456 @@ def test_extract_members_fails_only_the_member_the_os_refuses(tmp_path: Path, ar
 
     assert failed == ["a.txt"]
     assert got == ["b.txt"]
+
+
+# Names Windows cannot write as given: a colon (a timestamp, say), a reserved
+# device name, and a path that passes 260 characters under the temp folder.
+# Enumeration rejects a name that starts with "X:" as a drive, so the colon
+# sits in a folder.
+_AWKWARD_MEMBERS = {
+    "notes/a:b.txt": b"card 4111111111111111\n",
+    "notes/con.txt": b"card 5555555555554444\n",
+    "/".join(["d" * 50] * 5) + "/long.txt": b"card 378282246310005\n",
+    "plain.txt": b"card 6011111111111117\n",
+}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("archive_type", _FORMATS)
+def test_extract_members_writes_each_member_to_a_generated_name(tmp_path: Path, archive_type: str) -> None:
+    """The file on disk never takes the member's name, so no name Windows refuses reaches the OS."""
+    archive = _build_archive(tmp_path, archive_type, _AWKWARD_MEMBERS)
+    dest = tmp_path / "out"
+    got: list[str] = []
+
+    def extracted(member: str, path: Path) -> None:
+        assert path.parent == dest
+        assert re.fullmatch(r"\d+\.txt", path.name), path.name
+        assert path.read_bytes() == _AWKWARD_MEMBERS[member]
+        got.append(member)
+        path.unlink()
+
+    _archive_handler(archive_type).extract_members(archive, list(_AWKWARD_MEMBERS), dest, on_extracted=extracted)
+
+    assert got == list(_AWKWARD_MEMBERS)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("archive_type", _FORMATS)
+def test_scan_batch_reports_findings_under_the_real_member_names(tmp_path: Path, archive_type: str) -> None:
+    """On Linux this checks the mapping back to the member name; on the Windows runner it proves the fix."""
+    archive = _build_archive(tmp_path, archive_type, _AWKWARD_MEMBERS)
+    ctx = _make_ctx(tmp_path, data_handlers=["pan"])
+
+    outcome = _scan(_scan_archive_task(archive, *_AWKWARD_MEMBERS, archive_type=archive_type), ctx)
+
+    assert outcome.status == "ok"
+    assert "tasks_failed" not in outcome.counters
+    assert [f["source_member_path"] for f in outcome.findings] == list(_AWKWARD_MEMBERS)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("member", "name"),
+    [
+        ("dir/report.PDF", "0.PDF"),
+        ("dir\\sub\\book.xlsx", "0.xlsx"),
+        ("config/.env", "0.env"),
+        ("README", "0"),
+        ("notes/x.t:t", "0"),
+        ("notes/x.txt ", "0"),
+    ],
+)
+def test_member_dest_names_keep_only_a_safe_extension(tmp_path: Path, member: str, name: str) -> None:
+    from piidigger.archivehandlers._dest_names import MemberDestNames
+
+    assert MemberDestNames(tmp_path).next_path(member) == tmp_path / name
+
+
+@pytest.mark.unit
+def test_member_dest_names_pass_over_names_already_taken(tmp_path: Path) -> None:
+    from piidigger.archivehandlers._dest_names import MemberDestNames
+
+    (tmp_path / "0.txt").write_bytes(b"held by antivirus from the last try")
+    names = MemberDestNames(tmp_path, avoid={"2.txt"})
+
+    assert [names.next_path("a.txt").name for _ in range(3)] == ["1.txt", "3.txt", "4.txt"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("archive_type", _FORMATS)
+def test_extract_members_leaves_a_file_from_an_earlier_try_alone(tmp_path: Path, archive_type: str) -> None:
+    """The same worker retrying a task reuses its folder; a leftover there must not be overwritten."""
+    archive = _build_archive(tmp_path, archive_type, {"a.txt": b"this try"})
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "0.txt").write_bytes(b"left from the last try")
+    got: dict[str, bytes] = {}
+
+    _archive_handler(archive_type).extract_members(
+        archive, ["a.txt"], dest, on_extracted=lambda m, p: got.update({m: p.read_bytes()})
+    )
+
+    assert got == {"a.txt": b"this try"}
+    assert (dest / "0.txt").read_bytes() == b"left from the last try"
+
+
+@pytest.mark.unit
+def test_7z_extract_finds_a_file_stored_after_a_folder_of_the_same_name(tmp_path: Path) -> None:
+    """py7zr renames a repeated name "x_0"; a folder named x must not make it rename the file."""
+    import py7zr
+
+    archive = tmp_path / "same.7z"
+    src = tmp_path / "src" / "x"
+    src.mkdir(parents=True)
+    with py7zr.SevenZipFile(archive, "w") as szf:
+        szf.write(src, "x")
+        szf.writestr(b"file data", "x")
+    with py7zr.SevenZipFile(archive) as szf:
+        layout = [(info.filename, info.is_directory) for info in szf.files]
+    if layout != [("x", True), ("x", False)]:
+        pytest.skip(f"py7zr stored {layout}")
+    got: dict[str, bytes] = {}
+
+    _archive_handler("7z").extract_members(
+        archive, ["x"], tmp_path / "out", on_extracted=lambda m, p: got.update({m: p.read_bytes()})
+    )
+
+    assert got == {"x": b"file data"}
+
+
+@pytest.mark.unit
+def test_7z_extract_survives_windows_rebuilding_a_colon_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows, py7zr rebuilds dest/notes/a:b.txt as just "a:b.txt" and rejects the run.
+
+    PureWindowsPath("C:\\", "out", "notes", "a:b.txt") is PureWindowsPath("a:b.txt").
+    The check below stands in for that on every platform: py7zr must never be
+    given a name with a colon in it.
+    """
+    import py7zr.py7zr as py7zr_module
+    from py7zr.exceptions import Bad7zFile
+
+    original = py7zr_module.get_sanitized_output_path
+
+    def windows_like(fname: str, path: Path | None) -> Path:
+        if ":" in fname:
+            raise Bad7zFile(f"Specified path is bad: {fname}")
+        return original(fname, path)
+
+    monkeypatch.setattr(py7zr_module, "get_sanitized_output_path", windows_like)
+    archive = _build_archive(tmp_path, "7z", _AWKWARD_MEMBERS)
+    got: list[str] = []
+
+    _archive_handler("7z").extract_members(
+        archive, list(_AWKWARD_MEMBERS), tmp_path / "out", on_extracted=lambda m, p: got.append(m)
+    )
+
+    assert got == list(_AWKWARD_MEMBERS)
+
+
+@pytest.mark.unit
+def test_7z_extract_finds_a_member_whose_name_py7zr_would_normalise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """py7zr strips "./" and folds "." when it builds a path; the member must still be found.
+
+    py7zr normalises those names when it writes an archive, so the stored names
+    are swapped in as each archive is opened, as another tool's header would
+    give them.
+    """
+    import py7zr
+
+    stored_as = {"x.txt": "./x.txt", "a/b.txt": "a/./b.txt"}
+    archive = _build_archive(tmp_path, "7z", {"x.txt": b"dot slash", "a/b.txt": b"inner dot"})
+    real_init = py7zr.SevenZipFile.__init__
+
+    def init_with_stored_names(self: Any, *args: Any, **kwargs: Any) -> None:
+        real_init(self, *args, **kwargs)
+        for info in self.files:
+            info._file_info["filename"] = stored_as[info.filename]
+
+    monkeypatch.setattr(py7zr.SevenZipFile, "__init__", init_with_stored_names)
+    got: dict[str, bytes] = {}
+
+    _archive_handler("7z").extract_members(
+        archive, list(stored_as.values()), tmp_path / "out", on_extracted=lambda m, p: got.update({m: p.read_bytes()})
+    )
+
+    assert got == {"./x.txt": b"dot slash", "a/./b.txt": b"inner dot"}
+
+
+@pytest.mark.unit
+def test_7z_extract_ignores_an_entry_already_named_like_a_generated_name(tmp_path: Path) -> None:
+    """A member really named 0.txt, not asked for, must not be extracted in place of the one that was."""
+    members = {"0.txt": b"not requested", "1.txt": b"not requested either", "notes/a.txt": b"requested"}
+    archive = _build_archive(tmp_path, "7z", members)
+    got: dict[str, bytes] = {}
+
+    _archive_handler("7z").extract_members(
+        archive, ["notes/a.txt"], tmp_path / "out", on_extracted=lambda m, p: got.update({m: p.read_bytes()})
+    )
+
+    assert got == {"notes/a.txt": b"requested"}
+
+
+@pytest.mark.unit
+def test_scan_batch_removes_the_partial_file_of_a_member_that_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A CRC mismatch is found after the data is written; that file must not stay on disk."""
+    from piidigger.orchestration.worker import _scan_archive_members as scan_mod
+
+    zp = tmp_path / "crc.zip"
+    with zipfile.ZipFile(zp, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("a.txt", b"card 4111111111111111 bad")
+        zf.writestr("b.txt", b"fine")
+    raw = bytearray(zp.read_bytes())
+    raw[raw.index(b" bad")] ^= 0xFF  # corrupt a.txt's stored data, not its header
+    zp.write_bytes(bytes(raw))
+    ctx = _make_ctx(tmp_path)
+    task = _scan_archive_task(zp, "a.txt", "b.txt")
+    on_disk: list[list[str]] = []
+    real_scan_member = scan_mod._scan_member
+
+    def recording(member: str, path: Path, *args: Any) -> Any:
+        on_disk.append(sorted(p.name for p in path.parent.iterdir()))
+        return real_scan_member(member, path, *args)
+
+    monkeypatch.setattr(scan_mod, "_scan_member", recording)
+
+    outcome = _scan(task, ctx)
+
+    assert [d.counters for d in outcome.done][0] == {"files_not_scanned": 1, "tasks_failed": 1}
+    assert on_disk == [["1.txt"]], "only b.txt's file is on disk when it is scanned"
+
+
+@pytest.mark.unit
+def test_zip_extracts_the_listed_entry_not_a_symlink_of_the_same_name(tmp_path: Path) -> None:
+    """list_members() leaves symlinks out, so enumeration checked the regular entry; extract that one."""
+    import warnings
+
+    zp = tmp_path / "link.zip"
+    link = zipfile.ZipInfo("a.txt")
+    link.create_system = 3  # Unix
+    link.external_attr = (stat.S_IFLNK | 0o777) << 16
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # zipfile warns about the duplicate name
+        with zipfile.ZipFile(zp, "w") as zf:
+            zf.writestr(link, b"unchecked data behind a symlink entry")
+            zf.writestr("a.txt", b"checked")
+    got: list[bytes] = []
+
+    _archive_handler("zip").extract_members(
+        zp, ["a.txt"], tmp_path / "out", on_extracted=lambda m, p: got.append(p.read_bytes())
+    )
+
+    assert got == [b"checked"]
+
+
+@pytest.mark.unit
+def test_7z_writer_factory_fails_loudly_on_a_file_it_did_not_name(tmp_path: Path) -> None:
+    """If py7zr ever named its output differently, members must not vanish silently."""
+    from piidigger.archivehandlers._7z import _ScanWriterFactory
+
+    factory = _ScanWriterFactory(tmp_path, {"0.txt": "a.txt"}, None, lambda m, p: None, None)
+
+    with pytest.raises(RuntimeError, match="unexpected file"):
+        factory.create((tmp_path / "a.txt").as_posix())
+
+
+@pytest.mark.unit
+def test_scan_batch_leaves_a_file_from_an_earlier_try_to_the_task_cleanup(tmp_path: Path) -> None:
+    """The leftover sweep removes only what this try wrote; an earlier try's locked file is not its to report."""
+    zp = tmp_path / "crc.zip"
+    with zipfile.ZipFile(zp, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("a.txt", b"card 4111111111111111 bad")
+    raw = bytearray(zp.read_bytes())
+    raw[raw.index(b" bad")] ^= 0xFF
+    zp.write_bytes(bytes(raw))
+    ctx = _make_ctx(tmp_path)
+    task = _scan_archive_task(zp, "a.txt")
+    workspace = ctx.task_workspace(task.task_id)
+    workspace.mkdir(parents=True)
+    (workspace / "0.txt").write_bytes(b"left from the last try")
+
+    outcome = _scan(task, ctx)
+
+    assert outcome.done[0].counters == {"files_not_scanned": 1, "tasks_failed": 1}
+    assert sorted(p.name for p in workspace.iterdir()) == ["0.txt"]
+
+
+@pytest.mark.unit
+def test_7z_extract_fails_loudly_if_py7zr_ignores_the_rename(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """_rename_targets() writes py7zr's private file info; a py7zr that keeps names elsewhere must not slip by."""
+    import py7zr
+
+    from piidigger.exceptions import ArchiveReadError
+
+    class KeepsItsName(dict[str, Any]):
+        def __setitem__(self, key: str, value: Any) -> None:
+            if key != "filename":
+                super().__setitem__(key, value)
+
+    real_init = py7zr.SevenZipFile.__init__
+
+    def init_keeping_names(self: Any, *args: Any, **kwargs: Any) -> None:
+        real_init(self, *args, **kwargs)
+        # Each ArchiveFile wraps one of these shared dicts.
+        self.files.files_list[:] = [KeepsItsName(d) for d in self.files.files_list]
+
+    monkeypatch.setattr(py7zr.SevenZipFile, "__init__", init_keeping_names)
+    archive = _build_archive(tmp_path, "7z", {"notes/a:b.txt": b"x"})
+
+    with pytest.raises(ArchiveReadError, match="did not extract 1 requested member"):
+        _archive_handler("7z").extract_members(
+            archive, ["notes/a:b.txt"], tmp_path / "out", on_extracted=lambda m, p: None
+        )
+
+
+@pytest.mark.unit
+def test_7z_hands_a_member_abandoned_by_a_crc_error_to_on_discard(tmp_path: Path) -> None:
+    """py7zr skips close() on a CRC failure; the partly written file must still reach the caller to delete."""
+    import py7zr
+
+    from piidigger.exceptions import ArchiveReadError
+
+    data = b"0123456789abcdef" * 64
+    archive = tmp_path / "crc.7z"
+    with py7zr.SevenZipFile(archive, "w", filters=[{"id": py7zr.FILTER_COPY}]) as szf:
+        szf.writestr(data, "a.txt")
+    raw = bytearray(archive.read_bytes())
+    raw[raw.index(data)] ^= 0xFF
+    archive.write_bytes(bytes(raw))
+    dest = tmp_path / "out"
+    discarded: list[tuple[str, Path]] = []
+
+    with pytest.raises(ArchiveReadError):
+        _archive_handler("7z").extract_members(
+            archive,
+            ["a.txt"],
+            dest,
+            on_extracted=lambda m, p: None,
+            on_discard=lambda m, p: discarded.append((m, p)),
+        )
+
+    assert discarded == [("a.txt", dest / "0.txt")]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("archive_type", ["zip", "tar"])
+def test_extract_members_hands_a_partly_written_member_to_on_discard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, archive_type: str
+) -> None:
+    """A member that fails after its file was opened is passed to on_discard, then to on_failed."""
+    import shutil
+
+    archive = _build_archive(tmp_path, archive_type, {"a.txt": b"half written", "b.txt": b"fine"})
+    real_copy = shutil.copyfileobj
+    calls: list[int] = []
+
+    def fail_first_copy(src: Any, dst: Any, *args: Any) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            dst.write(b"half")
+            raise OSError(28, "No space left on device")
+        real_copy(src, dst, *args)
+
+    monkeypatch.setattr(shutil, "copyfileobj", fail_first_copy)
+    events: list[tuple[str, str]] = []
+
+    _archive_handler(archive_type).extract_members(
+        archive,
+        ["a.txt", "b.txt"],
+        tmp_path / "out",
+        on_extracted=lambda m, p: events.append(("extracted", m)),
+        on_failed=lambda m, reason: events.append(("failed", m)),
+        on_discard=lambda m, p: events.append(("discard", f"{m}:{p.read_bytes().decode()}")),
+    )
+
+    assert events == [("discard", "a.txt:half"), ("failed", "a.txt"), ("extracted", "b.txt")]
+
+
+@pytest.mark.unit
+def test_7z_leaves_a_socket_entry_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """py7zr never writes a socket through the factory, so one in a batch must not fail the rest."""
+    import py7zr
+    from py7zr.member import FILE_ATTRIBUTE_UNIX_EXTENSION
+
+    archive = _build_archive(tmp_path, "7z", {"run/app.sock": b"", "a.txt": b"data"})
+    real_init = py7zr.SevenZipFile.__init__
+
+    def init_with_a_socket(self: Any, *args: Any, **kwargs: Any) -> None:
+        real_init(self, *args, **kwargs)
+        for entry in self.files.files_list:
+            if entry["filename"] == "run/app.sock":
+                entry["attributes"] = FILE_ATTRIBUTE_UNIX_EXTENSION | (stat.S_IFSOCK << 16)
+
+    monkeypatch.setattr(py7zr.SevenZipFile, "__init__", init_with_a_socket)
+    handler = _archive_handler("7z")
+    got: list[str] = []
+
+    assert [m.name for m in handler.list_members(archive)] == ["a.txt"]
+    handler.extract_members(
+        archive, ["run/app.sock", "a.txt"], tmp_path / "out", on_extracted=lambda m, p: got.append(m)
+    )
+    assert got == ["a.txt"]
+
+
+@pytest.mark.unit
+def test_tar_hands_a_member_cut_short_by_a_broken_stream_to_on_discard(tmp_path: Path) -> None:
+    """A truncated .tar.gz ends the walk, but the partly written member still reaches the caller to delete."""
+    from piidigger.exceptions import ArchiveReadError
+
+    data = random.Random(7).randbytes(256 * 1024)  # noqa: S311 — incompressible test data, so the cut lands inside it
+    archive = _build_archive(tmp_path, "tar", {"big.csv": data})
+    archive.write_bytes(archive.read_bytes()[: archive.stat().st_size // 2])
+    dest = tmp_path / "out"
+    discarded: list[tuple[str, Path]] = []
+
+    with pytest.raises(ArchiveReadError):
+        _archive_handler("tar").extract_members(
+            archive,
+            ["big.csv"],
+            dest,
+            on_extracted=lambda m, p: None,
+            on_discard=lambda m, p: discarded.append((m, p)),
+        )
+
+    assert discarded == [("big.csv", dest / "0.csv")]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("bad: {dest}/3.txt", "bad: notes/a:b.txt"),
+        ("bad: {dest}/13.txt", "bad: {dest}/13.txt"),
+        ("dir/3.txt and 3.txt may be other entries", "dir/3.txt and 3.txt may be other entries"),
+        ("invalid block at 0", "invalid block at 0"),
+    ],
+)
+def test_7z_errors_name_the_real_member(tmp_path: Path, text: str, expected: str) -> None:
+    """Only the full path py7zr built for a generated file is mapped back to the member."""
+    from piidigger.archivehandlers._7z import _real_names
+
+    dest = tmp_path / "out"
+    renamed = {"3.txt": "notes/a:b.txt", "0": "README"}
+
+    assert _real_names(text.format(dest=dest.as_posix()), renamed, dest) == expected.format(dest=dest.as_posix())
+
+
+@pytest.mark.unit
+def test_7z_describe_error_names_the_real_member_for_any_error(tmp_path: Path) -> None:
+    from py7zr.exceptions import Bad7zFile
+
+    from piidigger.archivehandlers._7z import _describe_error
+
+    dest = tmp_path / "out"
+    error = Bad7zFile(f"Specified path is bad: {(dest / '3.txt').as_posix()}")
+
+    message = _describe_error(error, {"3.txt": "notes/a:b.txt"}, dest)
+
+    assert message == "Bad7zFile: Specified path is bad: notes/a:b.txt"
 
 
 @pytest.mark.unit
@@ -3035,28 +3533,24 @@ def _unused_drive_letter() -> str:
 
 @pytest.mark.unit
 @pytest.mark.skipif(os.name != "nt", reason="drive-relative names exist only on Windows")
-def test_zip_refuses_a_member_whose_basename_names_another_drive(tmp_path: Path) -> None:
+def test_zip_writes_a_member_whose_basename_names_another_drive_inside_dest(tmp_path: Path) -> None:
     # Path("foo/q:run.bat").name is "q:run.bat", and dest_dir / "q:run.bat" drops
-    # dest_dir.  The drive is one that does not exist, so a regression fails the
-    # assertion on the reason rather than writing anywhere.
+    # dest_dir.  The drive is one that does not exist, so a regression fails on
+    # the write rather than writing anywhere.
     member = f"foo/{_unused_drive_letter().lower()}:run.bat"
     zp = tmp_path / "drive.zip"
     with zipfile.ZipFile(zp, "w") as zf:
         zf.writestr(member, b"@echo off")
         zf.writestr("after.txt", b"fine")
-    got: list[str] = []
-    failed: list[tuple[str, str]] = []
+    dest = tmp_path / "out"
+    got: list[tuple[str, Path]] = []
 
     _archive_handler("zip").extract_members(
-        zp,
-        [member, "after.txt"],
-        tmp_path / "out",
-        on_extracted=lambda m, p: got.append(m),
-        on_failed=lambda m, reason: failed.append((m, reason)),
+        zp, [member, "after.txt"], dest, on_extracted=lambda m, p: got.append((m, p))
     )
 
-    assert failed == [(member, "member name escapes the extraction folder")]
-    assert got == ["after.txt"]
+    assert [m for m, _ in got] == [member, "after.txt"]
+    assert all(path.parent == dest for _, path in got)
 
 
 @pytest.mark.unit

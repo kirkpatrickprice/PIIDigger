@@ -63,9 +63,9 @@ DISPATCH: dict[TaskType, _HandlerFn] = {
 def _cleanup_temp_workspace(workspace: Path, logger: logging.Logger) -> None:
     """Securely delete this task's temp files then remove its temp directory.
 
-    Walks the task temp dir recursively so handlers need not flatten extracted
-    files to a single level.  No-ops gracefully when the task created no temp
-    files.
+    Walks the task temp dir recursively, although archive handlers write each
+    member directly in it, so nothing a task leaves there is missed.  No-ops
+    gracefully when the task created no temp files.
 
     Never raises: it runs in worker_loop's finally block, and an exception there
     would kill the worker and lose the task's result.  A file that cannot be
