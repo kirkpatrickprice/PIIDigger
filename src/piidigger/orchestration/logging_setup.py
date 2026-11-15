@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import logging.handlers
 import multiprocessing as mp
@@ -76,28 +77,101 @@ def _route_to_queue(logger: logging.Logger, log_queue: mp.Queue[Any], *, level: 
         return
     for handler in handlers:
         logger.removeHandler(handler)
-    handler = logging.handlers.QueueHandler(log_queue)
+    handler = LogQueueHandler(log_queue)
     handler.setLevel(level)
     logger.addHandler(handler)
 
 
-_TRACEBACK_HEADER = "Traceback (most recent call last):"
+class LogQueueHandler(logging.handlers.QueueHandler):
+    """A QueueHandler that sends a record's traceback apart from its message.
+
+    The stock prepare() appends the traceback to the message text.  The log's
+    formatter could then find it only by searching that text, and a file name
+    logged in the message can imitate a traceback.  Here the traceback crosses
+    the queue in exc_text, a string, so the formatter knows which part is which.
+    """
+
+    def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
+        message = record.getMessage()
+        exc_text = record.exc_text
+        if record.exc_info and not exc_text:
+            exc_text = logging.Formatter().formatException(record.exc_info)
+        record = copy.copy(record)
+        record.message = message
+        record.msg = message
+        record.args = None
+        record.exc_info = None  # a traceback object does not pickle
+        record.exc_text = exc_text
+        return record
+
+
+# Each line of a traceback or stack in the log starts with this, so only the
+# first line of a record starts at column 0.  A forged record cannot either.
+_TRACE_INDENT = "    "
+
+
+def _escape_char(char: str) -> str:
+    """A character as an escape: \\xNN, \\uNNNN or \\UNNNNNNNN.
+
+    As repr() writes it, except that \\xNN is used below 0x80 only.  A byte
+    that is not UTF-8 is always 0x80 or above, and the log writes it as \\xNN,
+    so from 0x80 on a character gets \\uNNNN where repr() would write \\xNN.
+    """
+    code = ord(char)
+    if code < 0x80:
+        return f"\\x{code:02x}"
+    return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
+
+
+def _escape_unprintable(text: str) -> str:
+    """text with each character repr() would escape written as an escape.
+
+    A file name can hold any character.  Written raw, a carriage return or an
+    escape sequence rewrites what a terminal shows, U+2028 splits the line for
+    str.splitlines(), and U+202E reverses the rest of it on screen.  Tab stays,
+    and so do surrogates: the file handler writes those as \\xNN, the byte of a
+    POSIX name that is not UTF-8.
+    """
+    if text.isprintable():
+        return text
+    return "".join(
+        char if char.isprintable() or char == "\t" or "\ud800" <= char <= "\udfff" else _escape_char(char)
+        for char in text
+    )
 
 
 class _SingleLineFormatter(logging.Formatter):
-    """Keeps each record's message on one line, so line-based tools read the log right.
+    """Writes each record's message on one line, so line-based tools read the log right.
 
     Some exception text spans several lines; tarfile, for one, lists every
-    compression method it tried.  Only the message is collapsed: a traceback
-    from logger.exception() still follows on its own lines.  QueueHandler
-    folds the traceback into the message text before it crosses the queue,
-    so the split is made at the traceback's header line.
+    compression method it tried.  The message's line breaks become spaces.  A
+    traceback or stack follows on lines of its own, each indented, so only a
+    record's first line starts at column 0.  LogQueueHandler sends the
+    traceback apart from the message, so no text in the message, a file name
+    included, can pass for one.
+
+    Paths are logged as they are, not as reprs.  So any other character that
+    repr() would escape is written as an escape (see _escape_char), and a file
+    name cannot rewrite the line.
     """
+
+    def format(self, record: logging.LogRecord) -> str:
+        record.message = record.getMessage()
+        if self.usesTime():
+            record.asctime = self.formatTime(record, self.datefmt)
+        lines = [self.formatMessage(record)]
+        exc_text = record.exc_text
+        if record.exc_info and not exc_text:
+            exc_text = self.formatException(record.exc_info)
+        for trace in (exc_text, record.stack_info):
+            if trace:
+                lines.extend(_TRACE_INDENT + _escape_unprintable(line) for line in trace.rstrip("\n").split("\n"))
+        return "\n".join(lines)
 
     def formatMessage(self, record: logging.LogRecord) -> str:  # noqa: N802 — logging.Formatter API
         text = super().formatMessage(record)
-        head, marker, tail = text.partition(_TRACEBACK_HEADER)
-        return head.replace("\r\n", " ").replace("\n", " ").rstrip() + ("\n" + marker + tail if marker else "")
+        # Only line breaks are stripped: trailing spaces can be part of a name.
+        return _escape_unprintable(text.rstrip("\r\n").replace("\r\n", " ").replace("\n", " "))
 
 
 def start_listener(

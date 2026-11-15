@@ -3878,4 +3878,4 @@ def test_scan_archive_logs_a_member_error_in_the_coordinator_form(
 
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
-    assert errors[0].startswith(f"[scan_archive_members] path={f'{zp}::bad.docx'!r}: ")
+    assert errors[0].startswith(f"[scan_archive_members] path={zp}::bad.docx: ")

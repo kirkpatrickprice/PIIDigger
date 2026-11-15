@@ -168,7 +168,7 @@ Here are a few notes about looking at the results:
     * `source_depth` is `1` (or greater once nested-archive support lands)
     * `source_container_type` names the archive format (e.g. `"zip"`). 
 * `handler` names which PII data handler matched (e.g. `pan`, `email`), and `match_type` is the specific pattern within that handler (e.g. `visa`, `amex`, etc), with `value` being the matched text itself.
-* On Linux and macOS, a file name can hold bytes that aren't valid UTF-8. Every results file and the log write each such byte as `\xNN`, so `bad\xff.txt` is the file whose name holds the byte `0xFF`. `ls -b` shows the same name as `bad\377.txt`. A backslash that is really part of a name is written as is, so in the rare case of a file actually named `bad\xff.txt`, use `ls -b` to tell the two apart. The JSON files use the same `\xNN` form, so a program reading them gets the readable name, not the file name's original bytes.
+* On Linux and macOS, a file name can hold bytes that aren't valid UTF-8. Every results file and the log write each such byte as `\xNN`, so `bad\xff.txt` is the file whose name holds the byte `0xFF`. `ls -b` shows the same name as `bad\377.txt`. The log also writes a character in a name that can't be shown as itself, such as a carriage return or a text-direction mark, as `\xNN` (`\uNNNN` from 0x80 on), and a line break as a space, so each log line names one path whole. A backslash that is really part of a name is written as is, so in the rare case of a file actually named `bad\xff.txt`, use `ls -b` to tell the two apart. The JSON files use the same `\xNN` form, so a program reading them gets the readable name, not the file name's original bytes.
 
 ## Troubleshooting
 

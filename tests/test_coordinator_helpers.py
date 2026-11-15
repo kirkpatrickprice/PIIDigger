@@ -188,3 +188,32 @@ def test_findings_summary_missing_keys_use_defaults() -> None:
     result = _findings_summary(findings)
     assert "file.txt" in result
     assert "?: 0" in result
+
+
+# ---------------------------------------------------------------------------
+# Log lines name paths as written, not as Python reprs
+# ---------------------------------------------------------------------------
+
+_WINDOWS_PATH = "C:\\Users\\x\\notes.txt"
+
+
+@pytest.mark.unit
+def test_error_line_names_a_windows_path_with_single_backslashes(caplog: pytest.LogCaptureFixture) -> None:
+    """A repr doubled every backslash, so the logged path didn't match the one on disk."""
+    import logging
+
+    from piidigger.models.tasks import Task, TaskResult, TaskType
+    from piidigger.orchestration.coordinator import _handle_result
+    from piidigger.orchestration.progress import ProgressDisplay
+    from piidigger.orchestration.registry import TaskRegistry
+
+    logger = logging.getLogger("tests.coordinator_helpers.path_format")
+    registry = TaskRegistry(lambda _task: None)
+    task = Task(task_type=TaskType.SCAN_FILE, payload={"file_path": _WINDOWS_PATH})
+    registry.enqueue(task)
+    result = TaskResult(task_id=task.task_id, task_type=TaskType.SCAN_FILE, status="error", error_message="boom")
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        _handle_result(result, registry, [], ProgressDisplay(), logger)
+
+    assert [r.getMessage() for r in caplog.records] == [f"[scan_file] path={_WINDOWS_PATH}: boom"]

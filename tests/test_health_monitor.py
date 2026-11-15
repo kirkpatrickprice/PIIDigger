@@ -138,6 +138,28 @@ def test_deadline_log_line_reports_the_quiet_time_and_the_real_deadline(caplog: 
 
 
 @pytest.mark.unit
+def test_deadline_log_line_names_a_windows_path_with_single_backslashes(caplog: pytest.LogCaptureFixture) -> None:
+    """A repr doubled every backslash, so the logged path didn't match the one on disk."""
+    from piidigger.orchestration.coordinator import _report_sweep
+    from piidigger.orchestration.progress import ProgressDisplay
+
+    h = Harness()
+    worker = h.worker(0)
+    assert worker.pid is not None
+    task = Task(task_type=TaskType.ENUM_DIR, timeout_seconds=30, payload={"path": "C:\\Users\\x"})
+    h.registry.enqueue(task)
+    h.heartbeat(task, worker.pid)
+    h.clock.advance(61.0)
+
+    sweep = h.monitor.tick()
+    with caplog.at_level(logging.WARNING, logger=_LOG.name):
+        _report_sweep(sweep, h.registry, ProgressDisplay(), _LOG)
+
+    [line] = [r.getMessage() for r in caplog.records if "deadline exceeded" in r.getMessage()]
+    assert "path=C:\\Users\\x pid=" in line
+
+
+@pytest.mark.unit
 def test_clean_exit_reaped_before_its_retirement_message_is_not_reported_as_a_crash(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

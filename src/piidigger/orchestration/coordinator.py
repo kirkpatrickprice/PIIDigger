@@ -650,7 +650,7 @@ def _handle_progress(
     if message.event != "item_done":
         return
     if not accepted:
-        logger.debug("dropping duplicate progress for %r in task %s", message.item, message.task_id)
+        logger.debug("dropping duplicate progress for %s in task %s", message.item, message.task_id)
         return
     _route_to_sinks(message.findings, sinks, logger)
     if message.findings:
@@ -694,7 +694,7 @@ def _requeue_failed_batch(
         return False
     member = f"{path}::{culprit}"
     msg = result.error_message or "(no message)"
-    logger.error("[%s] path=%r: %s%s", result.task_type.value, member, msg, _requeue_clause(record))
+    logger.error("[%s] path=%s: %s%s", result.task_type.value, member, msg, _requeue_clause(record))
     progress.log_event("ERROR", f"Error: {_truncate_path(member)} — {_short_error(msg)}")
     update = {"files_not_scanned": 1, "tasks_failed": 1, "tasks_pending": len(registry)}
     if result.task_id not in registry:
@@ -727,7 +727,7 @@ def _handle_result(
             logger.debug("dropping duplicate result for task %s", result.task_id)
             return
         logger.warning(
-            "[%s] accepting late result for %r after the coordinator gave up on it",
+            "[%s] accepting late result for %s after the coordinator gave up on it",
             result.task_type.value,
             _task_path(record.task),
         )
@@ -743,7 +743,7 @@ def _handle_result(
             logging.WARNING if _is_access_denied(msg) else logging.ERROR,
             "[%s]%s: %s",
             result.task_type.value,
-            f" path={err_path!r}" if err_path else "",
+            f" path={err_path}" if err_path else "",
             msg,
         )
         if _is_access_denied(msg):
@@ -759,7 +759,7 @@ def _handle_result(
             child = Task(**new_task_dict)
         except ValidationError:
             logger.exception(
-                "[%s] dropping malformed child task from %r: %r",
+                "[%s] dropping malformed child task from %s: %r",
                 result.task_type.value,
                 _task_path(task),
                 new_task_dict,
@@ -778,7 +778,7 @@ def _handle_result(
     unreported = len(record.remaining) if task.items else 0
     if unreported and result.status != "error":
         logger.warning(
-            "[%s] %r finished without reporting %d member(s)", result.task_type.value, _task_path(task), unreported
+            "[%s] %s finished without reporting %d member(s)", result.task_type.value, _task_path(task), unreported
         )
     # One update per result, so the display refreshes once.  tasks_pending is
     # read after the children above were enqueued.  A failed task counts as
@@ -815,7 +815,7 @@ def _report_sweep(
         last_sign_of_life = record.last_sign_of_life
         quiet = sweep.now - last_sign_of_life if last_sign_of_life is not None else 0.0
         logger.warning(
-            "deadline exceeded: type=%s path=%r pid=%s no progress for %.1fs (deadline %ds = %d×%ds timeout); "
+            "deadline exceeded: type=%s path=%s pid=%s no progress for %.1fs (deadline %ds = %d×%ds timeout); "
             "stopping and replacing the worker",
             task_type,
             _task_path(record.task),
@@ -834,7 +834,7 @@ def _report_sweep(
     for record, rss in sweep.over_memory:
         task_type = record.task.task_type.value
         logger.warning(
-            "memory limit exceeded: type=%s path=%r pid=%s rss=%s MB limit=%s MB (max_worker_memory_mb); "
+            "memory limit exceeded: type=%s path=%s pid=%s rss=%s MB limit=%s MB (max_worker_memory_mb); "
             "stopping and replacing the worker",
             task_type,
             _task_path(record.task),
@@ -851,7 +851,7 @@ def _report_sweep(
         what = _SKIP_REASON_TEXT[skip.reason]
         member = f"{_task_path(skip.record.task)}::{skip.item}"
         logger.warning(
-            "[%s] skipping %r: its worker (pid=%s) %s on it%s",
+            "[%s] skipping %s: its worker (pid=%s) %s on it%s",
             skip.record.task.task_type.value,
             member,
             skip.worker_pid,
@@ -873,7 +873,7 @@ def _report_sweep(
 
     for record in sweep.redispatched:
         logger.warning(
-            "[%s] re-dispatching %r after its worker died (retry %d of %d)",
+            "[%s] re-dispatching %s after its worker died (retry %d of %d)",
             record.task.task_type.value,
             _task_path(record.task),
             record.attempt,
@@ -882,7 +882,7 @@ def _report_sweep(
 
     for record in sweep.lost:
         logger.warning(
-            "[%s] re-dispatching %r: no worker holds it, so it was lost before starting (retry %d of %d)",
+            "[%s] re-dispatching %s: no worker holds it, so it was lost before starting (retry %d of %d)",
             record.task.task_type.value,
             _task_path(record.task),
             record.attempt,
@@ -895,7 +895,7 @@ def _report_sweep(
     for record in sweep.abandoned:
         attempts = record.attempt + 1
         logger.error(
-            "[%s] abandoning %r: lost or crashed on all %d attempts",
+            "[%s] abandoning %s: lost or crashed on all %d attempts",
             record.task.task_type.value,
             _task_path(record.task),
             attempts,
