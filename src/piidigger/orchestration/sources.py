@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import IO
 
 from piidigger._progress_io import open_with_progress
+from piidigger.protocols import UnreadKind
 
 
 class FilesystemItem:
@@ -32,6 +33,9 @@ class FilesystemItem:
     to read back from unread_reason once the handler has finished.  A file can
     have several reasons; unread_reason gives them all.  nothing_read says the
     handler could read none of it, so the worker does not count it as scanned.
+    password_protected says the file was not read at all, and only because of a
+    password (kind="password_protected"), so the worker counts it on a summary
+    row of its own instead of as an error.
     report_no_text() records a document read without error that held no text, for
     the worker to read back from no_text.
     """
@@ -52,6 +56,7 @@ class FilesystemItem:
         self._on_progress = on_progress
         self._unread_reasons: list[str] = []
         self._nothing_read = False
+        self._password_reasons = 0
         self._no_text = False
 
     @property
@@ -95,9 +100,10 @@ class FilesystemItem:
         if self._on_progress is not None:
             self._on_progress()
 
-    def report_unread(self, reason: str, *, nothing_read: bool = False) -> None:
+    def report_unread(self, reason: str, *, nothing_read: bool = False, kind: UnreadKind | None = None) -> None:
         self._unread_reasons.append(reason)
         self._nothing_read = self._nothing_read or nothing_read
+        self._password_reasons += kind == "password_protected"
 
     def report_no_text(self) -> None:
         self._no_text = True
@@ -109,6 +115,12 @@ class FilesystemItem:
     @property
     def nothing_read(self) -> bool:
         return self._nothing_read
+
+    @property
+    def password_protected(self) -> bool:
+        # Partly read, or unread for another reason too: an error, as before,
+        # or the file would count as scanned, or lose its other failure.
+        return self._nothing_read and self._password_reasons == len(self._unread_reasons) > 0
 
     @property
     def no_text(self) -> bool:

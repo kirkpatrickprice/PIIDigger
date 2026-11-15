@@ -355,6 +355,7 @@ def _laptop_run(monkeypatch: pytest.MonkeyPatch) -> ProgressDisplay:
             "tasks_access_denied": 9,
             "files_unreadable": 562,
             "pdfs_no_text": 14,
+            "files_password_protected": 4,
             "bytes_not_scanned": 999,
             "archive_members_too_deep": 15_696,
             "archive_members_over_total": 3,
@@ -386,6 +387,7 @@ def test_summary_block_on_screen(monkeypatch: pytest.MonkeyPatch) -> None:
         '        9  folders or files not readable: access denied (search the log for "access denied")',
         '      562  files not read: text encoding could not be detected (search the log for "text encoding")',
         '       14  PDFs with no extractable text (search the log for "no extractable text")',
+        '        4  files password protected, not scanned (search the log for "password protected")',
         "   15,703  archive members rejected: 15,696 too deep to reach, 3 over the archive's total size, "
         "2 over a member size or count limit, 1 unsafe, 1 repeated",
         "        5  archive members encrypted",

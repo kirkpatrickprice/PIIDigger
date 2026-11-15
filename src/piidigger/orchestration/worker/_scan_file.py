@@ -118,11 +118,18 @@ def handle_scan_file(task: Task, ctx: WorkerContext, logger: logging.Logger) -> 
     if item.no_text:
         logger.info("no extractable text in PDF %s", payload.display_path)
         read_counters["pdfs_no_text"] = 1
+    unread_reason = item.unread_reason
+    if item.password_protected:
+        # Not a failure: the summary counts it on its own row, and this line
+        # names it.  WARNING, so the summary's search hint finds it at any level.
+        logger.warning("skipping %s: %s", payload.display_path, unread_reason)
+        read_counters["files_password_protected"] = 1
+        unread_reason = None
     return TaskResult(
         task_id=task.task_id,
         task_type=task.task_type,
-        status="error" if item.unread_reason else "ok",
-        error_message=item.unread_reason,
+        status="error" if unread_reason else "ok",
+        error_message=unread_reason,
         findings=findings,
         counters={**read_counters, **result_counters(findings)},
         worker_pid=os.getpid(),

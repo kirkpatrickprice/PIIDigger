@@ -48,7 +48,9 @@ class XlsHandler:
             raise
         except Exception as exc:  # noqa: BLE001
             if isinstance(exc, xlrd.XLRDError) and str(exc) == _ENCRYPTED_MESSAGE:
-                source.report_unread("Excel workbook is password protected", nothing_read=True)
+                source.report_unread(
+                    "Excel workbook is password protected", nothing_read=True, kind="password_protected"
+                )
             elif source.size:
                 source.report_unread(f"Excel workbook could not be read: {type(exc).__name__}", nothing_read=True)
             return

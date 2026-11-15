@@ -8,6 +8,7 @@ import pytest
 from piidigger.filehandlers.docx import DocxHandler
 from piidigger.models.config import Config
 from piidigger.orchestration.sources import FilesystemItem
+from tests._ole import encrypted_office_file, ole_file
 
 
 def _read(path: Path) -> list[str]:
@@ -444,3 +445,28 @@ def test_docx_other_warnings_are_not_turned_into_failures(tmp_path: Path, monkey
         list(DocxHandler().read(item, Config()))
 
     assert item.unread_reason is None
+
+
+@pytest.mark.filehandlers
+def test_docx_password_protected_is_named_as_such(tmp_path: Path) -> None:
+    """Office saves an encrypted .docx as an OLE compound file, which used to read as a damaged one."""
+    path = tmp_path / "locked.docx"
+    path.write_bytes(encrypted_office_file())
+    item = FilesystemItem(path)
+
+    assert list(DocxHandler().read(item, Config())) == []
+    assert item.unread_reason == "Word document is password protected"
+    assert item.nothing_read
+    assert item.password_protected
+
+
+@pytest.mark.filehandlers
+def test_docx_other_compound_file_is_not_called_password_protected(tmp_path: Path) -> None:
+    """A legacy Office file under a .docx name is an OLE compound file too, with no EncryptedPackage."""
+    path = tmp_path / "legacy.docx"
+    path.write_bytes(ole_file({"WordDocument": b"\x00" * 16, "1Table": b"\x00" * 16}))
+    item = FilesystemItem(path)
+
+    assert list(DocxHandler().read(item, Config())) == []
+    assert item.unread_reason == "Word document could not be read"
+    assert not item.password_protected

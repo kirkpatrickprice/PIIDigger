@@ -233,7 +233,7 @@ class PdfHandler:
             except EmptyFileError:
                 pass
             except FileNotDecryptedError:
-                source.report_unread("PDF is password protected", nothing_read=not text_read)
+                source.report_unread("PDF is password protected", nothing_read=not text_read, kind="password_protected")
             except _PAGE_ERRORS as exc:
                 stopped = f" after page {pages_seen:,}" if pages_seen else ""
                 source.report_unread(f"PDF could not be read{stopped}: {_error_text(exc)}", nothing_read=not text_read)

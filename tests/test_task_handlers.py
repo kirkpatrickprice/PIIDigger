@@ -25,6 +25,7 @@ from piidigger.orchestration.worker import handle_enum_dir, handle_scan_file, re
 from piidigger.orchestration.worker._enum_dir import _is_excluded
 from tests._fs import make_dir_alias
 from tests._not_content_samples import appledouble_bytes, office_lock_bytes, xlsx_bytes
+from tests._ole import encrypted_office_file
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1321,6 +1322,27 @@ def test_scan_file_counts_a_pdf_with_no_text_without_failing_it(
     assert result.counters["pdfs_no_text"] == 1
     assert result.counters["files_scanned"] == 1
     assert f"no extractable text in PDF {path}" in caplog.text
+
+
+@pytest.mark.unit
+def test_scan_file_password_protected_is_counted_on_its_own(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """Not a failure: its own row, and one WARNING line holding the summary's search phrase."""
+    import logging
+
+    f = tmp_path / "locked.xlsx"
+    f.write_bytes(encrypted_office_file())
+    logger = logging.getLogger("tests.scan_file.password")
+
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = handle_scan_file(_scan_file_task(f, ext=".xlsx"), _make_ctx(tmp_path), logger)
+
+    assert result.status == "ok"
+    assert result.error_message is None
+    assert result.counters["files_password_protected"] == 1
+    assert result.counters["files_not_scanned"] == 1
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.WARNING, f"skipping {f}: Excel workbook is password protected")
+    ]
 
 
 @pytest.mark.unit

@@ -5,7 +5,7 @@ from io import BytesIO
 import openpyxl
 from openpyxl.cell.cell import MergedCell
 
-from piidigger.filehandlers._sharedfuncs import ContentBuffer
+from piidigger.filehandlers._sharedfuncs import ContentBuffer, is_encrypted_office_file
 from piidigger.models.config import Config
 
 # Ignore the UserWarning message from OpenPyXL that seem to pop up here and there
@@ -70,7 +70,11 @@ class XlsxHandler:
         except OSError:
             raise
         except Exception as exc:  # noqa: BLE001
-            if source.size:
+            if is_encrypted_office_file(source):
+                source.report_unread(
+                    "Excel workbook is password protected", nothing_read=True, kind="password_protected"
+                )
+            elif source.size:
                 source.report_unread(f"Excel workbook could not be read: {type(exc).__name__}", nothing_read=True)
             return
         try:

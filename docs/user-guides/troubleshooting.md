@@ -199,6 +199,14 @@ Run `piidigger inspect datatypes` to list the data types you can name here. For 
 
   The summary prints this pointer on macOS whenever it has an access-denied row. A message of `Permission denied` instead means ordinary file permissions, as on Linux.
 
+### The summary says files were password protected
+
+**Symptoms:** The summary's "Not fully scanned" block has a row such as `4  files password protected, not scanned`.
+
+**Explanation:** Those PDF, Word or Excel files are encrypted with a password, so their content can't be read. PIIDigger never asks for passwords. Search the log for `password protected` to find each one. Each line is logged at WARNING, as `skipping <path>: PDF is password protected` or the same for a Word document or Excel workbook.
+
+**Solutions:** Such a file may still hold PII. Open it with its password and check it by hand, or save an unprotected copy and scan that.
+
 ### A scan appears hung
 
 **Symptoms:** No progress-bar movement for a long time, and the log file shows nothing new.

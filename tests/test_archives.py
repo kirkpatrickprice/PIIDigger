@@ -3939,3 +3939,27 @@ def test_enum_archive_damaged_archive_has_no_error_kind(tmp_path: Path) -> None:
 
     assert result.status == "error"
     assert result.error_kind is None
+
+
+@pytest.mark.unit
+def test_scan_archive_password_protected_member_is_counted_on_its_own(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Not as an error too: the summary would count one file twice."""
+    from tests._ole import encrypted_office_file
+
+    archive = _build_archive(tmp_path, "zip", {"locked.docx": encrypted_office_file()})
+
+    logger = logging.getLogger("tests.archives.password")
+    ctx = _make_ctx(tmp_path)
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        result = handle_scan_archive_members(_scan_archive_task(archive, "locked.docx"), ctx, logger)
+    outcome = _ScanOutcome(result, [m for m in _drain(ctx) if isinstance(m, TaskProgress)])
+
+    [done] = outcome.done
+    assert done.error_message is None
+    assert outcome.status == "ok"
+    assert f"skipping archive member {archive}::locked.docx: Word document is password protected" in [
+        r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+    ]
+    assert done.counters == {"files_not_scanned": 1, "files_password_protected": 1, "results_found": 0}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import IO, Protocol, runtime_checkable
+from typing import IO, Literal, Protocol, runtime_checkable
 
 from piidigger.models.archive import MemberInfo
 from piidigger.models.config import Config
@@ -14,6 +14,11 @@ class DataHandler(Protocol):
     name: str
 
     def find_matches(self, text: str) -> dict[str, set[str]]: ...
+
+
+# Why a file was not read, when the scan summary counts that reason on its own
+# row.  "password_protected": the file is encrypted, and PIIDigger has no password.
+type UnreadKind = Literal["password_protected"]
 
 
 @runtime_checkable
@@ -44,8 +49,8 @@ class ScannableItem(Protocol):
     # the file as not fully scanned; raising would lose both the findings and
     # the content still to come.  Call it once per reason; all of them are kept.
     # nothing_read says none of the content could be read, so the file is not
-    # counted as scanned.
-    def report_unread(self, reason: str, *, nothing_read: bool = False) -> None: ...
+    # counted as scanned.  kind names a reason the summary counts on its own row.
+    def report_unread(self, reason: str, *, nothing_read: bool = False, kind: UnreadKind | None = None) -> None: ...
 
     # A file handler calls this when it read a document without error and found
     # no text, as with a scanned PDF.  It is not an error, but the document may

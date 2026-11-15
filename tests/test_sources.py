@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from piidigger.orchestration.sources import FilesystemItem
@@ -100,3 +102,24 @@ class TestFilesystemItem:
         finally:
             stream.close()
         assert calls == [1], "only the read that returned data counts as progress"
+
+
+@pytest.mark.unit
+def test_password_protected_only_when_nothing_was_read_and_a_password_is_the_only_reason(tmp_path: Path) -> None:
+    """Otherwise a partly read file would count as scanned and as not scanned, or lose its other failure."""
+    path = tmp_path / "f.pdf"
+    path.write_bytes(b"x")
+
+    def item_with(*reports: tuple[str, bool, bool]) -> FilesystemItem:
+        item = FilesystemItem(path)
+        for reason, nothing_read, password in reports:
+            item.report_unread(reason, nothing_read=nothing_read, kind="password_protected" if password else None)
+        return item
+
+    assert item_with(("PDF is password protected", True, True)).password_protected
+    assert not item_with(("PDF is password protected", False, True)).password_protected, "partly read"
+    assert not item_with(
+        ("2 of 9 PDF pages could not be read", False, False), ("PDF is password protected", True, True)
+    ).password_protected, "another reason too"
+    assert not item_with(("Word document could not be read", True, False)).password_protected
+    assert not FilesystemItem(path).password_protected

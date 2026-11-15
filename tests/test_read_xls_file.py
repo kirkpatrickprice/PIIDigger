@@ -175,3 +175,4 @@ def test_xls_password_protected_is_named_as_such(tmp_path: Path, monkeypatch: py
     assert list(XlsHandler().read(item, Config())) == []
     assert item.unread_reason == "Excel workbook is password protected"
     assert item.nothing_read
+    assert item.password_protected

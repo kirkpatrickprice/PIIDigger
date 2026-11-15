@@ -7,7 +7,7 @@ from io import BytesIO
 from docx2python import docx2python
 from docx2python.iterators import iter_paragraphs
 
-from piidigger.filehandlers._sharedfuncs import ContentBuffer
+from piidigger.filehandlers._sharedfuncs import ContentBuffer, is_encrypted_office_file
 from piidigger.models.config import Config
 
 warnings.filterwarnings("ignore", category=UserWarning, module="docx2python")
@@ -52,6 +52,17 @@ def _joined(parts: list[str]) -> str:
     return " and ".join(filter(None, (", ".join(parts[:-1]), parts[-1])))
 
 
+def _report_unreadable(source) -> None:  # source: ScannableItem
+    """Report a document no part of which could be read, naming a password when that is why.
+
+    For a file that failed to open as a zip: only then can it be an encrypted one.
+    """
+    if is_encrypted_office_file(source):
+        source.report_unread("Word document is password protected", nothing_read=True, kind="password_protected")
+    else:
+        source.report_unread("Word document could not be read", nothing_read=True)
+
+
 class DocxHandler:
     """FileHandler for DOCX files.
 
@@ -86,6 +97,7 @@ class DocxHandler:
             if source.size == 0:
                 return
             if _is_another_office_file(docx_content):
+                # It opened as a zip, so it is not an encrypted document.
                 source.report_unread("Word document could not be read", nothing_read=True)
                 return
             content_buffer: ContentBuffer = ContentBuffer(max_bytes=config.buffer.max_buffer_bytes)
@@ -108,7 +120,7 @@ class DocxHandler:
 
             text_part_unread = bool(unread)
             if len(unread) == len(_TEXT_PARTS):
-                source.report_unread("Word document could not be read", nothing_read=True)
+                _report_unreadable(source)
                 return
 
             try:

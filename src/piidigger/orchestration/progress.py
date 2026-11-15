@@ -549,6 +549,9 @@ class ProgressDisplay:
         if no_text := count("pdfs_no_text", 0):
             noun = _plural(no_text, "PDF", "PDFs")
             rows.append(_row(no_text, f"{noun} with no extractable text{_search_hint('no extractable text')}"))
+        if protected := count("files_password_protected", 0):
+            noun = _plural(protected, "file", "files")
+            rows.append(_row(protected, f"{noun} password protected, not scanned{_search_hint('password protected')}"))
         rejected = [(count(key, 0), words) for key, words in _REJECTED_MEMBERS]
         if total := sum(n for n, _ in rejected):
             detail = ", ".join(f"{n:,} {words}" for n, words in rejected if n)

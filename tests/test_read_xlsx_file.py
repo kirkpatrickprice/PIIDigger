@@ -1,6 +1,7 @@
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import openpyxl
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from piidigger.filehandlers.xlsx import XlsxHandler
 from piidigger.models.config import Config, SpreadsheetConfig
 from piidigger.orchestration.sources import FilesystemItem
+from tests._ole import encrypted_office_file, ole_file
 
 
 def _read(path: Path, config: Config | None = None) -> list[str]:
@@ -270,3 +272,129 @@ def test_xlsx_access_denied_still_reaches_the_worker(tmp_path: Path, monkeypatch
 
     with pytest.raises(PermissionError):
         list(XlsxHandler().read(item, Config()))
+
+
+@pytest.mark.filehandlers
+def test_xlsx_password_protected_is_named_as_such(tmp_path: Path) -> None:
+    """Office saves an encrypted .xlsx as an OLE compound file, which used to read as a damaged one."""
+    path = tmp_path / "locked.xlsx"
+    path.write_bytes(encrypted_office_file())
+    item = FilesystemItem(path)
+
+    assert list(XlsxHandler().read(item, Config())) == []
+    assert item.unread_reason == "Excel workbook is password protected"
+    assert item.nothing_read
+    assert item.password_protected
+
+
+@pytest.mark.filehandlers
+def test_xlsx_other_compound_file_is_not_called_password_protected(tmp_path: Path) -> None:
+    """A legacy Office file under a .xlsx name is an OLE compound file too, with no EncryptedPackage."""
+    path = tmp_path / "legacy.xlsx"
+    path.write_bytes(ole_file({"WordDocument": b"\x00" * 16, "1Table": b"\x00" * 16}))
+    item = FilesystemItem(path)
+
+    assert list(XlsxHandler().read(item, Config())) == []
+    assert item.unread_reason == "Excel workbook could not be read: BadZipFile"
+    assert not item.password_protected
+
+
+@pytest.mark.filehandlers
+def test_xlsx_damaged_compound_file_is_not_called_password_protected(tmp_path: Path) -> None:
+    path = tmp_path / "damaged.xlsx"
+    path.write_bytes(encrypted_office_file()[:600])  # the header and FAT, but no directory
+    item = FilesystemItem(path)
+
+    assert list(XlsxHandler().read(item, Config())) == []
+    assert item.unread_reason == "Excel workbook could not be read: BadZipFile"
+    assert not item.password_protected
+
+
+@pytest.mark.filehandlers
+def test_xlsx_encrypted_package_stored_in_pieces_is_found_without_copying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check reads the directory listing; locate_named_stream() would copy the whole stream."""
+    import xlrd.compdoc
+
+    def no_copy(*_a: object, **_k: object) -> None:
+        raise AssertionError("the stream itself must not be located")
+
+    monkeypatch.setattr(xlrd.compdoc.CompDoc, "locate_named_stream", no_copy)
+    path = tmp_path / "locked.xlsx"
+    path.write_bytes(encrypted_office_file())
+    item = FilesystemItem(path)
+
+    assert list(XlsxHandler().read(item, Config())) == []
+    assert item.password_protected
+
+
+class _CountingItem(FilesystemItem):
+    """A FilesystemItem whose stream counts the bytes read, and can fail after the signature."""
+
+    def __init__(self, path: Path, *, fail: bool = False) -> None:
+        super().__init__(path)
+        self.bytes_read = 0
+        self._fail = fail
+
+    def open_stream(self) -> Any:
+        item = self
+        stream = super().open_stream()
+
+        class Counting:
+            def read(self, size: int = -1) -> bytes:
+                if item._fail and item.bytes_read:
+                    raise OSError(5, "Input/output error")
+                data = stream.read(size)
+                item.bytes_read += len(data)
+                return data
+
+            def seek(self, offset: int, whence: int = 0) -> int:
+                return stream.seek(offset, whence)
+
+            def __enter__(self) -> Counting:
+                return self
+
+            def __exit__(self, *_exc: object) -> None:
+                stream.close()
+
+        return Counting()
+
+
+@pytest.mark.filehandlers
+def test_xlsx_encryption_check_reads_only_the_directory_not_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An encrypted workbook can be hundreds of MB; only its header, allocation table and directory are needed.
+
+    Counted at the disk: a buffered read would fetch 128 KiB for each sector.
+    """
+    import piidigger._progress_io as progress_io
+    import piidigger.filehandlers._sharedfuncs as shared
+
+    path = tmp_path / "locked.xlsx"
+    path.write_bytes(encrypted_office_file() + bytes(4 * 1024 * 1024))  # the encrypted data, as unused sectors
+    from_disk: list[int] = []
+    real_readinto = progress_io._ProgressRaw.readinto
+
+    def counting_readinto(self: Any, buffer: Any) -> int:
+        count = real_readinto(self, buffer)
+        from_disk.append(count)
+        return count
+
+    monkeypatch.setattr(progress_io._ProgressRaw, "readinto", counting_readinto)
+
+    assert shared.is_encrypted_office_file(FilesystemItem(path))
+    assert 0 < sum(from_disk) < 8 * 1024, from_disk
+
+
+@pytest.mark.filehandlers
+def test_xlsx_read_error_during_the_encryption_check_reaches_the_caller(tmp_path: Path) -> None:
+    """A dropped share is an OSError for the worker to report, not a guess that the file isn't encrypted."""
+    import piidigger.filehandlers._sharedfuncs as shared
+
+    path = tmp_path / "locked.xlsx"
+    path.write_bytes(encrypted_office_file())
+
+    with pytest.raises(OSError, match="Input/output error"):
+        shared.is_encrypted_office_file(_CountingItem(path, fail=True))

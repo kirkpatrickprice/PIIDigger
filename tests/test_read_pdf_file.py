@@ -60,6 +60,7 @@ def test_pdf_password_protected_is_reported(tmp_path: Path, algorithm: str) -> N
     assert list(PdfHandler().read(item, Config())) == []
     assert item.unread_reason == "PDF is password protected"
     assert item.nothing_read
+    assert item.password_protected
 
 
 @pytest.mark.filehandlers
