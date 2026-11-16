@@ -46,6 +46,7 @@ uv sync --locked --no-dev --extra build --no-editable --reinstall-package piidig
 # puts the script's directory first on its search path, and a root-level
 # piidigger.py shadows the piidigger package so none of it gets bundled.
 uv run --no-sync pyinstaller --noconfirm --onedir --distpath dist --name piidigger --collect-submodules wakepy \
+    --recursive-copy-metadata piidigger \
     src/piidigger/__main__.py
 
 ARTIFACT="${ARTIFACT_BASE}-linux-x86_64-manylinux2014.tar.gz"

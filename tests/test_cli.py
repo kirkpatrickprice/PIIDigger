@@ -71,11 +71,11 @@ def test_root_version_comes_from_the_package_not_its_metadata(monkeypatch: pytes
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(("commit", "expected_suffix"), [("abc1234", " (abc1234)"), (None, "")])
+@pytest.mark.parametrize(("commit", "expected_suffix"), [("abc1234", " (abc1234)"), ("", ""), (None, "")])
 def test_root_version_names_the_build_commit(
     monkeypatch: pytest.MonkeyPatch, commit: str | None, expected_suffix: str
 ) -> None:
-    """The commit comes from the _build_info.py a build writes; without one, just the version."""
+    """The commit comes from the _build_info.py a build writes; without one, or with an empty one, just the version."""
     import importlib
     import sys
     import types
@@ -84,7 +84,7 @@ def test_root_version_names_the_build_commit(
     import piidigger.cli.main
 
     # None in sys.modules makes the import raise ImportError, as when no build wrote the file.
-    fake = types.SimpleNamespace(COMMIT=commit) if commit else None
+    fake = types.SimpleNamespace(COMMIT=commit) if commit is not None else None
     monkeypatch.setitem(sys.modules, "piidigger._build_info", fake)
     reloaded = importlib.reload(piidigger.cli.main)
     try:

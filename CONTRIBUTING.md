@@ -157,7 +157,7 @@ uv run --no-project python .github/scripts/write_build_info.py
 # --reinstall-package: never reuse a cached build of piidigger, which could carry a stale _build_info.py
 UV_PROJECT_ENVIRONMENT=.venv-build uv sync --locked --no-dev --extra build --no-editable --reinstall-package piidigger
 UV_PROJECT_ENVIRONMENT=.venv-build uv run --no-sync pyinstaller --noconfirm --onedir --distpath dist \
-    --name piidigger --collect-submodules wakepy src/piidigger/__main__.py
+    --name piidigger --collect-submodules wakepy --recursive-copy-metadata piidigger src/piidigger/__main__.py
 tar -C dist -czf "dist/piidigger-$version-dev-$sha-macos-$(uname -m).tar.gz" piidigger
 
 uv run --no-project python .github/scripts/smoke_test.py --expect-commit "$sha" -- "$PWD/dist/piidigger/piidigger"

@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import logging
 import logging.handlers
 import math
 import os
+import platform
 import queue
 import re
+import sys
 import tempfile
 import threading
+import types
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
 
+import piidigger
 import piidigger.run as run_mod
+import piidigger.version
 from piidigger.models.config import Config, ResultsConfig
 from piidigger.orchestration import privacy as privacy_mod
 from piidigger.orchestration.coordinator import CoordinatorResult
@@ -33,6 +40,7 @@ from piidigger.run import (
     _build_sinks,
     _check_memory,
     _check_privacy,
+    _describe_build,
     _describe_platform,
     _emit_startup_info,
     _is_broad_folder,
@@ -45,6 +53,7 @@ from piidigger.run import (
     _stamped_log_file,
     run_scan,
 )
+from piidigger.version import installed_packages
 from tests._fs import make_dir_alias
 
 
@@ -677,6 +686,78 @@ def test_run_scan_ctrl_c_at_the_admin_prompt_exits_interrupted(tmp_path: Path, m
     assert lines[-2].endswith("admin check: queued before the CTRL-C"), "the listener was drained"
     assert lines[-1].endswith(f"run WARNING Exit code: {EXIT_INTERRUPTED}")
     assert not any(isinstance(h, logging.handlers.QueueHandler) for h in logging.getLogger().handlers)
+
+
+@pytest.mark.integration
+def test_run_scan_log_opens_with_the_build_even_when_the_run_stops_at_a_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("piidigger.run._check_admin", lambda config, logger: False)
+    config = _startup_config(tmp_path)
+
+    rc = run_scan(config)
+
+    assert rc == EXIT_ABORTED
+    log_text = _written_log(config.log_file).read_text()
+    assert log_text.splitlines()[0].endswith(f"run INFO {_describe_build()}")
+    assert "installed packages" not in log_text, "listed only for a DEBUG log"
+
+
+@pytest.mark.integration
+def test_run_scan_debug_log_lists_the_installed_packages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("piidigger.run._check_admin", lambda config, logger: False)
+    config = _startup_config(tmp_path).model_copy(update={"log_level": "DEBUG"})
+
+    run_scan(config)
+
+    second = _written_log(config.log_file).read_text().splitlines()[1]
+    assert second.endswith(f"run DEBUG installed packages: {', '.join(installed_packages())}")
+
+
+@pytest.mark.unit
+def test_installed_packages_names_each_runtime_dependency_with_its_version() -> None:
+    requirements = importlib.metadata.requires("piidigger") or []
+    runtime = [Requirement(r) for r in requirements]
+    wanted = [r.name for r in runtime if r.marker is None or (r.marker.evaluate({"extra": ""}))]
+    listed = {entry.rsplit(" ", 1)[0].lower(): entry for entry in installed_packages()}
+
+    for name in wanted:
+        entry = listed.get(name.lower(), "")
+        assert entry.lower() == f"{name} {importlib.metadata.version(name)}".lower(), name
+    assert "piidigger" not in listed
+
+
+@pytest.mark.unit
+def test_installed_packages_lists_a_package_once_under_any_spelling(monkeypatch: pytest.MonkeyPatch) -> None:
+    def dist(name: str, version: str) -> types.SimpleNamespace:
+        return types.SimpleNamespace(metadata={"Name": name}, version=version)
+
+    found = [
+        dist("typing_extensions", "4.15.0"),  # first on sys.path: the copy that is imported
+        dist("typing-extensions", "4.12.0"),
+        dist("Zope.Interface", "7.0"),
+        dist("PIIDigger", "2.0.0"),
+        dist("", "1.0"),  # metadata with no name
+    ]
+    monkeypatch.setattr(piidigger.version.importlib.metadata, "distributions", lambda: iter(found))
+
+    assert installed_packages() == ["typing_extensions 4.15.0", "Zope.Interface 7.0"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("frozen", "origin"), [(True, "bundle"), (False, "source")])
+def test_describe_build_names_the_version_commit_and_python(
+    monkeypatch: pytest.MonkeyPatch, frozen: bool, origin: str
+) -> None:
+    monkeypatch.setitem(sys.modules, "piidigger._build_info", types.SimpleNamespace(COMMIT="abc1234"))
+    if frozen:
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+    else:
+        monkeypatch.delattr(sys, "frozen", raising=False)
+
+    assert _describe_build() == (
+        f"PIIDigger {piidigger.__version__} (abc1234), Python {platform.python_version()} ({origin})"
+    )
 
 
 @pytest.mark.integration

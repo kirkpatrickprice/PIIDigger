@@ -158,7 +158,7 @@ jobs:
         # the piidigger package during PyInstaller analysis.
         run: >
           uv run --no-sync pyinstaller --noconfirm --onedir --distpath dist --name piidigger
-          --collect-submodules wakepy src/piidigger/__main__.py
+          --collect-submodules wakepy --recursive-copy-metadata piidigger src/piidigger/__main__.py
 
       # Unsigned/unnotarized build: macOS Gatekeeper will show an
       # "unidentified developer" warning. Code-signing needs a paid Apple

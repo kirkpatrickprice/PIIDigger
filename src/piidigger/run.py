@@ -41,6 +41,7 @@ from piidigger.orchestration.secure_delete import secure_rmtree
 from piidigger.orchestration.sleep import SleepStatus, prevent_sleep
 from piidigger.orchestration.worker import resolve_exclude_dirs
 from piidigger.outputhandlers import HANDLER_REGISTRY, CsvSink, JsonSink, TextSink
+from piidigger.version import full_version, installed_packages
 
 _ALL_FORMATS: frozenset[str] = frozenset(HANDLER_REGISTRY)
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
@@ -272,6 +273,15 @@ def _check_privacy(probe: PrivacyProbe | None, logger: logging.Logger) -> bool:
         return True
     logger.warning("privacy check: scan cancelled by the user")
     return False
+
+
+def _describe_build() -> str:
+    """Name this build and the Python running it, for the first line of the log.
+
+    A bundle carries its own Python, so its version identifies the bundle too.
+    """
+    origin = "bundle" if getattr(sys, "frozen", False) else "source"
+    return f"PIIDigger {full_version()}, Python {platform.python_version()} ({origin})"
 
 
 def _describe_platform() -> str:
@@ -559,6 +569,12 @@ def run_scan(config: Config) -> int:
     setup_warning_capture(log_queue)
     route_library_logs(log_queue)
     run_logger = build_worker_logger(log_queue, "run")
+    # First, so every log names the build that wrote it, even a run that stops at a prompt.
+    run_logger.info("%s", _describe_build())
+    # The logger passes everything and the file handler filters, so check the configured level:
+    # listing the packages reads every package's metadata, which only a DEBUG log wants.
+    if config.log_level.upper() == "DEBUG":
+        run_logger.debug("installed packages: %s", ", ".join(installed_packages()) or "none found")
 
     logical_cores = os.cpu_count() or 1
     physical_cores = psutil.cpu_count(logical=False) or logical_cores

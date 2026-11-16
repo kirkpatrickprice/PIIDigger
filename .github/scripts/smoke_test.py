@@ -51,6 +51,7 @@ def write_config(work: Path, scan_dir: Path) -> Path:
             [
                 'data_handlers = ["pan"]',
                 "admin_check = false",
+                'log_level = "DEBUG"',  # so the log lists the packages the bundle carries metadata for
                 f"log_file = {toml_str((work / 'logs' / 'piidigger.log').as_posix())}",
                 "[start_dirs]",
                 f"windows = [{start}]",
@@ -89,6 +90,20 @@ def found_files(results_json: Path) -> set[str]:
         # Archive members are reported with source_path set to the archive on disk.
         names.add(Path(str(record.get("source_path", ""))).name)
     return names
+
+
+# Runtime dependencies whose metadata no PyInstaller hook copies (pydantic's and
+# click's do), so a bundle lists them only if its build copied the metadata.
+_LISTED_PACKAGES = {"py7zr", "pypdf", "rich"}
+
+
+def _lists_packages(log_text: str) -> bool:
+    """True if the log's installed-packages line names each of _LISTED_PACKAGES."""
+    for line in log_text.splitlines():
+        if " installed packages: " in line:
+            names = {entry.split(" ", 1)[0].lower() for entry in line.split(": ", 1)[1].split(", ")}
+            return _LISTED_PACKAGES <= names
+    return False
 
 
 def main() -> int:
@@ -131,9 +146,16 @@ def main() -> int:
             if missing:
                 failures.append(f"no card numbers reported for: {', '.join(missing)}")
 
+        # A run stamps its log's name: piidigger-<timestamp>.log.
+        logs = sorted((work / "logs").glob("piidigger-*.log"))
+        log = logs[0] if len(logs) == 1 else None
+        if log is None:
+            failures.append(f"expected one log file in {work / 'logs'}, found {len(logs)}")
+        elif not _lists_packages(log.read_text(encoding="utf-8", errors="replace")):
+            failures.append("the DEBUG log does not list installed package versions; is the metadata bundled?")
+
         if failures:
-            log = work / "logs" / "piidigger.log"
-            if log.is_file():
+            if log is not None:
                 print("---- piidigger.log (last 40 lines) ----", file=sys.stderr)
                 print("\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]), file=sys.stderr)
 
