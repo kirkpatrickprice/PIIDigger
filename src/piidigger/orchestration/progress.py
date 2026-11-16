@@ -4,6 +4,7 @@ import collections
 import logging
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,58 @@ from piidigger.orchestration.counters import (
     unsupported_tally_text,
 )
 from piidigger.orchestration.escaping import terminal_text
+
+_logger = logging.getLogger(__name__)
+
+
+class _GuardedLive(Live):
+    """A Live display that logs a failed redraw and skips that frame instead of freezing.
+
+    Rich redraws from its own refresh thread.  An exception there ends the
+    thread: the screen freezes while the scan runs on, and the traceback is lost
+    too, because stderr is redirected through the same console.  Any Exception
+    is caught, not only UnicodeEncodeError: a MarkupError or a rendering bug
+    freezes the screen the same way.  Each failure is logged once, with its
+    traceback, so a bad frame repeated twice a second does not flood the log.
+    A failure is the exception's type and the line that raised it: the message
+    alone would differ on every frame (a UnicodeEncodeError names a position).
+    """
+
+    # Immutable, and replaced rather than changed, so instances never share it.
+    _failures_logged: frozenset[tuple[str, str, int | None]] = frozenset()
+
+    def refresh(self) -> None:
+        try:
+            super().refresh()
+        except Exception as exc:
+            # Nothing here may raise: an exception out of refresh() ends Rich's
+            # refresh thread, the freeze this class exists to prevent.  The log
+            # comes first, so a failed clear cannot hide the failure it follows.
+            self._log_once(exc, "a redraw failed, skipping that frame")
+            try:
+                self._drop_failed_frame()
+            except Exception as clear_exc:
+                self._log_once(clear_exc, "could not drop the failed frame; later frames may fail too")
+
+    def _drop_failed_frame(self) -> None:
+        # A write that failed leaves the frame in the console's buffer, and every
+        # later write sends it again, so even stop() would fail.  The buffer is
+        # private to Rich and local to this thread, the one whose write failed.
+        # test_progress checks that the display recovers, so a Rich change that
+        # breaks this fails a test.
+        del self.console._buffer[:]
+
+    def _log_once(self, exc: Exception, what: str) -> None:
+        """Log exc with its traceback the first time it happens; never raise."""
+        try:
+            where = traceback.extract_tb(exc.__traceback__)[-1] if exc.__traceback__ else None
+            failure = (type(exc).__name__, where.filename if where else "", where.lineno if where else None)
+            if failure not in self._failures_logged:
+                self._failures_logged = self._failures_logged | {failure}
+                _logger.error("progress display: %s: %s", what, exc, exc_info=exc)
+        except Exception:  # noqa: S110 — the log itself failed, as a stderr handler behind the console can
+            pass
+
 
 # Counter keys accumulated into self._counters (display values only).
 # tasks_completed / tasks_pending are handled separately for ETA and are
@@ -396,7 +449,7 @@ class ProgressDisplay:
         self._eta_row = eta_row
         self._eta_task_id = eta_row.add_task("ETA", total=None, label="--:--")
 
-        live = Live(
+        live = _GuardedLive(
             self._build_live_renderable(),
             console=self._console,
             refresh_per_second=2,

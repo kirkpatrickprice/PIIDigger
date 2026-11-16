@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
+from typing import Any
 
 import pytest
 
@@ -600,3 +602,131 @@ def test_summary_no_text_row_is_singular_for_one_pdf(monkeypatch: pytest.MonkeyP
     rows = [text for _, text in display.summary_lines()]
 
     assert '        1  PDF with no extractable text (search the log for "no extractable text")' in rows
+
+
+# ---------------------------------------------------------------------------
+# A redraw that fails is logged and skipped; the display keeps running
+# ---------------------------------------------------------------------------
+
+
+class _Swappable:
+    """A renderable whose content a test can change, or make raise, between frames."""
+
+    def __init__(self) -> None:
+        self.content: object = "good"
+
+    def __rich__(self) -> object:
+        if isinstance(self.content, Exception):
+            raise self.content
+        return self.content
+
+
+def _guarded_live(*, auto_refresh: bool = True) -> tuple[Any, _Swappable, Any]:
+    import io
+
+    from rich.console import Console
+
+    from piidigger.orchestration.progress import _GuardedLive
+
+    out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")  # strict, as a UTF-8 terminal is
+    console = Console(file=out, force_terminal=True, width=60)
+    frame = _Swappable()
+    live = _GuardedLive(frame, console=console, auto_refresh=auto_refresh, refresh_per_second=20, screen=True)
+    return live, frame, out
+
+
+def _wait_for(condition: Any, what: str, timeout: float = 10.0) -> None:
+    """Poll until condition() is true; a loaded CI runner may take a while to draw a frame."""
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, f"timed out waiting for {what}"
+        time.sleep(0.01)
+
+
+@pytest.mark.unit
+def test_refresh_thread_survives_a_frame_that_cannot_be_written(caplog: pytest.LogCaptureFixture) -> None:
+    """The refresh thread logs the failure and keeps drawing once the bad text is gone."""
+    from rich.text import Text
+
+    def failures() -> list[logging.LogRecord]:
+        return [r for r in caplog.records if "a redraw failed" in r.getMessage()]
+
+    live, frame, out = _guarded_live()
+    with caplog.at_level(logging.ERROR, logger="piidigger.orchestration.progress"):
+        live.start()
+        frame.content = Text("bad caf\udce9.txt")  # a surrogate the strict stream cannot encode
+        _wait_for(lambda: failures(), "the refresh thread to fail a frame")
+        frame.content = Text("good again")
+        _wait_for(lambda: b"good again" in out.buffer.getvalue(), "the next good frame")
+        # Rich's own thread, the one that died during the freeze, is still running.
+        assert live._refresh_thread is not None and live._refresh_thread.is_alive()
+        live.stop()  # sends no stale frame: the failed one was dropped
+
+    failures = failures()
+    assert len(failures) == 1, "one failure kind is logged once, not on every frame"
+    assert failures[0].exc_info is not None and failures[0].exc_info[0] is UnicodeEncodeError
+
+
+@pytest.mark.unit
+def test_each_kind_of_redraw_failure_is_logged_once(caplog: pytest.LogCaptureFixture) -> None:
+    """A rendering bug (here a MarkupError) is caught as well as an encoding failure."""
+    from rich.errors import MarkupError
+    from rich.text import Text
+
+    live, frame, _ = _guarded_live(auto_refresh=False)  # only the refresh() calls below draw
+    with caplog.at_level(logging.ERROR, logger="piidigger.orchestration.progress"):
+        live.start()
+        frame.content = MarkupError("closing tag '[/z]' has nothing to close")
+        live.refresh()
+        live.refresh()
+        frame.content = Text("bad caf\udce9.txt")
+        live.refresh()
+        frame.content = "good"
+        live.refresh()
+        live.stop()
+
+    kinds = [r.exc_info[0] for r in caplog.records if r.exc_info is not None]
+    assert kinds == [MarkupError, UnicodeEncodeError]
+
+
+@pytest.mark.unit
+def test_a_failure_while_recovering_from_a_redraw_still_does_not_escape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If logging the failure fails too, as a stderr handler behind the Live console can, the frame is skipped."""
+    import piidigger.orchestration.progress as progress_mod
+
+    def broken_log(*_args: object, **_kwargs: object) -> None:
+        raise UnicodeEncodeError("utf-8", "\udce9", 0, 1, "surrogates not allowed")
+
+    monkeypatch.setattr(progress_mod._logger, "error", broken_log)
+    live, frame, _ = _guarded_live(auto_refresh=False)
+    live.start()
+    frame.content = ValueError("render bug")
+
+    live.refresh()  # raises nothing
+
+    live.stop()
+
+
+@pytest.mark.unit
+def test_a_redraw_failure_is_logged_even_when_the_failed_frame_cannot_be_dropped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A Rich upgrade that renames Console._buffer must not make the failure silent.
+
+    Only the guard's own clear fails: Rich would use its new name internally.
+    """
+    from piidigger.orchestration.progress import _GuardedLive
+
+    def renamed(_live: object) -> None:
+        raise AttributeError("'Console' object has no attribute '_buffer'")
+
+    live, frame, _ = _guarded_live(auto_refresh=False)
+    live.start()
+    monkeypatch.setattr(_GuardedLive, "_drop_failed_frame", renamed)
+    frame.content = ValueError("render bug")
+    with caplog.at_level(logging.ERROR, logger="piidigger.orchestration.progress"):
+        live.refresh()  # raises nothing
+
+    live.stop()
+    logged = [r.exc_info[0] for r in caplog.records if r.exc_info is not None]
+    assert logged == [ValueError, AttributeError], "the redraw failure first, then the failed clear"
