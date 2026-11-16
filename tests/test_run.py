@@ -1136,8 +1136,12 @@ def test_privacy_probe_counts_eperm_only(
     assert "privacy check: listed 4 folder(s), 2 refused by macOS privacy controls" in caplog.messages
 
 
+# The probe only runs on macOS, but these tests run everywhere: compare against str(Path) so the
+# expected text uses the separator the message itself will print (backslashes on Windows).
+_MAIL, _DESKTOP, _DOCUMENTS = Path("/Users/x/Library/Mail"), Path("/Users/x/Desktop"), Path("/Users/x/Documents")
+
 _BLOCKED = PrivacyProbe(
-    blocked=(Path("/Users/x/Library/Mail"), Path("/Users/x/Desktop"), Path("/Users/x/Documents")),
+    blocked=(_MAIL, _DESKTOP, _DOCUMENTS),
     listed=40,
     capped=False,
 )
@@ -1167,8 +1171,8 @@ def test_privacy_check_prompts_on_a_terminal_and_follows_the_answer(
         assert _check_privacy(_BLOCKED, logger) is answer
 
     [question] = questions
-    assert "refused to list 3 folders (for example /Users/x/Library/Mail and /Users/x/Desktop)" in question
-    assert "/Users/x/Documents" not in question, "two examples at most"
+    assert f"refused to list 3 folders (for example {_MAIL} and {_DESKTOP})" in question
+    assert str(_DOCUMENTS) not in question, "two examples at most"
     assert "most likely" in question
     assert "System Settings › Privacy & Security › Full Disk Access" in question
     assert ("privacy check: scan cancelled by the user" in caplog.messages) is not answer
@@ -1179,11 +1183,11 @@ def test_privacy_check_says_at_least_when_the_probe_stopped_at_its_limit(monkeyp
     monkeypatch.setattr(run_mod.sys.stdin, "isatty", lambda: True, raising=False)
     questions: list[str] = []
     monkeypatch.setattr(run_mod, "_prompt_continue", lambda question: questions.append(question) or True)
-    capped = PrivacyProbe(blocked=(Path("/Users/x/Library/Mail"),), listed=1000, capped=True)
+    capped = PrivacyProbe(blocked=(_MAIL,), listed=1000, capped=True)
 
     _check_privacy(capped, logging.getLogger("tests.privacy"))
 
-    assert "refused to list at least 1 folder (for example /Users/x/Library/Mail)" in questions[0]
+    assert f"refused to list at least 1 folder (for example {_MAIL})" in questions[0]
 
 
 @pytest.mark.unit
