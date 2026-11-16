@@ -41,7 +41,7 @@ from piidigger.orchestration.secure_delete import secure_rmtree
 from piidigger.orchestration.sleep import SleepStatus, prevent_sleep
 from piidigger.orchestration.worker import resolve_exclude_dirs
 from piidigger.outputhandlers import HANDLER_REGISTRY, CsvSink, JsonSink, TextSink
-from piidigger.version import full_version, installed_packages
+from piidigger.version import full_version, install_kind, installed_packages
 
 _ALL_FORMATS: frozenset[str] = frozenset(HANDLER_REGISTRY)
 _UNSAFE_CHARS = re.compile(r"[^A-Za-z0-9._-]")
@@ -276,12 +276,8 @@ def _check_privacy(probe: PrivacyProbe | None, logger: logging.Logger) -> bool:
 
 
 def _describe_build() -> str:
-    """Name this build and the Python running it, for the first line of the log.
-
-    A bundle carries its own Python, so its version identifies the bundle too.
-    """
-    origin = "bundle" if getattr(sys, "frozen", False) else "source"
-    return f"PIIDigger {full_version()}, Python {platform.python_version()} ({origin})"
+    """Name this build, the Python running it and how it was installed, for the first line of the log."""
+    return f"PIIDigger {full_version()}, Python {platform.python_version()} ({install_kind()})"
 
 
 def _describe_platform() -> str:

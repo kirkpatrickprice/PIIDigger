@@ -53,7 +53,7 @@ from piidigger.run import (
     _stamped_log_file,
     run_scan,
 )
-from piidigger.version import installed_packages
+from piidigger.version import install_kind, installed_packages
 from tests._fs import make_dir_alias
 
 
@@ -745,19 +745,87 @@ def test_installed_packages_lists_a_package_once_under_any_spelling(monkeypatch:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(("frozen", "origin"), [(True, "bundle"), (False, "source")])
-def test_describe_build_names_the_version_commit_and_python(
-    monkeypatch: pytest.MonkeyPatch, frozen: bool, origin: str
-) -> None:
+def test_describe_build_names_the_version_commit_python_and_install_kind(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "piidigger._build_info", types.SimpleNamespace(COMMIT="abc1234"))
+    monkeypatch.setattr(run_mod, "install_kind", lambda: "embedded")
+
+    assert (
+        _describe_build()
+        == f"PIIDigger {piidigger.__version__} (abc1234), Python {platform.python_version()} (embedded)"
+    )
+
+
+class _FakeDistribution:
+    def __init__(self, site: Path, direct_url: str | None) -> None:
+        self._site = site
+        self._direct_url = direct_url
+
+    def locate_file(self, path: str) -> Path:
+        return self._site / path
+
+    def read_text(self, filename: str) -> str | None:
+        assert filename == "direct_url.json"
+        return self._direct_url
+
+
+_EDITABLE = '{"url": "file:///src", "dir_info": {"editable": true}}'
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("platform_name", "frozen", "pth", "imported_from", "direct_url", "kind"),
+    [
+        ("linux", True, False, "site", None, "pyinstaller"),  # Linux and macOS release tarballs
+        ("win32", False, True, "site", None, "embedded"),  # Windows release: python314._pth beside python.exe
+        ("linux", False, True, "site", None, "installed"),  # a ._pth means embedded Python on Windows only
+        ("linux", False, False, "site", None, "installed"),  # from PyPI: no direct_url.json
+        ("linux", False, False, "site", '{"url": "file:///dl/p.whl", "archive_info": {}}', "installed"),
+        ("linux", False, False, "site", '{"url": "file:///src", "dir_info": {}}', "source"),  # pip install .
+        ("linux", False, False, "site", '{"url": "https://g/p", "vcs_info": {"vcs": "git"}}', "source"),
+        ("linux", False, False, "src", _EDITABLE, "source"),  # editable: imported from the checkout's src
+        ("linux", False, False, "src", None, "source"),  # stray metadata for another copy
+        ("linux", False, False, "site", "not json", "installed"),
+    ],
+)
+def test_install_kind_tells_each_way_piidigger_is_run_apart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    platform_name: str,
+    frozen: bool,
+    pth: bool,
+    imported_from: str,
+    direct_url: str | None,
+    kind: str,
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform_name)
     if frozen:
         monkeypatch.setattr(sys, "frozen", True, raising=False)
     else:
         monkeypatch.delattr(sys, "frozen", raising=False)
+    python_dir = tmp_path / "python"
+    python_dir.mkdir()
+    if pth:
+        (python_dir / "python314._pth").write_text("python314.zip\n.\n")
+    monkeypatch.setattr(sys, "executable", str(python_dir / "python.exe"))
+    site = tmp_path / "site"
+    monkeypatch.setattr(piidigger, "__file__", str(tmp_path / imported_from / "piidigger" / "__init__.py"))
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda name: _FakeDistribution(site, direct_url))
 
-    assert _describe_build() == (
-        f"PIIDigger {piidigger.__version__} (abc1234), Python {platform.python_version()} ({origin})"
-    )
+    assert install_kind() == kind
+
+
+@pytest.mark.unit
+def test_install_kind_is_source_when_piidigger_is_not_installed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def not_installed(name: str) -> None:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "python.exe"))
+    monkeypatch.setattr(importlib.metadata, "distribution", not_installed)
+
+    assert install_kind() == "source"
 
 
 @pytest.mark.integration

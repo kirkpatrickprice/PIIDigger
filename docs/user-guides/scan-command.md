@@ -143,7 +143,7 @@ Rows with nothing to report are left out. So a clean run is just the first two l
 
 A scan with rows under "Not fully scanned" still exits with code 0, as long as it ran to the end. An incomplete results file is different: it exits with code 2, because the results you would read are not the results the scan found. A full-disk scan nearly always meets a locked file, so the exit code wouldn't tell you much. Check the summary or the log when you need to know what was missed.
 
-The same summary is written to the end of the log file, followed by one last line with the exit code, such as `Exit code: 0`. A non-zero exit code is logged at WARNING, so it stays in the log even with `log_level = "WARNING"`. The log's first line names the build that wrote it: the PIIDigger version, the commit a release was built from, and the Python version, such as `PIIDigger 2.0.0 (27f9442), Python 3.14.0 (bundle)`. With `log_level = "DEBUG"`, the next line lists every installed package with its version. The startup lines name each results file, one `Results file:` line per file, so a log on its own tells you where its results went. The log also lists the unsupported file types: common document types such as `.doc` and `.pptx` first, then up to 15 others, largest first. The totals, and anything skipped by design, are logged at INFO. Everything under "Not fully scanned", and an incomplete results file, is logged at WARNING. So is each line that names a folder or file refused with access denied, a timeout or the memory limit, or a password-protected file. Other failures are logged at ERROR. The per-file lines for undetected text encodings and PDFs with no extractable text are logged at INFO, so with `log_level = "WARNING"` the summary counts them but the log doesn't name them.
+The same summary is written to the end of the log file. See [The Log File](#the-log-file) for what else the log records.
 
 PIIDigger leaves a few things out of the counts altogether, because they hold no content of their own: symlinks, and the `$I` metadata files in a Windows Recycle Bin. The deleted files themselves are scanned. A Windows junction such as `Application Data` that refuses access isn't reported as a failure when its target is inside the folders being scanned, because the target is scanned under its real name. Any other folder that refuses access, including a folder-mounted volume, is reported. A junction that can be read is scanned like any other folder, even when it leads outside your start directories, so its contents may appear twice in your results. A junction pointing back at a folder the scan came through is skipped, which stops loops. Many folders that all link to each other can still be listed many times over, and findings repeat with each listing. Docker's and Podman's `merged` folders show the files of a container's layer folders, which are scanned too, so findings in a `merged` folder usually repeat. A way to skip them is tracked in [#53](https://github.com/kirkpatrickprice/PIIDigger/issues/53).
 
@@ -160,6 +160,57 @@ Results are written to the folder set by `[results].path` (default `piidigger-re
 | Text | `<hostname>-<YYYYMMDD-HHMMSS>.txt` | Pipe-separated: `source_path \| handler \| match_type \| value`, with `member=`, `depth=`, and `container=` tokens appended when the finding came from inside an archive. |
 
 Filenames are stamped with the hostname and start time, so repeated runs never overwrite each other's output.
+
+### The Log File
+
+Each run writes a log named for its start time, `logs/piidigger-<YYYYMMDD-HHMMSS>.log` by default, with the same timestamp as its results files. `log_file` and `log_level` set its name and how much it records. See [Advanced Configuration](advanced-configuration.md). The log reads in the same order as the scan: what ran, what happened along the way, and how it ended.
+
+#### At the start: what ran, and how
+
+```text
+2026-11-15 23:00:41,434 run INFO PIIDigger 2.0.0 (7e1531a), Python 3.14.10 (embedded)
+2026-11-15 23:00:41,436 run INFO admin check: running as administrator
+2026-11-15 23:00:41,467 run INFO temp workspace: C:\Users\jane\AppData\Local\Temp\piidigger_j9qqxf80
+2026-11-15 23:00:41,512 run INFO Platform: Windows 11, AMD64
+2026-11-15 23:00:41,512 run INFO Performance: balanced — 6 worker processes
+2026-11-15 23:00:41,512 run INFO Memory limit: 1,024 MB per worker (up to ~6.0 GB for 6 workers)
+2026-11-15 23:00:41,512 run INFO Scan directories: C:\, D:\
+2026-11-15 23:00:41,512 run INFO Log file: logs\piidigger-20261115-230041.log
+2026-11-15 23:00:41,512 run INFO Results file: piidigger-results\laptop-20261115-230041.csv
+2026-11-15 23:00:41,512 run INFO Sleep prevention: Active
+```
+
+- **The first line names the build.** It gives the PIIDigger version, the commit a release was built from, the Python version, and how PIIDigger was installed. Include this line when you report a problem.
+
+  | Last part | What ran |
+  |---|---|
+  | `embedded` | The Windows release: embedded Python running PIIDigger's own files |
+  | `pyinstaller` | The Linux or macOS release: a PyInstaller bundle |
+  | `installed` | A release installed with pip or uv. pip or uv chose the versions of the packages it uses |
+  | `source` | A copy built from a source checkout. Its code may differ from the commit shown |
+
+- **With `log_level = "DEBUG"`, the next line lists every installed package with its version.**
+- **Next come the checks before the scan:** administrator, memory and, on macOS, privacy.
+- **Then the settings the scan runs with.** There is one `Results file:` line per file, so a log on its own tells you where its results went.
+
+#### During the scan: what wasn't fully scanned
+
+Each line names one folder, file or archive. Its level says how much it matters:
+
+| Level | What it records |
+|---|---|
+| ERROR | A file, folder or archive that failed to read, such as a damaged archive or an unreadable PDF |
+| WARNING | Access denied, a timeout, the memory limit, a password-protected file, and archive members not scanned because they were encrypted, too large or unsafe |
+| INFO | Text whose encoding couldn't be detected, PDFs with no extractable text, and what was skipped by design: a file removed after it was listed, a junction scanned under its real name, macOS metadata, Office lock files, and archive members of unsupported types |
+| DEBUG | Each `exclude_dirs` entry that resolves to a different real path, and macOS metadata files on disk counted by their names |
+
+Each "Not fully scanned" row in the summary that ends `(search the log for "...")` gives the words its log lines hold. With `log_level = "WARNING"`, the summary still counts the INFO items, but the log doesn't name them.
+
+#### At the end: the summary and the exit code
+
+- **The log repeats the end-of-scan summary.** The totals and "Skipped by design" are logged at INFO. "Not fully scanned" and an incomplete results file are logged at WARNING.
+- **One more line lists the unsupported file types.** Common document types such as `.doc` and `.pptx` come first, then up to 15 others, largest first.
+- **The last line is the exit code**, such as `Exit code: 0`. A non-zero code is logged at WARNING, so even a `log_level = "WARNING"` log records how the run ended.
 
 ### Interpreting Results
 Here are a few notes about looking at the results:
