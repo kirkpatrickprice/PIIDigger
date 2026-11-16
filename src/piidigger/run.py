@@ -24,6 +24,7 @@ from rich.markup import escape
 from piidigger.models.config import Config
 from piidigger.orchestration.context import WorkerContext
 from piidigger.orchestration.coordinator import CoordinatorResult, run_coordinator, stop_workers
+from piidigger.orchestration.escaping import terminal_text
 from piidigger.orchestration.logging_setup import (
     build_worker_logger,
     log_after_stop,
@@ -241,7 +242,7 @@ def _privacy_warning(probe: PrivacyProbe) -> str:
     count = len(probe.blocked)
     at_least = "at least " if probe.capped else ""
     folders = "folder" if count == 1 else "folders"
-    examples = " and ".join(str(folder) for folder in probe.blocked[:_PRIVACY_EXAMPLES])
+    examples = " and ".join(terminal_text(str(folder)) for folder in probe.blocked[:_PRIVACY_EXAMPLES])
     return (
         f"macOS refused to list {at_least}{count} {folders} (for example {examples}), "
         "most likely because of its privacy protection.  They will not be scanned.\n"

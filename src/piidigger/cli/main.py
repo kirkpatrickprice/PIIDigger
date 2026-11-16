@@ -6,6 +6,7 @@ from piidigger import __version__
 from piidigger.cli.commands.config import config_group
 from piidigger.cli.commands.inspect import inspect_group
 from piidigger.cli.commands.scan import scan
+from piidigger.orchestration.escaping import escape_std_streams
 
 # Builds run .github/scripts/write_build_info.py, which writes the git-ignored _build_info.py.
 try:
@@ -28,6 +29,7 @@ except ImportError:
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """PIIDigger — scan for Personally Identifiable Information."""
+    escape_std_streams()
     if ctx.invoked_subcommand is None:
         ctx.invoke(scan)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -454,3 +455,24 @@ def test_scan_f_flag_errors_on_missing_file(tmp_path: Path) -> None:
     result = CliRunner().invoke(cli, ["scan", "-f", str(tmp_path / "missing.toml")])
     assert result.exit_code != 0
     assert "Error" in result.output
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows file names cannot hold control characters")
+def test_inspect_file_prints_a_control_character_in_the_name_escaped(tmp_path: Path) -> None:
+    output = _inspect_file(tmp_path, "notes.t\x1b[2J", b"hello\n", *_default_config(tmp_path))
+
+    assert "Extension: .t\\x1b[2j" in output
+    assert "\x1b" not in output
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(sys.platform != "linux", reason="only Linux file systems take a name that is not UTF-8")
+def test_inspect_file_prints_an_undecodable_name_escaped(tmp_path: Path) -> None:
+    fixture = os.fsdecode(os.path.join(os.fsencode(tmp_path), b"caf\xe9.t\xe9"))
+    Path(fixture).write_bytes(b"hello\n")
+
+    result = CliRunner().invoke(cli, ["inspect", "file", fixture, *_default_config(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "Extension: .t\\xe9" in result.output

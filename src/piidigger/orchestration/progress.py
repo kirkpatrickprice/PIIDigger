@@ -24,6 +24,7 @@ from piidigger.orchestration.counters import (
     UNSUPPORTED_BY_TYPE,
     unsupported_tally_text,
 )
+from piidigger.orchestration.escaping import terminal_text
 
 # Counter keys accumulated into self._counters (display values only).
 # tasks_completed / tasks_pending are handled separately for ETA and are
@@ -342,7 +343,7 @@ class ProgressDisplay:
 
     def set_startup_info(self, lines: list[str]) -> None:
         """Populate the static configuration panel.  No-op when not a TTY."""
-        self._startup_lines = list(lines)
+        self._startup_lines = [terminal_text(line) for line in lines]
         self._rebuild_live()
 
     def start(self) -> None:
@@ -470,7 +471,11 @@ class ProgressDisplay:
 
     def log_event(self, level: str, message: str) -> None:
         """Append an event and rebuild the events panel.  No-op when not a TTY."""
-        self._events.append((level, message))
+        # Escaped: a message is usually a path.  An escape sequence in a name would
+        # reach the terminal raw, and a name that is not valid UTF-8 cannot be
+        # encoded at all.  Rich draws from its refresh thread, so that
+        # UnicodeEncodeError killed the thread and froze the display.
+        self._events.append((level, terminal_text(message)))
         self._rebuild_live()
 
     def report_incomplete(
@@ -690,8 +695,9 @@ class ProgressDisplay:
             return
 
         for _, line in self.summary_lines():
+            text = terminal_text(line)  # a start directory or results file name is any text a path can hold
             if self._is_tty:
                 # A path is plain text, and must stay whole to be copied.
-                self._console.print(line, markup=False, emoji=False, soft_wrap=True)
+                self._console.print(text, markup=False, emoji=False, soft_wrap=True)
             else:
-                print(line, file=sys.stdout)  # noqa: T201 — intentional user-facing output
+                print(text, file=sys.stdout)  # noqa: T201 — intentional user-facing output

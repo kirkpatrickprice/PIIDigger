@@ -6,6 +6,7 @@ from pathlib import Path
 import click
 
 from piidigger.models.config import Config, generate_toml_template
+from piidigger.orchestration.escaping import terminal_text
 
 
 @click.group(name="config")
@@ -23,9 +24,9 @@ def generate(output: str) -> None:
         sys.exit(1)
     try:
         dest.write_text(generate_toml_template(), encoding="utf-8")
-        click.echo(f"Default config written to {output}")
+        click.echo(f"Default config written to {terminal_text(output)}")
     except OSError as exc:
-        click.echo(f"Error writing {output!r}: {exc}", err=True)
+        click.echo(f"Error writing {output!r}: {terminal_text(str(exc))}", err=True)
         sys.exit(1)
 
 
@@ -37,5 +38,5 @@ def validate(config_file: str) -> None:
         Config.from_toml(Path(config_file))
         click.echo(f"{config_file!r}: OK")
     except ValueError as exc:
-        click.echo(f"Error: {exc}", err=True)
+        click.echo(f"Error: {terminal_text(str(exc))}", err=True)
         sys.exit(1)

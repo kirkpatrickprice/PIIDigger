@@ -6,6 +6,7 @@ from pathlib import Path
 import click
 
 from piidigger.models.config import Config
+from piidigger.orchestration.escaping import terminal_text
 from piidigger.run import run_scan
 
 
@@ -49,7 +50,7 @@ def scan(
         try:
             config = Config.from_toml(p)
         except ValueError as exc:
-            click.echo(f"Error: {exc}", err=True)
+            click.echo(f"Error: {terminal_text(str(exc))}", err=True)
             sys.exit(1)
     else:
         # No file specified — silently check for piidigger.toml in the current directory.
@@ -58,7 +59,7 @@ def scan(
             try:
                 config = Config.from_toml(default_path)
             except ValueError as exc:
-                click.echo(f"Error: {exc}", err=True)
+                click.echo(f"Error: {terminal_text(str(exc))}", err=True)
                 sys.exit(1)
         else:
             config = Config.default()

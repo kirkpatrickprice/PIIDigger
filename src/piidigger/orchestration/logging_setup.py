@@ -7,7 +7,7 @@ import multiprocessing as mp
 from pathlib import Path
 from typing import Any
 
-from piidigger.orchestration.escaping import UTF8_ERRORS
+from piidigger.orchestration.escaping import UTF8_ERRORS, escape_unprintable
 
 # How long stop_listener() waits for queued log records to be written out.
 _LISTENER_STOP_TIMEOUT: float = 5.0
@@ -110,36 +110,6 @@ class LogQueueHandler(logging.handlers.QueueHandler):
 _TRACE_INDENT = "    "
 
 
-def _escape_char(char: str) -> str:
-    """A character as an escape: \\xNN, \\uNNNN or \\UNNNNNNNN.
-
-    As repr() writes it, except that \\xNN is used below 0x80 only.  A byte
-    that is not UTF-8 is always 0x80 or above, and the log writes it as \\xNN,
-    so from 0x80 on a character gets \\uNNNN where repr() would write \\xNN.
-    """
-    code = ord(char)
-    if code < 0x80:
-        return f"\\x{code:02x}"
-    return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
-
-
-def _escape_unprintable(text: str) -> str:
-    """text with each character repr() would escape written as an escape.
-
-    A file name can hold any character.  Written raw, a carriage return or an
-    escape sequence rewrites what a terminal shows, U+2028 splits the line for
-    str.splitlines(), and U+202E reverses the rest of it on screen.  Tab stays,
-    and so do surrogates: the file handler writes those as \\xNN, the byte of a
-    POSIX name that is not UTF-8.
-    """
-    if text.isprintable():
-        return text
-    return "".join(
-        char if char.isprintable() or char == "\t" or "\ud800" <= char <= "\udfff" else _escape_char(char)
-        for char in text
-    )
-
-
 class _SingleLineFormatter(logging.Formatter):
     """Writes each record's message on one line, so line-based tools read the log right.
 
@@ -151,7 +121,7 @@ class _SingleLineFormatter(logging.Formatter):
     included, can pass for one.
 
     Paths are logged as they are, not as reprs.  So any other character that
-    repr() would escape is written as an escape (see _escape_char), and a file
+    repr() would escape is written as an escape (see escaping.escape_unprintable), and a file
     name cannot rewrite the line.
     """
 
@@ -165,13 +135,13 @@ class _SingleLineFormatter(logging.Formatter):
             exc_text = self.formatException(record.exc_info)
         for trace in (exc_text, record.stack_info):
             if trace:
-                lines.extend(_TRACE_INDENT + _escape_unprintable(line) for line in trace.rstrip("\n").split("\n"))
+                lines.extend(_TRACE_INDENT + escape_unprintable(line) for line in trace.rstrip("\n").split("\n"))
         return "\n".join(lines)
 
     def formatMessage(self, record: logging.LogRecord) -> str:  # noqa: N802 — logging.Formatter API
         text = super().formatMessage(record)
         # Only line breaks are stripped: trailing spaces can be part of a name.
-        return _escape_unprintable(text.rstrip("\r\n").replace("\r\n", " ").replace("\n", " "))
+        return escape_unprintable(text.rstrip("\r\n").replace("\r\n", " ").replace("\n", " "))
 
 
 def start_listener(

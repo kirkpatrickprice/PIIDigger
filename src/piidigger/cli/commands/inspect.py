@@ -14,6 +14,7 @@ from piidigger.filehandlers.plaintext import handler as plaintext_handler
 from piidigger.getencoding import detect_file_encoding
 from piidigger.getmime import get_mime
 from piidigger.models.config import Config
+from piidigger.orchestration.escaping import terminal_text
 from piidigger.orchestration.worker import configured_archive_type, not_content_reason, original_beside
 
 
@@ -30,7 +31,7 @@ def _load_config(config_path: Path | None) -> tuple[Config, str]:
     try:
         return Config.from_toml(path), str(path)
     except (ValueError, OSError) as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(terminal_text(str(exc))) from exc
 
 
 def _not_scanned_reason(name: str, ext: str, mime: str | None, config: Config) -> str:
@@ -57,6 +58,11 @@ def _sibling_names(file_path: Path) -> set[str]:
         return set()
 
 
+def _echo(line: str) -> None:
+    """Echo a line that names a file: a name from disk may hold control characters."""
+    click.echo(terminal_text(line))
+
+
 @inspect_group.command(name="file")
 @click.argument("file_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
@@ -76,9 +82,9 @@ def inspect_file(file_path: Path, config_path: Path | None) -> None:
     if skipped is None and not file_path.is_file():
         skipped = "it is not a regular file"
     if skipped is not None:
-        click.echo(f"Extension: {ext.lower() or '(none)'}")
-        click.echo(f"Config:    {config_name}")
-        click.echo(f"Outcome:   Not scanned: {skipped}")
+        _echo(f"Extension: {ext.lower() or '(none)'}")
+        _echo(f"Config:    {config_name}")
+        _echo(f"Outcome:   Not scanned: {skipped}")
         return
 
     try:
@@ -91,7 +97,7 @@ def inspect_file(file_path: Path, config_path: Path | None) -> None:
         encoding = detect_file_encoding(file_path) if reads_as_text else None
         is_empty = file_path.stat().st_size == 0
     except OSError as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(terminal_text(str(exc))) from exc
 
     if not_content is not None:
         outcome = f"Not scanned: it is {not_content}"
@@ -106,13 +112,13 @@ def inspect_file(file_path: Path, config_path: Path | None) -> None:
     else:
         outcome = f"Scanned with {type(handler).__name__}"
 
-    click.echo(f"Extension: {ext.lower() or '(none)'}")
-    click.echo(f"MIME type: {mime or '(not detected)'}")
-    click.echo(f"Encoding:  {encoding or '(not detected)'}" if reads_as_text else "Encoding:  (not used)")
-    click.echo(f"Config:    {config_name}")
-    click.echo(f"Outcome:   {outcome}")
+    _echo(f"Extension: {ext.lower() or '(none)'}")
+    _echo(f"MIME type: {mime or '(not detected)'}")
+    _echo(f"Encoding:  {encoding or '(not detected)'}" if reads_as_text else "Encoding:  (not used)")
+    _echo(f"Config:    {config_name}")
+    _echo(f"Outcome:   {outcome}")
     if reads_as_text and mime in get_supported_mimes() and get_handler_for("", mime) is not plaintext_handler:
-        click.echo(f"Note:      content looks like {mime}, but a text extension is always read as text")
+        _echo(f"Note:      content looks like {mime}, but a text extension is always read as text")
 
 
 @inspect_group.command(name="archivetypes")

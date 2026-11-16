@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 
 import pytest
 
@@ -331,6 +332,45 @@ def test_events_panel_shows_messages_literally(message: str) -> None:
     with console.capture() as captured:
         console.print(display._build_events_table())
     assert message in captured.get()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("name", "drawn"),
+    [
+        # Not valid UTF-8; on Windows a surrogate is part of the UTF-16 name and is written \\udce9.
+        (
+            "/scan/caf\udce9.txt",
+            "/scan/caf\\xe9.txt" if sys.getfilesystemencodeerrors() == "surrogateescape" else "/scan/caf\\udce9.txt",
+        ),
+        ("/scan/a\x1b[2Jb.txt", "/scan/a\\x1b[2Jb.txt"),  # escape sequence
+        ("/scan/line\nbreak.txt", "/scan/line\\x0abreak.txt"),  # newline
+    ],
+)
+def test_display_draws_an_unsafe_file_name_escaped(name: str, drawn: str) -> None:
+    """A file name reaches a UTF-8 terminal escaped, never raw.
+
+    Rich draws the live display from its refresh thread.  A raw surrogate escape
+    raised UnicodeEncodeError there, killing the thread and freezing the screen.
+    A raw control character would reach the terminal itself.
+    """
+    import io
+
+    from rich.console import Console
+
+    display = ProgressDisplay()
+    display.set_startup_info([f"Scan directories: {name}"])
+    display.log_event("INFO", f"{name} — EMAIL: 1")
+
+    out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")  # strict, as a UTF-8 terminal is
+    console = Console(file=out, width=200, color_system=None)
+    console.print(display._build_config_panel())
+    console.print(display._build_events_table())
+    out.flush()
+
+    output = out.buffer.getvalue().decode("utf-8")  # type: ignore[attr-defined]
+    assert output.count(drawn) == 2
+    assert "\x1b[2J" not in output
 
 
 # ---------------------------------------------------------------------------

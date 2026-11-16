@@ -8,6 +8,8 @@ import warnings
 
 import click
 
+from piidigger.orchestration.escaping import escape_std_streams, terminal_text
+
 with contextlib.suppress(ImportError):
     import puremagic
 
@@ -41,14 +43,15 @@ def get_mime(filename: str) -> str | None:
 @click.argument("files", nargs=-1, type=click.Path())
 def main(files):
     """Report the detected MIME type for each given file."""
+    escape_std_streams()
     if not test_magic():
         click.echo("Mime detection library could not be loaded")
         return
     for arg in files:
         if os.path.exists(arg):
-            click.echo(f"Filename: {arg}\nMime: {get_mime(arg)}\n")
+            click.echo(f"Filename: {terminal_text(arg)}\nMime: {get_mime(arg)}\n")
         else:
-            click.echo(f"{arg}: File not found")
+            click.echo(f"{terminal_text(arg)}: File not found")
 
 
 if __name__ == "__main__":

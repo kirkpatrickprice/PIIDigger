@@ -1,8 +1,9 @@
-"""One way to make text writable to a UTF-8 file, shared by the log and the results files.
+"""One way to write a file name anywhere it leaves the process: log, results files and terminal.
 
 A POSIX file name that is not valid UTF-8 reaches Python as surrogate escapes,
 which strict UTF-8 cannot encode.  Escaping them the same way everywhere keeps
-a name looking the same in the log as in the results files.
+a name looking the same on screen, in the log and in the results files.  A name
+can also hold control characters, which the log and the terminal escape too.
 
 Each surrogate escape is written as the byte it stands for, so a name holding
 the byte 0xFF reads bad\\xff.txt: the name a user can find on disk.  On Windows,
@@ -13,9 +14,13 @@ written as \\uXXXX.
 from __future__ import annotations
 
 import codecs
+import io
 import sys
+import unicodedata
+from typing import TYPE_CHECKING
 
-from piidigger.models.results import ResultRecord
+if TYPE_CHECKING:  # only escaped_record() needs it; this module stays free of the models package at run time
+    from piidigger.models.results import ResultRecord
 
 # The codec error handler for any file that must take every string: pass it as
 # errors= to open() or str.encode().
@@ -40,6 +45,66 @@ def _escape(error: UnicodeError) -> tuple[str, int]:
 
 
 codecs.register_error(UTF8_ERRORS, _escape)
+
+
+def _escape_char(char: str) -> str:
+    """A character as an escape: \\xNN, \\uNNNN or \\UNNNNNNNN.
+
+    As repr() writes it, except that \\xNN is used below 0x80 only.  A byte
+    that is not UTF-8 is always 0x80 or above, and the log writes it as \\xNN,
+    so from 0x80 on a character gets \\uNNNN where repr() would write \\xNN.
+    """
+    code = ord(char)
+    if code < 0x80:
+        return f"\\x{code:02x}"
+    return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
+
+
+def escape_unprintable(text: str) -> str:
+    """text with each character repr() would escape written as an escape.
+
+    A file name can hold any character.  Written raw, a carriage return or an
+    escape sequence rewrites what a terminal shows, U+2028 splits the line for
+    str.splitlines(), and U+202E reverses the rest of it on screen.  Tab stays,
+    and so do surrogates: the encoder writes those as \\xNN (UTF8_ERRORS), the
+    byte of a POSIX name that is not UTF-8.  So does a space such as U+00A0 or
+    U+202F, which macOS puts in screenshot names: it moves nothing, and written
+    raw the name still matches what a file manager shows.
+    """
+    if text.isprintable():
+        return text
+    return "".join(char if _kept(char) else _escape_char(char) for char in text)
+
+
+def _kept(char: str) -> bool:
+    return (
+        char.isprintable()
+        or char == "\t"
+        or "\ud800" <= char <= "\udfff"
+        or unicodedata.category(char) == "Zs"  # space separators; line and paragraph separators are Zl and Zp
+    )
+
+
+def terminal_text(text: str) -> str:
+    """text made safe to draw on a terminal: no control characters, nothing it cannot encode.
+
+    A file name can rewrite the screen with an escape sequence or break a row
+    with a newline, and one that is not valid UTF-8 cannot be encoded at all.
+    """
+    return utf8_escaped(escape_unprintable(text))
+
+
+def escape_std_streams() -> None:
+    """Make stdout and stderr escape what they cannot encode instead of raising.
+
+    A file name that is not valid UTF-8 reaches every message that names it: a
+    CLI error, an inspect result, an exception's text.  Escaping at the stream
+    covers each of them, and the next one written, the way the log file does.
+    Only a real TextIOWrapper can be reconfigured; a test's stand-in is left as is.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(errors=UTF8_ERRORS)
 
 
 def utf8_escaped(text: str) -> str:
