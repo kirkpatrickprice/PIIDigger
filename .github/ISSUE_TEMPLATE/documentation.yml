@@ -1,0 +1,26 @@
+name: 📚 Documentation
+description: Report an issue or gap in the docs
+title: "[Docs]: "
+labels: ["docs"]
+body:
+  - type: input
+    id: page
+    attributes:
+      label: Affected page
+      description: Path or URL under docs/ (or README.md, CONTRIBUTING.md, etc.)
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's wrong or missing?
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggested-fix
+    attributes:
+      label: Suggested fix
+    validations:
+      required: false

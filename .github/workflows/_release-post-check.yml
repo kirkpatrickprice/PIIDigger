@@ -1,0 +1,77 @@
+name: Release - Post-release Check
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: The version just published to PyPI
+        required: true
+        type: string
+      commit:
+        description: Short commit ID its --version must report
+        required: true
+        type: string
+      python_version:
+        description: The major.minor in .python-version
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  # No token scopes: this job runs freshly resolved PyPI code.
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions: {}
+    steps:
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.13.6"
+          enable-cache: false
+
+      # PyPI's CDN can take a few minutes to serve a new upload, so retry for
+      # about 10 minutes. --refresh skips any cached "no such version" answer.
+      - name: Install from PyPI and check --version
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.commit }}
+          PYTHON_VERSION: ${{ inputs.python_version }}
+        run: |
+          expected="$VERSION ($COMMIT)"
+          for attempt in $(seq 1 20); do
+            if output="$(uvx --refresh --python "$PYTHON_VERSION" "piidigger@$VERSION" --version 2>&1)" \
+                && [[ "$output" == *"$expected"* ]]; then
+              echo "$output"
+              exit 0
+            fi
+            echo "Attempt $attempt: expected '$expected', got:"
+            echo "$output"
+            sleep 30
+          done
+          echo "::error::uvx piidigger@$VERSION --version never reported '$expected'"
+          exit 1
+
+  # One issue per failed run, however many OSes failed.
+  report:
+    needs: install
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write # gh issue create
+    steps:
+      - name: Open an issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >
+          gh issue create --repo "$GITHUB_REPOSITORY"
+          --title "Post-release check failed for v$VERSION"
+          --body "\`uvx piidigger@$VERSION --version\` did not report the released version and commit on at least one OS. Run: $RUN_URL"

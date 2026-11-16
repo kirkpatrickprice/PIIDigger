@@ -1,0 +1,374 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any, BinaryIO, cast
+
+from piidigger._progress_io import open_with_progress
+from piidigger.archivehandlers._dest_names import MemberDestNames
+from piidigger.exceptions import ArchiveReadError
+from piidigger.models.archive import MemberInfo
+
+if TYPE_CHECKING:
+    from py7zr.io import Py7zIO
+
+ARCHIVE_TYPE = "7z"
+HANDLES = {
+    "ext": [".7z"],
+}
+
+# The py7zr releases _fix_py7zr_read_ahead() was checked against.  pyproject.toml
+# pins py7zr to this release; test_7z_extract_does_not_read_ahead_of_output fails
+# if a different release still reads ahead.
+_PY7ZR_READ_AHEAD_FIX_VERSIONS: frozenset[str] = frozenset({"1.1.3"})
+
+
+def _first_coder_needs_input(decompressor: Any) -> bool:
+    """Whether the first coder in a py7zr chain has used up the input it was given.
+
+    lzma.LZMADecompressor and bz2.BZ2Decompressor report this as needs_input.
+    py7zr's LZMA1Decompressor wraps an LZMADecompressor without exposing it.
+    Any other coder (zstd, Deflate64, PPMd, copy, ...) cannot tell, so it is
+    treated as needing input, which is py7zr's own behavior.
+    """
+    if hasattr(decompressor, "needs_input"):
+        return bool(decompressor.needs_input)
+    inner = getattr(decompressor, "_decompressor", None)
+    return bool(getattr(inner, "needs_input", True))
+
+
+def _fix_py7zr_read_ahead() -> None:
+    """Stop py7zr from reading a solid folder's packed data faster than it decodes it.
+
+    SevenZipDecompressor._read_data() reads up to 1 MiB of packed input on every
+    decompress() call, whether or not the coder has used what it was last given.
+    Each call returns at most one member's output, so the unused input piles up
+    inside the LZMA or bzip2 decoder until it holds the whole packed folder: 250
+    MiB of growth for a 250 MiB folder, and the cause of workers going over
+    max_worker_memory_mb on large solid archives.  py7zr issue #626.
+
+    The replacement reads nothing while the first coder still has input to use,
+    and otherwise defers to py7zr.  Applied once, and only to a release listed in
+    _PY7ZR_READ_AHEAD_FIX_VERSIONS, so a newer py7zr is never patched blindly.
+    """
+    import py7zr
+    from py7zr import compressor
+
+    decompressor_class = compressor.SevenZipDecompressor
+    original = getattr(decompressor_class, "_read_data", None)
+    if (
+        py7zr.__version__ not in _PY7ZR_READ_AHEAD_FIX_VERSIONS
+        or original is None
+        or getattr(original, "_piidigger_read_ahead_fix", False)
+    ):
+        return
+
+    def _read_data(self: Any, fp: Any) -> bytes:
+        if not _first_coder_needs_input(self.chain[0]):
+            return b""
+        return original(self, fp)  # type: ignore[no-any-return]
+
+    _read_data._piidigger_read_ahead_fix = True  # type: ignore[attr-defined]
+    decompressor_class._read_data = _read_data  # type: ignore[method-assign]
+
+
+def _is_special(info: Any) -> bool:
+    """Return True if info is a symlink, junction or socket entry, not real file content.
+
+    py7zr never writes a socket through the writer factory, so a socket left in
+    a batch would never be extracted.
+    """
+    return bool(info.is_symlink or info.is_junction or info.is_socket)
+
+
+def _describe_error(exc: Exception, renamed: Mapping[str, str] | None = None, dest_dir: Path | None = None) -> str:
+    """A readable message for a py7zr failure, with its type name in front.
+
+    str() of a py7zr exception is often only its args.  A CRC failure would
+    read "(1469417445, 3892258996, 'a.txt')", so it gets a sentence instead.
+    py7zr raises a folder's own CRC check with no filename: a solid folder is
+    one compressed stream, so no single member is to blame.  renamed maps a
+    generated name back to the member's own (see _rename_targets()).
+    """
+    from py7zr.exceptions import CrcError  # py7zr is already loaded wherever this runs
+
+    if isinstance(exc, CrcError):
+        if exc.filename is None:
+            return "CrcError: CRC mismatch in the archive's compressed data"
+        name = (renamed or {}).get(exc.filename, exc.filename)
+        return f"CrcError: CRC mismatch for member {name!r}"
+    message = f"{type(exc).__name__}: {exc}"
+    return _real_names(message, renamed, dest_dir) if renamed and dest_dir is not None else message
+
+
+def _real_names(text: str, renamed: Mapping[str, str], dest_dir: Path) -> str:
+    """text with each generated file's full path in it replaced by the member's own name.
+
+    py7zr names a file by the path it built, dest_dir/<generated name>.  Only
+    that whole path is replaced: a bare "3.txt" or "dir/0.txt" in a message
+    may be some other entry, and a bare number may be an offset.
+    """
+    for name, member in renamed.items():
+        path = dest_dir / name
+        for form in {str(path), path.as_posix()}:
+            text = text.replace(form, member)
+    return text
+
+
+def _rename_targets(szf: Any, member_paths: Sequence[str], dest_dir: Path) -> dict[str, str]:
+    """Give each requested member its generated name inside py7zr, and return {generated: member}.
+
+    py7zr builds an output path from each target's name and checks it before
+    the writer factory is called.  On Windows, rebuilding dest_dir/notes/a:b.txt
+    part by part yields just "a:b.txt" (a drive-relative name), which fails
+    that check and ends the whole run.  A generated name passes on every
+    platform, and py7zr's path is then the file the writer opens.
+
+    The name is changed only in this open SevenZipFile's file list; py7zr uses
+    it for paths and error messages, never to decode.  A generated name that
+    matches another entry's name is passed over, so targets match only ours.
+    The first file entry for a path is taken, the one enumeration checked.
+    """
+    names = MemberDestNames(dest_dir, avoid={info.filename for info in szf.files})
+    wanted = set(member_paths)
+    renamed: dict[str, str] = {}
+    for info in szf.files:
+        member = info.filename
+        if member not in wanted or info.is_directory or _is_special(info):
+            continue
+        wanted.discard(member)
+        name = names.next_path(member).name
+        renamed[name] = member
+        info._file_info["filename"] = name
+        if not wanted:
+            break
+    return renamed
+
+
+class SevenZArchiveHandler:
+    def list_members(self, archive_path: Path, on_progress: Callable[[], None] | None = None) -> list[MemberInfo]:
+        """List members in stored order, with each member's offset inside its folder.
+
+        Reads py7zr's own file list (SevenZipFile.files) rather than list(),
+        because only the file list says which folder each member belongs to.  A
+        solid folder is one compressed stream, so a member's decompress_offset
+        is the uncompressed size of the members stored before it in that folder.
+        """
+        try:
+            import py7zr  # lazy: only loaded when a .7z file is encountered
+
+            _fix_py7zr_read_ahead()
+
+            with open_with_progress(archive_path, on_progress) as raw, py7zr.SevenZipFile(raw, mode="r") as szf:
+                all_encrypted = szf.needs_password()
+                members = []
+                folder_offsets: dict[int, int] = {}
+                for info in szf.files:
+                    size = info.uncompressed or 0
+                    folder = info.folder
+                    offset = folder_offsets.get(id(folder), 0) if folder is not None else 0
+                    if folder is not None:
+                        folder_offsets[id(folder)] = offset + size
+                    if _is_special(info):
+                        continue
+                    members.append(
+                        MemberInfo(
+                            name=info.filename,
+                            uncompressed_size=size,
+                            compressed_size=info.compressed or 0,
+                            is_dir=info.is_directory,
+                            is_encrypted=all_encrypted,
+                            decompress_offset=offset,
+                        )
+                    )
+                return members
+        except ImportError as exc:
+            raise ArchiveReadError(f"py7zr is required for .7z archives: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001 — py7zr exception hierarchy varies by version
+            raise ArchiveReadError(_describe_error(exc)) from exc
+
+    def extract_members(
+        self,
+        archive_path: Path,
+        member_paths: Sequence[str],
+        dest_dir: Path,
+        *,
+        on_extracted: Callable[[str, Path], None],
+        on_started: Callable[[str], None] | None = None,
+        on_failed: Callable[[str, str], None] | None = None,
+        on_progress: Callable[[], None] | None = None,
+        on_discard: Callable[[str, Path], None] | None = None,
+    ) -> None:
+        """Extract the requested members in one pass, handing each to on_extracted as it completes.
+
+        py7zr decompresses each solid folder from its start, so one call for the
+        whole run reaches every member with one pass over the folder, and py7zr
+        stops after the last requested member in it.
+
+        Each requested member is first renamed to its generated name (see
+        _rename_targets()).  py7zr then writes members through a WriterFactory.
+        _ScanWriterFactory writes each one to dest_dir/<generated name> and
+        calls on_extracted, with the member's own name, from the writer's
+        close().  py7zr calls close() only once the member's CRC has been
+        checked and before it starts on the next member.
+
+        The archive is passed to py7zr as an open file rather than a path.  That
+        keeps py7zr on one thread, so members finish strictly one at a time, in
+        stored order.
+
+        A member whose file the OS refuses to create goes to on_failed; its data
+        is decompressed and discarded so the run carries on.  A CRC or
+        decompression error ends the whole run instead: in a solid folder,
+        nothing after a corrupt member can be decoded.
+        """
+        renamed: dict[str, str] = {}
+        try:
+            import py7zr
+
+            _fix_py7zr_read_ahead()
+
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            with open_with_progress(archive_path, on_progress) as raw, py7zr.SevenZipFile(raw, mode="r") as szf:
+                renamed = _rename_targets(szf, member_paths, dest_dir)
+                factory = _ScanWriterFactory(dest_dir, renamed, on_started, on_extracted, on_failed, on_discard)
+                try:
+                    szf.extract(path=dest_dir, targets=list(renamed), factory=factory)
+                finally:
+                    factory.close_abandoned()
+                # Every target exists in the archive, so one py7zr never asked
+                # for means the rename did not take (a py7zr that keeps or
+                # matches names elsewhere).  Fail loudly rather than report the
+                # members as not found.
+                if missed := [renamed[name] for name in renamed if name not in factory.created]:
+                    raise RuntimeError(
+                        f"py7zr {py7zr.__version__} did not extract {len(missed)} requested member(s), "
+                        f"such as {missed[0]!r}; update _rename_targets()"
+                    )
+        except ImportError as exc:
+            raise ArchiveReadError(f"py7zr is required for .7z archives: {exc}") from exc
+        except ArchiveReadError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise ArchiveReadError(_describe_error(exc, renamed, dest_dir)) from exc
+
+
+class _ScanWriterFactory:
+    """py7zr WriterFactory that writes each member to disk and reports it when complete.
+
+    py7zr calls create() with the output path it computed for a member: dest_dir
+    joined with the member's generated name.  The generated name maps back to
+    the member's own name, and the file is opened at dest_dir/<generated name>.
+
+    Defined without subclassing py7zr's WriterFactory so this module does not
+    import py7zr until a .7z file is actually read; py7zr only calls create().
+    """
+
+    def __init__(
+        self,
+        dest_dir: Path,
+        renamed: Mapping[str, str],
+        on_started: Callable[[str], None] | None,
+        on_extracted: Callable[[str, Path], None],
+        on_failed: Callable[[str, str], None] | None,
+        on_discard: Callable[[str, Path], None] | None = None,
+    ) -> None:
+        self._dest_dir = dest_dir
+        self._on_discard = on_discard
+        self.created: set[str] = set()  # generated names py7zr asked for
+        self._renamed = renamed
+        self._on_started = on_started
+        self._on_extracted = on_extracted
+        self._on_failed = on_failed
+        self._open: list[_ScanWriter] = []
+
+    def create(self, filename: str) -> Py7zIO:
+        from py7zr.io import NullIO
+
+        name = PurePosixPath(filename).name
+        member = self._renamed.get(name)
+        if member is None:
+            # Only renamed entries are targets, so this means py7zr changed how
+            # it names its output.  Fail the run rather than drop the data.
+            raise RuntimeError(f"py7zr asked to write an unexpected file: {filename}")
+        self.created.add(name)
+        if self._on_started is not None:
+            self._on_started(member)
+        path = self._dest_dir / name
+        try:
+            writer = _ScanWriter(path, member, self._on_extracted)
+        except OSError as exc:
+            if self._on_failed is not None:
+                self._on_failed(member, str(exc))
+            return NullIO()  # type: ignore[no-untyped-call]  # py7zr leaves NullIO.__init__ unannotated
+        self._open.append(writer)
+        return cast("Py7zIO", writer)
+
+    def close_abandoned(self) -> None:
+        """Close any file a failed extraction left open, without reporting it.
+
+        py7zr skips close() when a member fails its CRC check, which would leave
+        the file handle open and the file undeletable on Windows.
+        """
+        for writer in self._open:
+            if writer.discard() and self._on_discard is not None:
+                self._on_discard(writer.member, writer.path)
+        self._open.clear()
+
+
+class _ScanWriter:
+    """Writes one member to disk; on close(), hands the finished file to on_extracted.
+
+    Duck-types py7zr's Py7zIO (write, read, seek, flush, size, close) rather
+    than subclassing it, for the same lazy-import reason as the factory.
+    """
+
+    def __init__(self, path: Path, member: str, on_extracted: Callable[[str, Path], None]) -> None:
+        self._path = path
+        self._member = member
+        self._on_extracted = on_extracted
+        self._file: BinaryIO = path.open("w+b")
+        self._done = False
+
+    def write(self, s: bytes | bytearray) -> int:
+        return self._file.write(s)
+
+    def read(self, size: int | None = None) -> bytes:
+        return self._file.read(-1 if size is None else size)
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        return self._file.seek(offset, whence)
+
+    def flush(self) -> None:
+        self._file.flush()
+
+    def size(self) -> int:
+        position = self._file.tell()
+        end = self._file.seek(0, 2)
+        self._file.seek(position)
+        return end
+
+    def close(self) -> None:
+        if self._done:
+            return
+        self._done = True
+        self._file.close()
+        self._on_extracted(self._member, self._path)
+
+    @property
+    def member(self) -> str:
+        return self._member
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def discard(self) -> bool:
+        """Close the file without handing it over; True if it was still open."""
+        if self._done:
+            return False
+        self._done = True
+        self._file.close()
+        return True
+
+
+handler = SevenZArchiveHandler()

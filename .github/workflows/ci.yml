@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --extra dev --extra test
+      - name: Lint (ruff)
+        run: uv run ruff check src/ tests/
+      # `ruff format --check` is not run yet: several files predate the current
+      # formatter and need a one-off `ruff format` pass first.
+      - name: Type check (mypy)
+        run: uv run mypy src/
+      - name: Run tests
+        run: >
+          uv run pytest tests/ -m "not slow and not e2e" -v
+          --cov=src/piidigger --cov-report=term-missing --cov-fail-under=80
+
+  slow-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          # The parallel `test` job saves this same cache key; saving here too
+          # only produces a "Unable to reserve cache" warning.
+          save-cache: false
+      - name: Install dependencies
+        run: uv sync --locked --extra dev --extra test
+      - name: Run slow/e2e tests
+        run: uv run pytest tests/ -m "slow or e2e" -v
+
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          # The `test` job saves this same cache key; saving here too only
+          # produces a "Unable to reserve cache" warning.
+          save-cache: false
+      - name: Install dependencies
+        run: uv sync --locked --extra docs
+      # --strict fails on any warning, such as a link to a missing page or heading.
+      - name: Build docs (strict)
+        run: uv run mkdocs build --strict
